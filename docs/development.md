@@ -42,6 +42,36 @@ Linux produces the `paseo-desktop` launcher and desktop entry. macOS produces
 Electron runtime and the checkout's built daemon, client, and renderer rather
 than downloading a published desktop release.
 
+## Devenv
+
+The repo's devenv uses `nixos-unstable` and includes Node.js 22, Python, `jj`,
+Beads, OpenSpec, CodeGraph, and GitNexus. These tools come from the
+`github:smdex/llm-agents.nix` input, which follows the repo's nixpkgs input.
+
+```bash
+devenv shell
+devenv build outputs.paseo
+devenv build outputs.desktop
+```
+
+`outputs.paseo` packages the `paseo` CLI and `paseo-server` daemon from
+`nix/package.nix`. `outputs.desktop` packages the Electron desktop app from
+`nix/desktop-package.nix`.
+
+### Code indexes
+
+Enter `devenv shell`, then build or refresh both local indexes after checkout
+changes:
+
+```bash
+codegraph init .
+gitnexus analyze .
+codegraph sync .
+```
+
+Index data stays in `.codegraph/` and `.gitnexus/`; both directories are local
+artifacts and are ignored by Git.
+
 ### PASEO_HOME
 
 `PASEO_HOME` is the directory that holds runtime state (agents, worktrees, workspace config, sockets, daemon log). Resolution rules:
