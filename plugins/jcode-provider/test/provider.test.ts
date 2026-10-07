@@ -423,6 +423,31 @@ test("native route identity pins billed credentials and preserves Grok Build rou
   ).toBe("openai-api:gpt-test");
 });
 
+test("canonical runtime profile identity respects provider casing and preserves ambiguous routes", () => {
+  const route = {
+    model: "glm-5.3",
+    provider: "Z.AI",
+    api_method: "openai-compatible:zai",
+    available: true,
+    detail: "",
+  };
+  const runtime = {
+    ev: "runtime_info" as const,
+    session_id: "saved-root",
+    provider: "z.ai",
+    auth_method: "api_key",
+    model: "glm-5.3",
+    routes: [route],
+  };
+  expect(runtimeConfig(runtime).model).toBe("zai:glm-5.3");
+  expect(
+    runtimeConfig({
+      ...runtime,
+      routes: [route, { ...route, api_method: "openai-compatible:other-profile" }],
+    }).model,
+  ).toBe("glm-5.3");
+});
+
 test("opaque CLI profile routes stay distinct and disabled without inventing authentication defaults", async () => {
   const { launch } = await launchHarness("opaque-catalog");
   const catalog = await readCatalog(launch);
