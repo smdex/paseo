@@ -1,0 +1,3 @@
+[User] Call skill_manage with action list once. If Paseo skills are listed reply exactly PASEO_SKILLS_PRESENT, otherwise PASEO_SKILLS_ABSENT. Do not load skills, read or change files, or use other tools.
+[Skill manage] skill_manage
+PASEO_SKILLS_PRESENT

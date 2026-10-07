@@ -1,0 +1,3 @@
+[User] Call the directly registered list_agents tool exactly once with valid arguments. Then reply exactly PASEO_SCOPED_TOOL_OK. Do not use other tools or edit files.
+[List agents] list_agents
+PASEO_SCOPED_TOOL_OK
