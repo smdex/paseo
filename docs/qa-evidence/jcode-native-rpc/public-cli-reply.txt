@@ -1,0 +1,2 @@
+[User] Reply exactly PASEO_PUBLIC_CLI_OK. Do not use tools or edit files.
+PASEO_PUBLIC_CLI_OK
