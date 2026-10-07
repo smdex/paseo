@@ -1,0 +1,5 @@
+[User] Reply exactly RELOAD_POLICY_BASELINE without tools or file changes.
+RELOAD_POLICY_BASELINE
+[User] Call list_agents once then reply exactly FIRST_RELOAD_TOOLS_OK. No file changes or other tools.
+[List agents] list_agents
+FIRST_RELOAD_TOOLS_OK
