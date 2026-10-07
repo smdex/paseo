@@ -1,0 +1,6 @@
+
+> paseo@0.11.0-beta.5 lint
+> oxlint --ignore-pattern .devenv/**
+
+Found 0 warnings and 0 errors.
+Finished in 1.8s on 4593 files with 177 rules using 32 threads.
