@@ -312,6 +312,13 @@ when `session.open.persistence` is absent. Resume the identified native session 
 Return an opaque persistence value in `session.opened` or `session.persistence`; Paseo stores it
 without inspecting it.
 
+For `session.list`, return each session's opaque `persistence`. Add optional `id` to expose its
+native identifier for listing and import. Paseo resolves a native identifier by an exact, unique
+match in the provider's session catalog before checking import ownership or attaching. Missing or
+ambiguous identifiers fail without attaching. Persistence remains the canonical stored identity,
+so native and opaque imports share the same owner and archived-session restore lane. Without `id`,
+listing and import keep using opaque handles.
+
 When `history` is `"replay"`, publish the native session's existing `timeline.item` snapshots before
 `session.ready`. Use `history: "skip"` to open without replaying old rows.
 
