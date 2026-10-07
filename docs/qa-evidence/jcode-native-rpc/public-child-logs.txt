@@ -1,0 +1,9 @@
+[User] Call the directly registered list_agents tool exactly once with valid arguments. Then reply exactly PASEO_SCOPED_TOOL_OK. Do not use other tools or edit files.
+[List agents] list_agents
+PASEO_SCOPED_TOOL_OK
+[User] Use the native swarm tool to spawn exactly one short child with model zai/glm-5.3-flash and low effort. Label it paseo-acceptance-child. Its entire task is: Reply CHILD_OK and do not use tools or edit files. Wait for that child to finish using native swarm controls, then reply exactly PASEO_PUBLIC_CHILD_OK. Do not create any other agents, use other tools, or edit files.
+[Swarm] swarm
+[Thought] Model zai/glm-5.3-flash fails auth via openrouter. The user's earlier agents used provider "jcode", model "zai:glm-5.3-flash". Maybe spawn with model "zai:glm-5.3-flash".
+[Swarm] swarm
+[Swarm] swarm
+PASEO_PUBLIC_CHILD_OK

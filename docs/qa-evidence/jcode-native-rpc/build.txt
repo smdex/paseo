@@ -31,17 +31,21 @@ generated src/generated/validation/ws-outbound.aot.ts from codegen/ws-outbound.c
 > @getpaseo/relay@0.11.0-beta.5 build
 > tsc -p tsconfig.json --incremental false
 
-[plugin] 
-[plugin] > paseo@0.11.0-beta.5 build:plugin
-[plugin] > npm run build --workspace=@getpaseo/plugin
-[plugin] 
+[highlight] 
+[highlight] > paseo@0.11.0-beta.5 build:highlight
+[highlight] > npm run build --workspace=@getpaseo/highlight
+[highlight] 
 [relay] 
 [relay] > paseo@0.11.0-beta.5 build:relay
 [relay] > npm run build --workspace=@getpaseo/relay
 [relay] 
+[plugin] 
+[plugin] > paseo@0.11.0-beta.5 build:plugin
+[plugin] > npm run build --workspace=@getpaseo/plugin
+[plugin] 
 [highlight] 
-[highlight] > paseo@0.11.0-beta.5 build:highlight
-[highlight] > npm run build --workspace=@getpaseo/highlight
+[highlight] > @getpaseo/highlight@0.11.0-beta.5 build
+[highlight] > tsc -p tsconfig.json --incremental false
 [highlight] 
 [relay] 
 [relay] > @getpaseo/relay@0.11.0-beta.5 build
@@ -51,12 +55,8 @@ generated src/generated/validation/ws-outbound.aot.ts from codegen/ws-outbound.c
 [plugin] > @getpaseo/plugin@0.11.0-beta.5 build
 [plugin] > tsc -p tsconfig.json --incremental false
 [plugin] 
-[highlight] 
-[highlight] > @getpaseo/highlight@0.11.0-beta.5 build
-[highlight] > tsc -p tsconfig.json --incremental false
-[highlight] 
-[relay] npm run build:relay exited with code 0
 [highlight] npm run build:highlight exited with code 0
+[relay] npm run build:relay exited with code 0
 [plugin] npm run build:plugin exited with code 0
 
 > @getpaseo/server@0.11.0-beta.5 build
