@@ -1,0 +1,5 @@
+{"phase":"created","terminalId":"524c508c-ca23-463c-aae5-a725229f0a31","workspaceId":"wks_0b03f5254364b811"}
+{"phase":"working","terminalId":"524c508c-ca23-463c-aae5-a725229f0a31","activity":{"state":"working","changedAt":1791340542486}}
+{"phase":"idle","terminalId":"524c508c-ca23-463c-aae5-a725229f0a31","activity":{"state":"idle","attentionReason":"finished","changedAt":1791340545300}}
+PASS real CLI Jcode hooks session_start working then turn_end idle through shipped DaemonClient
+{"phase":"owned-terminal-killed","terminalId":"524c508c-ca23-463c-aae5-a725229f0a31","result":{"terminalId":"524c508c-ca23-463c-aae5-a725229f0a31","success":true}}
