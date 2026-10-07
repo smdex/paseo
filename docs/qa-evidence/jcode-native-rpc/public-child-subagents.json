@@ -1,0 +1,21 @@
+{
+  "requestId": "6f06815d-afc0-46d5-8ca5-7a49628c7e77",
+  "parentAgentId": "52767c07-ff80-4428-8a7f-41bc5db192c2",
+  "subagents": [
+    {
+      "id": "jcode-child:session_cactus_1791339720471_e3f65064c1c1748f:cd1ad412-d3a9-425e-875c-17e2b988cb14",
+      "parentAgentId": "52767c07-ff80-4428-8a7f-41bc5db192c2",
+      "provider": "jcode",
+      "title": "Reply CHILD_OK and do not use tools or edit files.",
+      "description": "paseo-acceptance-child",
+      "status": "completed",
+      "createdAt": "2026-10-07T02:22:02.179Z",
+      "updatedAt": "2026-10-07T02:22:02.197Z",
+      "toolCallId": null,
+      "cwd": "/home/smaximov/src/paseo",
+      "subtitle": null,
+      "parentSubagentId": null
+    }
+  ],
+  "error": null
+}

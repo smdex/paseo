@@ -1,0 +1,30 @@
+{
+  "Id": "238ebe0e-5d6d-407a-b19d-b5a3441b4dea",
+  "Name": "Paseo public CLI Jcode acceptance 2026-10-07",
+  "Provider": "jcode",
+  "Model": "zai:glm-5.3-flash",
+  "Thinking": "low",
+  "Status": "idle",
+  "Archived": false,
+  "ArchivedAt": null,
+  "Mode": "default",
+  "Cwd": "/home/smaximov/src/paseo",
+  "CreatedAt": "2026-10-07T02:15:34.467Z",
+  "UpdatedAt": "2026-10-07T02:15:40.038Z",
+  "LastUsage": {
+    "InputTokens": 36674,
+    "OutputTokens": 8,
+    "CachedTokens": 0,
+    "CostUsd": 0
+  },
+  "Capabilities": {
+    "Streaming": true,
+    "Persistence": true,
+    "DynamicModes": true,
+    "McpServers": false
+  },
+  "AvailableModes": [],
+  "PendingPermissions": [],
+  "Worktree": null,
+  "ParentAgentId": null
+}

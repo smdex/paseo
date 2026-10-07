@@ -1,6 +1,6 @@
 # Jcode
 
-[Jcode](https://github.com/1jehuang/jcode) is an open-source coding agent. Paseo's bundled `jcode` provider uses its native RPC API instead of ACP. It supports session import and history, models, reasoning effort and swarm choices, commands, subagents, and active-turn steering. Paseo also supplies terminal activity hooks, shared skills, and caller-scoped tools.
+[Jcode](https://github.com/1jehuang/jcode) is an open-source coding agent. Paseo's bundled `jcode` provider uses its native RPC API instead of ACP. It supports session import and history, models, reasoning effort and swarm choices, commands, subagents, and active-turn steering. Paseo also supplies terminal activity hooks, shared skills, and caller-scoped tools. The tools are injected only when the host's **Orchestration > Enable Paseo tools** setting is on.
 
 ## Terminal activity hooks
 
