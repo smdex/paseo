@@ -76,6 +76,19 @@ OpenCode uses a server plugin instead of command hooks. Both generations discove
 | `permission.asked`                                          | Both       | needs-input |
 | `permission.replied`                                        | Both       | running     |
 
+Jcode hook mapping (observer hooks in `~/.jcode/config.toml`, `JCODE_HOME` override):
+
+- `session_start`, `post_tool` → `running`
+- `turn_end`, `session_end` → `idle`
+
+Jcode has no notification-style event, so no `needs-input` mapping exists. Jcode executes
+hook commands directly without a shell, so the generated command has no POSIX/Windows gate;
+the `PASEO_TERMINAL_ID` check lives inside `paseo hooks` itself and the daemon's prepended
+CLI directory resolves `paseo` in terminal `PATH`. Jcode allows one command per hook key, so
+Paseo never claims a key the user already set. The TOML `[hooks]` editor is fail-closed: it
+only edits its own exact-value lines and leaves any file it cannot fully model (CRLF,
+multi-line strings, alternative hooks-table spellings) untouched.
+
 The plugin translates both event contracts into the existing Paseo hook events. OpenCode 2 disposes its event subscription when the plugin unloads.
 
 The daemon maps hook states onto terminal activity like an agent lifecycle plus unread attention: `running` → `state: working`, `idle` → `state: idle`, and `needs-input` → `state: idle` with `attentionReason: needs_input`. A `working` → `idle` transition records `state: idle` with `attentionReason: finished` until the user focuses that terminal; plain idle terminals still contribute no workspace status.
@@ -100,6 +113,7 @@ When enabled, Paseo installs provider hooks globally:
 
 - Claude hooks are written to `~/.claude/settings.json` (or `CLAUDE_CONFIG_DIR/settings.json` when that override is set).
 - Codex hooks are written to `~/.codex/hooks.json` (or `CODEX_HOME/hooks.json` when that override is set). Codex supports a native `commandWindows`, so each Paseo hook includes both POSIX and Windows commands. Non-managed Codex hooks are trust-gated by Codex; users may see Codex's hook review prompt before the hook runs.
+- Jcode hooks are written to the `[hooks]` table of `~/.jcode/config.toml` (or `JCODE_HOME/config.toml` when that override is set). Jcode runs one command per key with no shell, so Paseo only claims keys that are unset and matches its own lines by exact value. The TOML editor is fail-closed: a config it cannot fully model (CRLF, multi-line strings, alternative hooks-table spellings) is left untouched.
 - OpenCode gets a self-contained plugin at `$XDG_CONFIG_HOME/opencode/plugins/paseo-terminal-activity.js` (or `~/.config/opencode/plugins/paseo-terminal-activity.js` when XDG is unset; `OPENCODE_CONFIG_DIR` still wins when set).
 
 Installation is marker-based/idempotent for config hooks and exact-file/idempotent for the OpenCode plugin. Paseo preserves user hooks, removes only its own marker-matched command hooks, and leaves hooks installed across daemon shutdown. Outside a Paseo terminal they are inert because the command or plugin is gated on `PASEO_TERMINAL_ID`.
