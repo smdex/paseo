@@ -1288,6 +1288,7 @@ class PluginAgentSession implements AgentSession {
   private readonly childSnapshots = new Map<string, Map<string, TimelineTextSnapshot>>();
   private unsubscribe: (() => void) | null = null;
   private currentTurnId: string | null = null;
+  private latestAssistantText = "";
   private closed = false;
   private replay: {
     persistence: ProviderPersistence;
@@ -1350,6 +1351,8 @@ class PluginAgentSession implements AgentSession {
       startTurn: (nextPrompt, nextOptions) => this.startTurn(nextPrompt, nextOptions),
       subscribe: (callback) => this.subscribe(callback),
       getSessionId: () => this.id,
+      reduceFinalText: ({ current, item }) =>
+        item.type === "assistant_message" ? this.latestAssistantText : current,
     });
   }
 
@@ -1637,6 +1640,7 @@ class PluginAgentSession implements AgentSession {
   private translateTimeline(
     event: Extract<ProviderEvent, { type: "timeline.item" }>,
   ): AgentStreamEvent[] {
+    if (event.item.type === "assistant_message") this.latestAssistantText = event.item.text;
     const item = mapTimelineItem(event.item, this.timelineSnapshots, this.revertTokens);
     return item
       ? [
