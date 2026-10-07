@@ -1,0 +1,14 @@
+CREATED {"nativeId":"session_bird_1791340637456_8fde66425a09ab32","agentId":"81069740-e08a-41b6-8824-16abe4656bf4","status":"created","provider":"jcode","cwd":"/home/smaximov/src/paseo","title":null}
+DUPLICATE_REJECTED {
+  "error": {
+    "code": "AGENT_IMPORT_FAILED",
+    "message": "Failed to import agent: Provider session is already imported: plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_bird_1791340637456_8fde66425a09ab32\"}}"
+  }
+}
+DUPLICATE_REJECTED {
+  "error": {
+    "code": "AGENT_IMPORT_FAILED",
+    "message": "Failed to import agent: Provider session is already imported: plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_bird_1791340637456_8fde66425a09ab32\"}}"
+  }
+}
+PASS public raw creation and raw/opaque duplicate rejection

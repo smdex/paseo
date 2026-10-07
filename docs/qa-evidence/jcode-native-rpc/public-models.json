@@ -1,0 +1,424 @@
+[
+  {
+    "model": "gpt-5.6-pro[web] (OpenAI, chatgpt-web)",
+    "id": "gpt-5.6-pro[web]",
+    "description": "logged-in Firefox ChatGPT session",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "codex-auto-review (OpenAI, openai-oauth)",
+    "id": "openai-oauth:codex-auto-review",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-5.5 (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-5.5",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-5.6-luna (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-5.6-luna",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-5.6-sol (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-5.6-sol",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-5.6-terra (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-5.6-terra",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-6-astra (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-6-astra",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-6-luna (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-6-luna",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-6-sol (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-6-sol",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-6.1-sol (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-6.1-sol",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gpt-reserve (OpenAI, openai-oauth)",
+    "id": "openai-oauth:gpt-reserve",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "gemini-2.5-pro (Gemini, code-assist-oauth)",
+    "id": "gemini-2.5-pro",
+    "description": "",
+    "thinkingOptionIds": [],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none"
+  },
+  {
+    "model": "gpt-6.1-sol (Jcode default route)",
+    "id": "gpt-6.1-sol",
+    "description": "",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-4.5 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-4.5",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-4.5-air (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-4.5-air",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-4.6 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-4.6",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-4.7 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-4.7",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5-turbo (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5-turbo",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5.1 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5.1",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5.2 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5.2",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5.3 (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5.3",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5.3-flash (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5.3-flash",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  },
+  {
+    "model": "glm-5.3-flashx (Z.AI, openai-compatible:zai)",
+    "id": "zai:glm-5.3-flashx",
+    "description": "https://api.z.ai/api/coding/paas/v4",
+    "thinkingOptionIds": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "swarm",
+      "swarm-deep"
+    ],
+    "defaultThinkingOptionId": null,
+    "thinkingOptions": "none, minimal, low, medium, high, xhigh, max, swarm, swarm-deep"
+  }
+]
