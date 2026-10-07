@@ -466,6 +466,9 @@ Validate and apply it inside the provider; core does not know your option shape.
 See [provider options](custom-providers.md#provider-options) for configuration and
 merge semantics.
 
+For daemon-owned runtime tools, use the negotiated
+[native Paseo tools contract](../public-docs/plugins/providers.md#native-paseo-tools).
+
 Agent refresh closes the current provider session and opens it again with current configuration and
 persistence. Re-read credentials and provider-owned configuration on `session.open`; consume the
 daemon launch from `connect` and the per-session env and MCP servers from `session.open`. There is
