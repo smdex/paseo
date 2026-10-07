@@ -1,0 +1,10 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.7 [39m[90m/home/smaximov/src/paseo[39m
+
+ [32m✓[39m plugins/jcode-provider/test/provider.test.ts [2m([22m[2m17 tests[22m[2m)[22m[33m 1633[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m17 passed[39m[22m[90m (17)[39m
+[2m   Start at [22m 04:02:06
+[2m   Duration [22m 2.31s[2m (transform 243ms, setup 0ms, import 439ms, tests 1.63s, environment 0ms)[22m
+
