@@ -523,6 +523,9 @@ Providers add an optional veto to daemon baseline cleanup through the per-sessio
 The daemon calls the same `AgentSession.canStopRuntime()` interface for built-ins and plugins;
 the plugin bridge transports that query through the existing provider request/event protocol.
 
+For daemon-owned runtime tools, use the negotiated
+[native Paseo tools contract](../public-docs/plugins/providers.md#native-paseo-tools).
+
 Agent refresh closes the current provider session and opens it again with current configuration and
 persistence. Re-read credentials and provider-owned configuration on `session.open`; consume the
 daemon launch from `connect` and the per-session env and MCP servers from `session.open`. There is
