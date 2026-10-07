@@ -3,4 +3,4 @@
 > oxlint --ignore-pattern .devenv/**
 
 Found 0 warnings and 0 errors.
-Finished in 1.8s on 4593 files with 177 rules using 32 threads.
+Finished in 1.6s on 4593 files with 177 rules using 32 threads.
