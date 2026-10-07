@@ -21,6 +21,7 @@ provider icon map. You do not need a core manifest entry or provider factory.
 | ----------- | ------------------------------------------ | ---------------------------------------------------------------- |
 | Antigravity | Installed `agy` CLI                        | [Antigravity](../public-docs/supported-providers.md#antigravity) |
 | Muse Code   | MSP over one `muse serve` host per session | [Muse Code](../public-docs/muse-code.md)                         |
+| Jcode       | Native `jcode api-bridge --stdio` RPC      | [Jcode](../public-docs/jcode.md)                                 |
 
 ## Provider-native session options
 
