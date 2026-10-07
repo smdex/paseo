@@ -553,6 +553,7 @@ export interface ListImportableSessionsOptions {
 
 export interface ImportableProviderSession {
   providerHandleId: string;
+  canonicalProviderHandleId?: string;
   cwd: string;
   title: string | null;
   firstPromptPreview: string | null;
@@ -787,6 +788,7 @@ export interface AgentClient {
     input: ImportProviderSessionInput,
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
+  resolveImportSessionHandle?(input: ImportProviderSessionInput): Promise<string>;
   /**
    * Check availability in the catalogue target when supplied (CLI binary is installed).
    * Returns true if available, false otherwise.
