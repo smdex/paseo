@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 import { z } from "zod";
 import { Connection } from "../server/connection.js";
-import { attachedSchema, sessionsSchema } from "../server/wire.js";
+import { attachedSchema, JcodeError, sessionsSchema } from "../server/wire.js";
 import { readCatalog, routeModel, runtimeConfig, thinkingOptions } from "../server/catalog.js";
 import { Session } from "../server/session.js";
 import { createJcodeProvider } from "../server/provider.js";
 import {
   PROVIDER_CAPABILITIES,
+  ProviderEventSchema,
   type ProviderEvent,
   type ProviderInput,
   type ProviderSessionConfig,
@@ -19,6 +20,17 @@ import {
 const connections: Connection[] = [];
 const roots: string[] = [];
 const cleanups: Array<() => Promise<void>> = [];
+test("native diagnostics survive provider JSON transport", () => {
+  const diagnostic = new JcodeError("unsupported_env", "Configure the Jcode service environment");
+  const event = JSON.parse(
+    JSON.stringify({ type: "request.failed", requestId: "diagnostic-request", error: diagnostic }),
+  );
+  expect(ProviderEventSchema.parse(event)).toEqual({
+    type: "request.failed",
+    requestId: "diagnostic-request",
+    error: { code: "unsupported_env", message: "Configure the Jcode service environment" },
+  });
+});
 afterEach(async () => {
   await Promise.all(
     roots.map(async (root) => {
