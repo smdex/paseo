@@ -292,6 +292,94 @@ function expectNestedChildren(events: AgentStreamEvent[]) {
 }
 
 describe("PluginAgentClientRegistry", () => {
+  test.each([
+    {
+      label: "growing text",
+      snapshots: [
+        ["answer", "PASEO"],
+        ["answer", "PASEO_JCODE"],
+        ["answer", "PASEO_JCODE_RPC_OK"],
+      ],
+      fragments: ["PASEO", "_JCODE", "_RPC_OK"],
+      finalText: "PASEO_JCODE_RPC_OK",
+    },
+    {
+      label: "repeated fragments",
+      snapshots: [
+        ["answer", "a"],
+        ["answer", "aa"],
+      ],
+      fragments: ["a", "a"],
+      finalText: "aa",
+    },
+    {
+      label: "full replacement",
+      snapshots: [
+        ["answer", "before"],
+        ["answer", "after"],
+        ["answer", "aftermath"],
+      ],
+      fragments: ["before", "after", "math"],
+      finalText: "aftermath",
+    },
+    {
+      label: "last assistant message",
+      snapshots: [
+        ["first", "working"],
+        ["last", "final"],
+        ["last", "final answer"],
+      ],
+      fragments: ["working", "final", " answer"],
+      finalText: "final answer",
+    },
+  ])(
+    "returns authoritative final text for $label while streaming deltas",
+    async ({ snapshots, fragments, finalText }) => {
+      const harness = createProviderHarness({
+        async handleInput(input, emit) {
+          if (input.type !== "session.prompt") return false;
+          const turnId = input.prompt.clientMessageId;
+          emit({
+            type: "session.prompt_result",
+            sessionId: input.sessionId,
+            clientMessageId: turnId,
+            result: { type: "turn", turnId },
+          });
+          emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
+          await nextTurn();
+          if (turnId === "answer-turn") {
+            for (const [id, text] of snapshots) {
+              emit({
+                type: "timeline.item",
+                sessionId: input.sessionId,
+                item: { type: "assistant_message", id, text },
+              });
+              await nextTurn();
+            }
+          }
+          emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "completed" });
+          return true;
+        },
+      });
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      const client = registry.clients()[harness.registration.id]!;
+      const session = await client.createSession({
+        provider: harness.registration.id,
+        cwd: "/workspace",
+      });
+      const result = await session.run("hello", { clientMessageId: "answer-turn" });
+      expect(result.finalText).toBe(finalText);
+      expect(result.timeline).toEqual(
+        fragments.map((text) => expect.objectContaining({ type: "assistant_message", text })),
+      );
+      expect((await session.run("no response", { clientMessageId: "empty-turn" })).finalText).toBe(
+        "",
+      );
+      await session.close();
+      await registry.shutdown();
+    },
+  );
   test("negotiates native tools before manager launch and strips only internal MCP", async () => {
     const logger = createTestLogger();
     const harness = createProviderHarness({
