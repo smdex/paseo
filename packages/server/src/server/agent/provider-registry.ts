@@ -565,6 +565,7 @@ function wrapClientProvider(
     listImportableSessions: listImportableSessions
       ? async (options) => await listImportableSessions({ ...options, providerOptions })
       : undefined,
+    resolveImportSessionHandle: inner.resolveImportSessionHandle?.bind(inner),
     importSession: importSession
       ? async (input, context) => {
           const imported = await importSession(input, {

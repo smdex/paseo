@@ -366,6 +366,7 @@ export interface ProviderCatalog {
 }
 
 export interface ProviderSessionSummary {
+  id?: string;
   persistence: ProviderPersistence;
   cwd: string;
   title?: string;
@@ -1345,6 +1346,7 @@ export const ProviderEventSchema: z.ZodType<ProviderEvent> = z.discriminatedUnio
       sessions: z.array(
         z
           .object({
+            id: idSchema.optional(),
             persistence: persistenceSchema,
             cwd: z.string(),
             title: z.string().optional(),
