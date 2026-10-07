@@ -395,6 +395,15 @@ const provider: ProviderRegistration = {
             },
           });
           emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+          const tool = input.config.paseoTools?.[0];
+          if (tool) {
+            emit({ type: "session.tool_call", sessionId: input.sessionId, callId: "native-1", name: tool.name, input: { message: "hello" } });
+            emit({ type: "session.tool_cancel", sessionId: input.sessionId, callId: "native-cancel" });
+          }
+          return;
+        }
+        if (input.type === "session.tool_result") {
+          emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "assistant_message", id: input.callId, text: JSON.stringify(input.result) } });
           return;
         }
         if (input.type !== "session.prompt") return;
@@ -476,6 +485,7 @@ export default function contribute(server: PluginServerContext) {
         "session.persistence",
         "session.subsession",
         "timeline.plugin",
+        "tools.paseo.native",
         "future.capability",
       ],
     });
@@ -493,8 +503,37 @@ export default function contribute(server: PluginServerContext) {
         mcpServers: {},
         settings: {},
         persist: true,
+        paseoTools: [
+          {
+            name: "echo",
+            description: "Echo",
+            inputSchema: { type: "object", properties: { message: { type: "string" } } },
+          },
+        ],
       },
       history: "replay",
+    });
+    await expect.poll(() => events.length).toBe(5);
+    expect(events).toContainEqual({
+      type: "session.tool_call",
+      sessionId: "root-1",
+      callId: "native-1",
+      name: "echo",
+      input: { message: "hello" },
+    });
+    expect(events).toContainEqual({
+      type: "session.tool_cancel",
+      sessionId: "root-1",
+      callId: "native-cancel",
+    });
+    await connection.send({
+      type: "session.tool_result",
+      sessionId: "root-1",
+      callId: "native-1",
+      result: {
+        content: [{ type: "text", text: "from daemon" }],
+        structuredContent: { caller: "root-1" },
+      },
     });
     await connection.send({
       type: "session.prompt",
@@ -515,7 +554,19 @@ export default function contribute(server: PluginServerContext) {
       },
     });
 
-    await expect.poll(() => events.length).toBe(8);
+    await expect.poll(() => events.length).toBe(11);
+    expect(events).toContainEqual({
+      type: "timeline.item",
+      sessionId: "root-1",
+      item: {
+        type: "assistant_message",
+        id: "native-1",
+        text: JSON.stringify({
+          content: [{ type: "text", text: "from daemon" }],
+          structuredContent: { caller: "root-1" },
+        }),
+      },
+    });
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "session.prompt_result",
