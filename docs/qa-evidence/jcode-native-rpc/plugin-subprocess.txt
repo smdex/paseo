@@ -1,0 +1,35 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/home/smaximov/src/paseo/packages/server[39m
+
+[90mstdout[2m | src/server/plugins/runtime.posix.test.ts
+[22m[39m◇ injected env (0) from .env.test // tip: ◈ encrypted .env [www.dotenvx.com]
+◇ injected env (0) from ../.env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+ [32m✓[39m src/server/plugins/runtime.posix.test.ts [2m([22m[2m41 tests[22m[2m)[22m[33m 32168[2mms[22m[39m
+     [33m[2m✓[22m[39m loads '@getpaseo/plugin' contracts without React in the subprocess module graph [33m 1686[2mms[22m[39m
+     [33m[2m✓[22m[39m loads '@getpaseo/plugin' contracts without React in the subprocess module graph [33m 1283[2mms[22m[39m
+     [33m[2m✓[22m[39m runs the direct example through the existing AgentClient path [33m 1531[2mms[22m[39m
+     [33m[2m✓[22m[39m runs a provider connection through the real plugin subprocess boundary [33m 1089[2mms[22m[39m
+     [33m[2m✓[22m[39m adapts an ACP command and example transformer through the AgentClient path [33m 2557[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects a malformed provider event from a real plugin subprocess [33m 1041[2mms[22m[39m
+     [33m[2m✓[22m[39m emits runtime failure for live sessions when a real plugin process dies [33m 1396[2mms[22m[39m
+     [33m[2m✓[22m[39m captures output emitted during initialization and cleanup across reloads [33m 2447[2mms[22m[39m
+     [33m[2m✓[22m[39m waits for asynchronous plugin cleanup before stopping [33m 1376[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects provider input while a connection is closing [33m 1479[2mms[22m[39m
+     [33m[2m✓[22m[39m closes a provider connection that resolves during plugin shutdown [33m 1353[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects a server contribution without cleanup [33m 1312[2mms[22m[39m
+     [33m[2m✓[22m[39m loads the official Linear attachment extension [33m 1645[2mms[22m[39m
+     [33m[2m✓[22m[39m loads separate entries, exposes the client bundle, and invokes the server RPC [33m 1463[2mms[22m[39m
+     [33m[2m✓[22m[39m keeps client and server modules in their target runtime [33m 1282[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects a handler result that does not match its RPC output schema [33m 1319[2mms[22m[39m
+     [33m[2m✓[22m[39m uses the config key as runtime identity without comparing the manifest id [33m 1196[2mms[22m[39m
+     [33m[2m✓[22m[39m reports an unexpected subprocess crash and removes its catalog entry [33m 1250[2mms[22m[39m
+     [33m[2m✓[22m[39m re-attaches a plugin session when the daemon closes the socket under a live child [33m 2719[2mms[22m[39m
+     [33m[2m✓[22m[39m attaches no replacement session when the plugin is stopped [33m 1216[2mms[22m[39m
+   [33m[2m✓[22m[39m rejects a usage source without discovery at registration [33m 1164[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m41 passed[39m[22m[90m (41)[39m
+[2m   Start at [22m 03:45:23
+[2m   Duration [22m 42.78s[2m (transform 8.89s, setup 77ms, import 10.28s, tests 32.17s, environment 0ms)[22m
+

@@ -1,0 +1,29 @@
+CATALOG {"models":66,"selected":"zai:glm-5.3-flash"}
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"swarm"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"swarm"}
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"swarm"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"swarm"}
+EFFORT swarm
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"swarm-deep"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"swarm-deep"}
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"swarm-deep"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"swarm-deep"}
+EFFORT swarm-deep
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"low"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"low"}
+EVENT {"type":"mode_changed","provider":"jcode","currentModeId":null,"availableModes":[]}
+EVENT {"type":"model_changed","provider":"jcode","runtimeInfo":{"provider":"jcode","sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","model":"zai:glm-5.3-flash","modeId":null,"thinkingOptionId":"low"}}
+EVENT {"type":"thinking_option_changed","provider":"jcode","thinkingOptionId":"low"}
+EFFORT low
+EVENT {"type":"timeline","provider":"jcode","item":{"type":"user_message","text":"Reply exactly PASEO_JCODE_RPC_OK. Do not use tools or edit files.","messageId":"413f55a6-45ae-44cb-aaf0-c08c934772a4","clientMessageId":"413f55a6-45ae-44cb-aaf0-c08c934772a4"}}
+EVENT {"type":"turn_started","provider":"jcode","turnId":"5a14570b-0e68-4382-b228-b8aa62c8b237"}
+EVENT {"type":"usage_updated","provider":"jcode","usage":{"inputTokens":36695,"cachedInputTokens":11584,"outputTokens":9},"turnId":"5a14570b-0e68-4382-b228-b8aa62c8b237"}
+EVENT {"type":"turn_completed","provider":"jcode","turnId":"5a14570b-0e68-4382-b228-b8aa62c8b237"}
+RESULT {"sessionId":"plugin:{\"version\":1,\"data\":{\"sessionId\":\"session_nautilus_1791338746205_d054dad674d127d0\"}}","finalText":"PASEO_JCODE_RPC_OK","timeline":[{"type":"user_message","text":"Reply exactly PASEO_JCODE_RPC_OK. Do not use tools or edit files.","messageId":"413f55a6-45ae-44cb-aaf0-c08c934772a4","clientMessageId":"413f55a6-45ae-44cb-aaf0-c08c934772a4"},{"type":"assistant_message","text":"P","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"ASE","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"O","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"_J","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"CODE","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"_RPC","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"},{"type":"assistant_message","text":"_OK","messageId":"37335627-c0cb-47e1-b336-280c214a7ef9:text:text-1"}]}
+RESUME_HISTORY 8
+PASS real adapter catalog/effort/swarm/prompt/persistence/history/import/archive

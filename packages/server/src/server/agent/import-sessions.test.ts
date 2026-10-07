@@ -322,6 +322,34 @@ test("listImportableProviderSessions looks past already-imported rows to fill th
   expect(result.filteredAlreadyImportedCount).toBe(1);
 });
 
+test("listImportableProviderSessions filters native rows by canonical persisted identity", async () => {
+  const row = makeImportableSession({
+    provider: "claude",
+    sessionId: "native-id",
+    cwd: "/tmp/project",
+    lastActivityAt: "2026-04-30T12:02:00.000Z",
+  });
+  row.canonicalProviderHandleId = "plugin:opaque";
+  const result = await listImportableProviderSessions({
+    request: makeRequest({ cwd: row.cwd, providers: ["claude"] }),
+    agentManager: {
+      listAgents: () => [],
+      listImportableSessions: async () => makeImportableSessionsResult([row]),
+    },
+    agentStorage: {
+      list: async () => [
+        {
+          provider: "claude",
+          persistence: { provider: "claude", sessionId: "plugin:opaque" },
+        } as StoredAgentRecord,
+      ],
+    },
+    providerSnapshotManager: { getProviderLabel: () => "Claude Code" },
+  });
+  expect(result.entries).toEqual([]);
+  expect(result.filteredAlreadyImportedCount).toBe(1);
+});
+
 test("listImportableProviderSessions requests a bounded deep scan for search results", async () => {
   const matchingSessions = [
     makeImportableSession({
@@ -659,6 +687,7 @@ class ProviderImportHarness {
         return true;
       },
       notifyAgentState: () => {},
+      resolveImportSessionHandle: async (request) => request.providerHandleId,
       getAgent: () => this.activeAgent,
       getRegisteredProviderIds: () => ["codex"],
       createAgent: async () => {
@@ -902,6 +931,31 @@ test("importProviderSession serializes legacy and native aliases for one archive
   );
   expect(harness.resumeAttempts).toBe(1);
   expect(harness.closedAgentIds).toEqual([]);
+});
+
+test("importProviderSession canonicalizes raw and opaque aliases before ownership and mutation locking", async () => {
+  const opaque = 'plugin:{"version":1,"data":{"sessionId":"native-id"}}';
+  const harness = await ProviderImportHarness.create({ sessionId: opaque });
+  harness.manager.resolveImportSessionHandle = async (input) =>
+    input.providerHandleId === "native-id" ? opaque : input.providerHandleId;
+  await harness.seed(
+    makeStoredProviderSession({
+      id: harness.snapshot.id,
+      cwd: harness.snapshot.cwd,
+      sessionId: opaque,
+    }),
+  );
+  const release = harness.blockUnarchive();
+  const restored = harness.import({ providerHandleId: "native-id", cwd: harness.snapshot.cwd });
+  const repeatedOpaque = harness.import({ providerHandleId: opaque, cwd: harness.snapshot.cwd });
+  release();
+  await expect(restored).resolves.toMatchObject({ snapshot: { id: harness.snapshot.id } });
+  await expect(repeatedOpaque).rejects.toThrow("already imported");
+  await expect(
+    harness.import({ providerHandleId: "native-id", cwd: harness.snapshot.cwd }),
+  ).rejects.toThrow("already imported");
+  expect(harness.resumeAttempts).toBe(1);
+  expect(harness.freshImports).toEqual([]);
 });
 
 test("importProviderSession requires cwd from the selected provider row", async () => {

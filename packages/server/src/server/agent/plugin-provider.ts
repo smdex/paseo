@@ -65,6 +65,8 @@ import {
 import type { RegisteredProviderDefinition } from "./provider-registry.js";
 import { runProviderTurn } from "./providers/provider-runner.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import type { PaseoToolCatalog } from "./tools/types.js";
+import { serializePaseoToolInputParameters } from "./tools/paseo-tool-serialization.js";
 
 interface Deferred<Value> {
   promise: Promise<Value>;
@@ -85,6 +87,7 @@ interface PendingOpenDescendantState {
 }
 
 interface OpenProviderSessionInput {
+  paseoTools?: PaseoToolCatalog;
   sessionId: string;
   config: ProviderSessionConfig;
   persistence?: ProviderPersistence;
@@ -192,7 +195,10 @@ class ProviderRuntime {
   }
 
   async isAvailable(): Promise<boolean> {
-    return (await this.status()).available;
+    if (!(await this.status()).available) return false;
+    // Launch context construction reads negotiated tool capabilities immediately after availability.
+    await this.getConnection();
+    return true;
   }
 
   async catalog(
@@ -234,6 +240,16 @@ class ProviderRuntime {
       throw new Error(`Provider session already exists: ${input.sessionId}`);
     }
     const connection = await this.getConnection();
+    if (connection.capabilities.includes("tools.paseo.native")) {
+      input.config = {
+        ...input.config,
+        paseoTools: [...(input.paseoTools?.tools.values() ?? [])].map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: z.json().parse(serializePaseoToolInputParameters(tool)),
+        })),
+      };
+    }
     requireProviderCapabilities(connection.capabilities, {
       type: "session.open",
       requestId: "capability-check",
@@ -245,6 +261,7 @@ class ProviderRuntime {
       input.sessionId,
       input.sessionId,
       "core",
+      connection.capabilities.includes("tools.paseo.native") ? input.paseoTools : undefined,
     );
     this.sessions.set(input.sessionId, session);
     this.providerSessions.set(input.sessionId, session);
@@ -263,6 +280,7 @@ class ProviderRuntime {
       await ready;
       return session;
     } catch (error) {
+      session.connectionClosed();
       this.sessionRequests.delete(requestId);
       this.discardPendingOpenDescendants(session);
       this.sessions.delete(input.sessionId);
@@ -346,6 +364,7 @@ class ProviderRuntime {
   }
 
   removeSession(sessionId: string, providerSessionId: string): void {
+    this.sessions.get(sessionId)?.connectionClosed();
     this.sessions.delete(sessionId);
     this.providerSessions.delete(providerSessionId);
   }
@@ -574,6 +593,9 @@ class ProviderRuntime {
 }
 
 class ProviderRuntimeSession {
+  private readonly toolCalls = new Map<string, AbortController>();
+  // ponytail: retain O(calls) IDs until session close. A sequenced contract could use a replay watermark.
+  private readonly toolCallIds = new Set<string>();
   readonly history: ProviderEvent[] = [];
   private readonly listeners = new Set<(event: ProviderEvent) => void>();
   private capabilities: readonly string[] = [];
@@ -594,6 +616,7 @@ class ProviderRuntimeSession {
     readonly id: string,
     private readonly providerSessionId: string,
     readonly restoration: "core" | "parent",
+    private paseoTools?: PaseoToolCatalog,
   ) {}
 
   get providerId(): string {
@@ -667,6 +690,7 @@ class ProviderRuntimeSession {
   }
 
   async interrupt(): Promise<void> {
+    this.cancelToolCalls();
     await this.runtime.complete({
       type: "session.interrupt",
       requestId: randomUUID(),
@@ -675,6 +699,8 @@ class ProviderRuntimeSession {
   }
 
   async close(): Promise<void> {
+    this.cancelToolCalls();
+    this.paseoTools = undefined;
     if (this.restoration === "parent") {
       this.runtime.removeSession(this.id, this.providerSessionId);
       return;
@@ -707,10 +733,19 @@ class ProviderRuntimeSession {
   }
 
   accept(event: ProviderEvent): void {
-    if (event.type === "session.opened") {
-      event = { ...event, capabilities: this.normalizeSessionCapabilities(event.capabilities) };
+    if (event.type === "session.tool_call") {
+      if (!this.terminal && this.capabilities.includes("tools.paseo.native")) {
+        void this.executeTool(event);
+      }
+      return;
+    }
+    if (event.type === "session.tool_cancel") {
+      this.toolCalls.get(event.callId)?.abort();
+      this.toolCalls.delete(event.callId);
+      return;
     }
     if (event.type === "session.opened") {
+      event = { ...event, capabilities: this.normalizeSessionCapabilities(event.capabilities) };
       this.capabilities = [...event.capabilities];
       this.persistence = this.restoration === "core" ? (event.persistence ?? null) : null;
       return;
@@ -760,12 +795,62 @@ class ProviderRuntimeSession {
   }
 
   private rejectPending(error: Error): void {
+    this.cancelToolCalls();
+    this.toolCallIds.clear();
+    this.paseoTools = undefined;
     const openRequest = this.openRequest;
     this.openRequest = null;
     openRequest?.deferred.reject(error);
     this.runtime.discardPendingOpenDescendants(this);
     for (const prompt of this.prompts.values()) prompt.reject(error);
     this.prompts.clear();
+  }
+
+  private cancelToolCalls(): void {
+    for (const controller of this.toolCalls.values()) controller.abort();
+    this.toolCalls.clear();
+  }
+
+  private async executeTool(
+    event: Extract<ProviderEvent, { type: "session.tool_call" }>,
+  ): Promise<void> {
+    if (this.toolCallIds.has(event.callId)) return;
+    this.toolCallIds.add(event.callId);
+    const controller = new AbortController();
+    this.toolCalls.set(event.callId, controller);
+    let result: Extract<ProviderInput, { type: "session.tool_result" }>["result"];
+    try {
+      if (!this.paseoTools?.getTool(event.name))
+        throw new Error(`Unknown Paseo tool: ${event.name}`);
+      result = z
+        .object({
+          content: z.array(z.json()),
+          structuredContent: z.json().optional(),
+          isError: z.boolean().optional(),
+        })
+        .parse(
+          await this.paseoTools.executeTool(event.name, event.input, { signal: controller.signal }),
+        );
+    } catch (error) {
+      result = {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+    try {
+      if (!controller.signal.aborted && !this.terminal) {
+        await this.connection.send({
+          type: "session.tool_result",
+          sessionId: this.providerSessionId,
+          callId: event.callId,
+          result,
+        });
+      }
+    } catch (error) {
+      this.connectionClosed(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      if (this.toolCalls.get(event.callId) === controller) this.toolCalls.delete(event.callId);
+    }
   }
 
   private normalizeSessionCapabilities(capabilities: readonly string[]): ProviderCapability[] {
@@ -989,13 +1074,32 @@ class PluginAgentClient implements AgentClient {
       limit: options.limit,
     });
     return sessions.map((session) => ({
-      providerHandleId: encodePersistence(session.persistence),
+      providerHandleId: session.id ?? encodePersistence(session.persistence),
+      canonicalProviderHandleId: encodePersistence(session.persistence),
       cwd: session.cwd,
       title: session.title ?? null,
       firstPromptPreview: null,
       lastPromptPreview: session.description ?? null,
       lastActivityAt: parseProviderDate(session.updatedAt),
     }));
+  }
+
+  async resolveImportSessionHandle(input: ImportProviderSessionInput): Promise<string> {
+    if (input.providerHandleId.startsWith("plugin:")) {
+      decodePersistenceId(input.providerHandleId);
+      return input.providerHandleId;
+    }
+    const sessions = await this.runtime.listSessions({
+      cwd: input.cwd,
+      query: input.providerHandleId,
+    });
+    const matches = sessions.filter((session) => session.id === input.providerHandleId);
+    if (matches.length !== 1) {
+      throw new Error(
+        `Plugin provider session identity must match exactly one session: ${input.providerHandleId}`,
+      );
+    }
+    return encodePersistence(matches[0]!.persistence);
   }
 
   async importSession(
@@ -1005,7 +1109,7 @@ class PluginAgentClient implements AgentClient {
     const session = await this.openSession({
       config: { ...context.config, provider: this.provider, cwd: input.cwd },
       launchContext: context.launchContext,
-      persistence: decodePersistenceId(input.providerHandleId),
+      persistence: decodePersistenceId(await this.resolveImportSessionHandle(input)),
       history: "replay",
       persist: true,
     });
@@ -1041,6 +1145,7 @@ class PluginAgentClient implements AgentClient {
   }): Promise<PluginAgentSession> {
     const sessionId = randomUUID();
     const bridge = await this.runtime.openSession({
+      paseoTools: input.launchContext?.paseoTools,
       sessionId,
       config: mapSessionConfig(input.config, input.launchContext, input.persist),
       persistence: input.persistence,
@@ -1102,6 +1207,7 @@ class PluginAgentSession implements AgentSession {
   private readonly childSnapshots = new Map<string, Map<string, ProviderTimelineItem>>();
   private unsubscribe: (() => void) | null = null;
   private currentTurnId: string | null = null;
+  private latestAssistantText = "";
   private closed = false;
 
   constructor(
@@ -1145,6 +1251,8 @@ class PluginAgentSession implements AgentSession {
       startTurn: (nextPrompt, nextOptions) => this.startTurn(nextPrompt, nextOptions),
       subscribe: (callback) => this.subscribe(callback),
       getSessionId: () => this.id,
+      reduceFinalText: ({ current, item }) =>
+        item.type === "assistant_message" ? this.latestAssistantText : current,
     });
   }
 
@@ -1414,6 +1522,7 @@ class PluginAgentSession implements AgentSession {
   private translateTimeline(
     event: Extract<ProviderEvent, { type: "timeline.item" }>,
   ): AgentStreamEvent[] {
+    if (event.item.type === "assistant_message") this.latestAssistantText = event.item.text;
     const item = mapTimelineItem(event.item, this.timelineSnapshots, this.revertTokens);
     return item
       ? [
@@ -1584,8 +1693,9 @@ function agentCapabilities(capabilities: readonly string[]): AgentCapabilityFlag
     supportsSessionPersistence: supports("session.persistence"),
     supportsSessionListing: supports("session.list"),
     supportsDynamicModes: supports("session.configure"),
-    supportsMcpServers: true,
-    supportsNativePaseoTools: false,
+    // Legacy plugin providers supported MCP before capabilities described tool transports.
+    supportsMcpServers: !supports("tools.paseo.native") || supports("tools.mcp"),
+    supportsNativePaseoTools: supports("tools.paseo.native"),
     supportsReasoningStream: true,
     supportsToolInvocations: true,
     supportsRewindConversation: supports("session.revert.conversation"),

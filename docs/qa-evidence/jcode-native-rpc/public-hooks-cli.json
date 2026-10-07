@@ -1,0 +1,23 @@
+[
+  {
+    "phase": "working",
+    "terminalId": "524c508c-ca23-463c-aae5-a725229f0a31",
+    "activity": {
+      "state": "working",
+      "changedAt": 1791340542486
+    }
+  },
+  {
+    "phase": "idle",
+    "terminalId": "524c508c-ca23-463c-aae5-a725229f0a31",
+    "activity": {
+      "state": "idle",
+      "attentionReason": "finished",
+      "changedAt": 1791340545300
+    }
+  },
+  {
+    "phase": "cleanup-verified",
+    "terminalId": "524c508c-ca23-463c-aae5-a725229f0a31"
+  }
+]

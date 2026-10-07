@@ -7,11 +7,17 @@ import type {
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
 import { setImmediate as nextTurn } from "node:timers/promises";
+import { ProviderEventSchema } from "@getpaseo/plugin/server/provider";
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
+import type { PaseoToolCatalog, PaseoToolDefinition, PaseoToolResult } from "./tools/types.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import type { AgentClient, AgentStreamEvent } from "./agent-sdk-types.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import { AgentManager } from "./agent-manager.js";
+import { AgentStorage } from "./agent-storage.js";
+import { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import { createPaseoToolCatalog } from "./tools/paseo-tools.js";
 import { buildProviderRegistry } from "./provider-registry.js";
 import { ProviderOverrideSchema } from "@getpaseo/protocol/provider-config";
 import { PluginAgentClientRegistry } from "./plugin-provider.js";
@@ -287,6 +293,516 @@ function expectNestedChildren(events: AgentStreamEvent[]) {
 }
 
 describe("PluginAgentClientRegistry", () => {
+  test("reload applies enabled default tool policy instead of the previous disabled snapshot", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native"],
+    });
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([harness.registration]);
+    const snapshots = new ProviderSnapshotManager({ logger });
+    const manager = new AgentManager({
+      logger,
+      clients: registry.clients(),
+      paseoToolsEnabled: false,
+      paseoToolCatalogFactory: (runtime) =>
+        createPaseoToolCatalog({
+          logger,
+          agentManager: manager,
+          agentStorage: new AgentStorage("/unused-native-tools-test", logger),
+          providerSnapshotManager: snapshots,
+          callerAgentId: runtime.callerAgentId,
+          paseoToolPolicy:
+            runtime.paseoToolPolicy ?? manager.getPaseoToolPolicy(runtime.callerAgentId!),
+        }),
+    });
+    const agent = await manager.createAgent(
+      { provider: harness.registration.id, cwd: "/workspace" },
+      undefined,
+      { workspaceId: undefined },
+    );
+    expect(harness.inputs.findLast((input) => input.type === "session.open")).toMatchObject({
+      config: { paseoTools: [] },
+    });
+    manager.setPaseoToolsEnabled(true);
+    const reloaded = await manager.reloadAgentSession(agent.id);
+    const open = harness.inputs.findLast((input) => input.type === "session.open");
+    if (open?.type !== "session.open") throw new Error("Expected reload input");
+    expect(open.config.paseoTools?.map((tool) => tool.name)).toContain("list_agents");
+    expect(manager.getPaseoToolPolicy(agent.id)).toBeUndefined();
+    await reloaded.session?.close();
+    await registry.shutdown();
+    await snapshots.shutdown();
+  });
+  test.each([
+    {
+      label: "growing text",
+      snapshots: [
+        ["answer", "PASEO"],
+        ["answer", "PASEO_JCODE"],
+        ["answer", "PASEO_JCODE_RPC_OK"],
+      ],
+      fragments: ["PASEO", "_JCODE", "_RPC_OK"],
+      finalText: "PASEO_JCODE_RPC_OK",
+    },
+    {
+      label: "repeated fragments",
+      snapshots: [
+        ["answer", "a"],
+        ["answer", "aa"],
+      ],
+      fragments: ["a", "a"],
+      finalText: "aa",
+    },
+    {
+      label: "full replacement",
+      snapshots: [
+        ["answer", "before"],
+        ["answer", "after"],
+        ["answer", "aftermath"],
+      ],
+      fragments: ["before", "after", "math"],
+      finalText: "aftermath",
+    },
+    {
+      label: "last assistant message",
+      snapshots: [
+        ["first", "working"],
+        ["last", "final"],
+        ["last", "final answer"],
+      ],
+      fragments: ["working", "final", " answer"],
+      finalText: "final answer",
+    },
+  ])(
+    "returns authoritative final text for $label while streaming deltas",
+    async ({ snapshots, fragments, finalText }) => {
+      const harness = createProviderHarness({
+        async handleInput(input, emit) {
+          if (input.type !== "session.prompt") return false;
+          const turnId = input.prompt.clientMessageId;
+          emit({
+            type: "session.prompt_result",
+            sessionId: input.sessionId,
+            clientMessageId: turnId,
+            result: { type: "turn", turnId },
+          });
+          emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
+          await nextTurn();
+          if (turnId === "answer-turn") {
+            for (const [id, text] of snapshots) {
+              emit({
+                type: "timeline.item",
+                sessionId: input.sessionId,
+                item: { type: "assistant_message", id, text },
+              });
+              await nextTurn();
+            }
+          }
+          emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "completed" });
+          return true;
+        },
+      });
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      const client = registry.clients()[harness.registration.id]!;
+      const session = await client.createSession({
+        provider: harness.registration.id,
+        cwd: "/workspace",
+      });
+      const result = await session.run("hello", { clientMessageId: "answer-turn" });
+      expect(result.finalText).toBe(finalText);
+      expect(result.timeline).toEqual(
+        fragments.map((text) => expect.objectContaining({ type: "assistant_message", text })),
+      );
+      expect((await session.run("no response", { clientMessageId: "empty-turn" })).finalText).toBe(
+        "",
+      );
+      await session.close();
+      await registry.shutdown();
+    },
+  );
+  test("negotiates native tools before manager launch and strips only internal MCP", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native", "tools.mcp"],
+    });
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([
+      {
+        ...harness.registration,
+        command: [process.execPath],
+        status: async () => ({ available: true }),
+      },
+    ]);
+    const catalog: PaseoToolCatalog = {
+      tools: new Map(),
+      getTool: () => undefined,
+      executeTool: async () => ({ content: [] }),
+    };
+    const manager = new AgentManager({
+      logger,
+      clients: registry.clients(),
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      paseoToolCatalogFactory: () => catalog,
+    });
+    const external = { type: "http", url: "http://example.test/mcp" } as const;
+    const agent = await manager.createAgent(
+      { provider: harness.registration.id, cwd: "/workspace", mcpServers: { external } },
+      undefined,
+      { workspaceId: undefined },
+    );
+    expect(harness.inputs.find((input) => input.type === "session.open")).toMatchObject({
+      config: { mcpServers: { external }, paseoTools: [] },
+    });
+    const open = harness.inputs.find((input) => input.type === "session.open");
+    if (open?.type !== "session.open") throw new Error("Expected open input");
+    expect(Object.keys(open.config.mcpServers)).toEqual(["external"]);
+    await agent.session?.close();
+    await registry.shutdown();
+  });
+
+  test("keeps native tool catalogs and call IDs isolated across sessions and reopen", async () => {
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native"],
+    });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const client = registry.clients()[harness.registration.id]!;
+    for (const caller of ["first", "second"]) {
+      const tool: PaseoToolDefinition = {
+        name: caller,
+        description: caller,
+        handler: async () => ({ content: [{ type: "text", text: caller }] }),
+      };
+      const catalog: PaseoToolCatalog = {
+        tools: new Map([[caller, tool]]),
+        getTool: (name) => (name === caller ? tool : undefined),
+        executeTool: async (_name, input, context) => tool.handler(input, context ?? {}),
+      };
+      const session = await client.createSession(
+        { provider: harness.registration.id, cwd: "/workspace" },
+        { paseoTools: catalog },
+      );
+      const open = harness.inputs.findLast((input) => input.type === "session.open");
+      if (open?.type !== "session.open") throw new Error("Expected open input");
+      harness.emit({
+        type: "session.tool_call",
+        sessionId: open.sessionId,
+        callId: "same-id",
+        name: caller,
+        input: {},
+      });
+      harness.emit({
+        type: "session.tool_call",
+        sessionId: open.sessionId,
+        callId: "foreign-tool",
+        name: caller === "first" ? "second" : "first",
+        input: {},
+      });
+      await nextTurn();
+      expect(harness.inputs).toContainEqual({
+        type: "session.tool_result",
+        sessionId: open.sessionId,
+        callId: "same-id",
+        result: { content: [{ type: "text", text: caller }] },
+      });
+      expect(harness.inputs).toContainEqual(
+        expect.objectContaining({
+          sessionId: open.sessionId,
+          callId: "foreign-tool",
+          result: expect.objectContaining({ isError: true }),
+        }),
+      );
+      const persistence = session.describePersistence();
+      if (!persistence) throw new Error("Expected session persistence");
+      await session.close();
+      const reopened = await client.resumeSession(
+        persistence,
+        { cwd: "/workspace" },
+        { paseoTools: catalog },
+      );
+      const resume = harness.inputs.findLast((input) => input.type === "session.open");
+      if (resume?.type !== "session.open") throw new Error("Expected resume input");
+      expect(resume.config.paseoTools).toEqual(open.config.paseoTools);
+      await reopened.close();
+    }
+    await registry.shutdown();
+  });
+  test("preserves daemon catalog filtering and schema validation for native tools", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native"],
+    });
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([harness.registration]);
+    const snapshots = new ProviderSnapshotManager({ logger });
+    const spoken: string[] = [];
+    const catalog = createPaseoToolCatalog({
+      logger,
+      agentManager: new AgentManager({ logger, clients: {} }),
+      agentStorage: new AgentStorage("/unused-native-tools-test", logger),
+      providerSnapshotManager: snapshots,
+      callerAgentId: "caller-one",
+      enableVoiceTools: true,
+      paseoToolPolicy: { disabledTools: ["create_agent"] },
+      resolveSpeakHandler: () => async (input) => {
+        spoken.push(input.text);
+      },
+    });
+    const client = registry.clients()[harness.registration.id]!;
+    const session = await client.createSession(
+      { provider: harness.registration.id, cwd: "/workspace" },
+      { paseoTools: catalog },
+    );
+    const open = harness.inputs.find((input) => input.type === "session.open");
+    if (open?.type !== "session.open") throw new Error("Expected open input");
+    expect(open.config.paseoTools?.map((tool) => tool.name)).toEqual([...catalog.tools.keys()]);
+    expect(open.config.paseoTools?.map((tool) => tool.name)).not.toContain("create_agent");
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "good",
+      name: "speak",
+      input: { text: " hello " },
+    });
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "invalid",
+      name: "speak",
+      input: { text: 3 },
+    });
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "disabled",
+      name: "create_agent",
+      input: {},
+    });
+    await nextTurn();
+    expect(spoken).toEqual(["hello"]);
+    expect(harness.inputs.filter((input) => input.type === "session.tool_result")).toEqual(
+      expect.arrayContaining([
+        {
+          type: "session.tool_result",
+          sessionId: open.sessionId,
+          callId: "good",
+          result: { content: [], structuredContent: { ok: true } },
+        },
+        expect.objectContaining({
+          callId: "invalid",
+          result: expect.objectContaining({ isError: true }),
+        }),
+        {
+          type: "session.tool_result",
+          sessionId: open.sessionId,
+          callId: "disabled",
+          result: {
+            content: [{ type: "text", text: "Unknown Paseo tool: create_agent" }],
+            isError: true,
+          },
+        },
+      ]),
+    );
+    await session.close();
+    await registry.shutdown();
+    await snapshots.shutdown();
+  });
+  test.each([
+    { capabilities: CAPABILITIES, native: false, mcp: true },
+    { capabilities: [...CAPABILITIES, "tools.paseo.native"], native: true, mcp: false },
+    { capabilities: [...CAPABILITIES, "tools.paseo.native", "tools.mcp"], native: true, mcp: true },
+  ])(
+    "negotiates tool transports without changing legacy providers: $capabilities",
+    async ({ capabilities, native, mcp }) => {
+      const harness = createProviderHarness({ capabilities });
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      const client = registry.clients()[harness.registration.id]!;
+      await client.isAvailable();
+      expect(client.capabilities).toMatchObject({
+        supportsNativePaseoTools: native,
+        supportsMcpServers: mcp,
+      });
+      await registry.shutdown();
+    },
+  );
+
+  test("registers only serializable session tools, validates calls and rejects unknown tools", async () => {
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native"],
+    });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const seen: unknown[] = [];
+    const schema = z.object({ message: z.string() });
+    const tool: PaseoToolDefinition = {
+      name: "echo",
+      description: "Echo message",
+      inputSchema: schema,
+      async handler(input) {
+        seen.push(input);
+        return {
+          content: [{ type: "text", text: "scoped" }],
+          structuredContent: { caller: "one" },
+        };
+      },
+    };
+    const catalog: PaseoToolCatalog = {
+      tools: new Map([[tool.name, tool]]),
+      getTool: (name) => (name === tool.name ? tool : undefined),
+      executeTool: async (_name, input, context) =>
+        tool.handler(await schema.parseAsync(input), context ?? {}),
+    };
+    const client = registry.clients()[harness.registration.id]!;
+    const session = await client.createSession(
+      { provider: harness.registration.id, cwd: "/workspace" },
+      { paseoTools: catalog },
+    );
+    const open = harness.inputs.find((input) => input.type === "session.open")!;
+    expect(open.type).toBe("session.open");
+    if (open.type !== "session.open") throw new Error("Expected open input");
+    expect(JSON.parse(JSON.stringify(open.config.paseoTools))).toEqual([
+      {
+        name: "echo",
+        description: "Echo message",
+        inputSchema: expect.objectContaining({
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        }),
+      },
+    ]);
+    expect(open.config.paseoTools?.[0]).not.toHaveProperty("handler");
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "good",
+      name: "echo",
+      input: { message: "hello" },
+    });
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "invalid",
+      name: "echo",
+      input: { message: 4 },
+    });
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "unknown",
+      name: "forbidden",
+      input: {},
+    });
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: "not-owned",
+      callId: "foreign",
+      name: "echo",
+      input: { message: "bad" },
+    });
+    await nextTurn();
+    expect(seen).toEqual([{ message: "hello" }]);
+    harness.emit({
+      type: "session.tool_call",
+      sessionId: open.sessionId,
+      callId: "good",
+      name: "echo",
+      input: { message: "replayed" },
+    });
+    await nextTurn();
+    expect(seen).toEqual([{ message: "hello" }]);
+    const results = harness.inputs.filter((input) => input.type === "session.tool_result");
+    expect(results).toHaveLength(3);
+    expect(results).toContainEqual({
+      type: "session.tool_result",
+      sessionId: open.sessionId,
+      callId: "good",
+      result: { content: [{ type: "text", text: "scoped" }], structuredContent: { caller: "one" } },
+    });
+    expect(results).toContainEqual({
+      type: "session.tool_result",
+      sessionId: open.sessionId,
+      callId: "unknown",
+      result: { content: [{ type: "text", text: "Unknown Paseo tool: forbidden" }], isError: true },
+    });
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        callId: "invalid",
+        result: {
+          content: [{ type: "text", text: expect.stringContaining("expected string") }],
+          isError: true,
+        },
+      }),
+    );
+    await session.close();
+    await registry.shutdown();
+  });
+
+  test.each(["cancel", "interrupt", "close", "closed", "failure", "shutdown"] as const)(
+    "aborts native tool calls on %s and suppresses late results",
+    async (action) => {
+      const harness = createProviderHarness({
+        capabilities: [...CAPABILITIES, "tools.paseo.native"],
+      });
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      let signal: AbortSignal | undefined;
+      let finish!: (result: PaseoToolResult) => void;
+      const tool: PaseoToolDefinition = {
+        name: "wait",
+        description: "Wait",
+        handler: async () => ({ content: [] }),
+      };
+      const catalog: PaseoToolCatalog = {
+        tools: new Map([[tool.name, tool]]),
+        getTool: (name) => (name === tool.name ? tool : undefined),
+        executeTool: async (_name, _input, context) => {
+          signal = context?.signal;
+          return new Promise<PaseoToolResult>((resolve) => {
+            finish = resolve;
+          });
+        },
+      };
+      const client = registry.clients()[harness.registration.id]!;
+      const session = await client.createSession(
+        { provider: harness.registration.id, cwd: "/workspace" },
+        { paseoTools: catalog },
+      );
+      const open = harness.inputs.find((input) => input.type === "session.open");
+      if (open?.type !== "session.open") throw new Error("Expected open input");
+      const event = {
+        type: "session.tool_call",
+        sessionId: open.sessionId,
+        callId: "pending",
+        name: "wait",
+        input: {},
+      } as const;
+      harness.emit(event);
+      harness.emit(event);
+      expect(signal?.aborted).toBe(false);
+      if (action === "cancel")
+        harness.emit({ type: "session.tool_cancel", sessionId: open.sessionId, callId: "pending" });
+      if (action === "interrupt") await session.interrupt();
+      if (action === "close") await session.close();
+      if (action === "closed") harness.emit({ type: "session.closed", sessionId: open.sessionId });
+      if (action === "failure")
+        harness.emit({
+          type: "session.runtime_failed",
+          sessionId: open.sessionId,
+          error: { message: "Gone" },
+        });
+      if (action === "shutdown") await registry.shutdown();
+      expect(signal?.aborted).toBe(true);
+      finish({ content: [{ type: "text", text: "late" }] });
+      await nextTurn();
+      expect(harness.inputs.filter((input) => input.type === "session.tool_result")).toEqual([]);
+      await registry.shutdown();
+    },
+  );
+
   test("stores only agent options while the plugin receives merged defaults", async () => {
     const logger = createTestLogger();
     const harness = createProviderHarness();
@@ -478,6 +994,55 @@ describe("PluginAgentClientRegistry", () => {
     } finally {
       await session.close();
       registry.replace([]);
+    }
+  });
+
+  test("resolves exact native import identities through configured provider wrappers", async () => {
+    const persistence = { version: 1, data: { token: "native-root" } };
+    const opaque = `plugin:${JSON.stringify(persistence)}`;
+    let duplicate = false;
+    const harness = createProviderHarness({
+      capabilities: ["session.list", "session.persistence"],
+      handleInput: async (input, emit) => {
+        if (input.type !== "sessions") return false;
+        const row = { id: "native-root", persistence, cwd: "/workspace" };
+        emit(
+          ProviderEventSchema.parse({
+            type: "sessions",
+            requestId: input.requestId,
+            sessions: duplicate ? [row, row] : [row],
+          }),
+        );
+        return true;
+      },
+    });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const providers = buildProviderRegistry(createTestLogger(), {
+      pluginProviders: registry.definitions(),
+      providerOverrides: { [harness.registration.id]: { options: { configured: true } } },
+    });
+    const client = providers[harness.registration.id]!.createClient(createTestLogger());
+    try {
+      expect(await client.listImportableSessions?.()).toMatchObject([
+        { providerHandleId: "native-root", canonicalProviderHandleId: opaque },
+      ]);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native-root", cwd: "/workspace" }),
+      ).resolves.toBe(opaque);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: opaque, cwd: "/workspace" }),
+      ).resolves.toBe(opaque);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native", cwd: "/workspace" }),
+      ).rejects.toThrow("exactly one session");
+      duplicate = true;
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native-root", cwd: "/workspace" }),
+      ).rejects.toThrow("exactly one session");
+      expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+    } finally {
+      await registry.shutdown();
     }
   });
 

@@ -135,6 +135,38 @@ Return an empty array for a category the agent does not expose. The selected `mo
 The catalog describes choices available before a session exists. Session-specific controls come
 later through `session.config`.
 
+## Native Paseo tools
+
+Negotiate `tools.paseo.native` when your agent can register runtime tools. Include it in
+the connection and session capabilities. `session.open.config.paseoTools` then contains
+the caller's already-filtered definitions, each `{ name, description, inputSchema }`.
+`inputSchema` is JSON Schema. Register these definitions before emitting `session.ready`,
+including on resume or refresh. An empty array means no Paseo tools are available.
+
+Keep tool execution in the daemon. Exchange these serializable messages through the
+provider connection, for built-in and subprocess plugins alike:
+
+| Direction      | Message                                                         |
+| -------------- | --------------------------------------------------------------- |
+| Provider event | `{ type: "session.tool_call", sessionId, callId, name, input }` |
+| Daemon input   | `{ type: "session.tool_result", sessionId, callId, result }`    |
+| Provider event | `{ type: "session.tool_cancel", sessionId, callId }`            |
+
+Use a unique `callId` for every call within a session. Duplicate IDs are ignored, including
+after completion. `input` is JSON. `result` contains `content: JsonValue[]`, optional
+`structuredContent`, and optional `isError`. Unknown tools and invalid arguments return
+an error result. The daemon validates arguments through the session's catalog and never
+transfers handlers. Provider-created child sessions do not inherit a parent's catalog.
+
+Forward cancellation to Paseo with `session.tool_cancel`. Interruption, session teardown,
+runtime failure, and connection teardown abort pending calls and discard late results.
+Release native tool callbacks and pending result promises when your connection closes.
+
+Native tools replace Paseo's internal MCP server. Also negotiate `tools.mcp` if your native
+provider supports other MCP servers. Providers without `tools.paseo.native` retain the
+existing MCP behavior. Native tool support does not grant permission preapproval or
+`permission.tool_policy` support.
+
 ## Open a session
 
 `session.open` contains the complete launch configuration: working directory, environment, system
@@ -279,6 +311,13 @@ Advertise `session.persistence` when a native session can be reopened. Open a ne
 when `session.open.persistence` is absent. Resume the identified native session when it is present.
 Return an opaque persistence value in `session.opened` or `session.persistence`; Paseo stores it
 without inspecting it.
+
+For `session.list`, return each session's opaque `persistence`. Add optional `id` to expose its
+native identifier for listing and import. Paseo resolves a native identifier by an exact, unique
+match in the provider's session catalog before checking import ownership or attaching. Missing or
+ambiguous identifiers fail without attaching. Persistence remains the canonical stored identity,
+so native and opaque imports share the same owner and archived-session restore lane. Without `id`,
+listing and import keep using opaque handles.
 
 When `history` is `"replay"`, publish the native session's existing `timeline.item` snapshots before
 `session.ready`. Use `history: "skip"` to open without replaying old rows.
