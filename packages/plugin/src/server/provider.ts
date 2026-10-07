@@ -21,6 +21,8 @@ export const PROVIDER_CAPABILITIES = [
   "permission",
   "permission.tool_policy",
   "timeline.plugin",
+  "tools.paseo.native",
+  "tools.mcp",
 ] as const;
 
 export type ProviderCapability = (typeof PROVIDER_CAPABILITIES)[number];
@@ -104,7 +106,21 @@ export interface ProviderToolPolicy {
   preapproved: Array<{ kind: "mcp"; server: string; tool: string }>;
 }
 
+export interface ProviderPaseoTool {
+  name: string;
+  description: string;
+  inputSchema: JsonValue;
+}
+
+export interface ProviderPaseoToolResult {
+  content: JsonValue[];
+  structuredContent?: JsonValue;
+  isError?: boolean;
+}
+
 export interface ProviderSessionConfig {
+  /** Session-scoped definitions only. Execution remains owned by the daemon. */
+  paseoTools?: readonly ProviderPaseoTool[];
   cwd: string;
   env: Readonly<Record<string, string>>;
   systemPrompt?: string;
@@ -242,6 +258,12 @@ export type ProviderContent =
     };
 
 export type ProviderInput =
+  | {
+      type: "session.tool_result";
+      sessionId: string;
+      callId: string;
+      result: ProviderPaseoToolResult;
+    }
   | { type: "catalog"; requestId: string; cwd?: string }
   | { type: "sessions"; requestId: string; query?: string; cwd?: string; limit?: number }
   | {
@@ -550,6 +572,8 @@ export type ProviderTimelineItem =
     });
 
 export type ProviderEvent =
+  | { type: "session.tool_call"; sessionId: string; callId: string; name: string; input: JsonValue }
+  | { type: "session.tool_cancel"; sessionId: string; callId: string }
   | { type: "catalog"; requestId: string; catalog: ProviderCatalog }
   | { type: "sessions"; requestId: string; sessions: ProviderSessionSummary[] }
   | { type: "request.completed"; requestId: string }
@@ -640,10 +664,13 @@ export function requiredProviderCapabilities(input: ProviderInput): readonly Pro
       return ["session.list"];
     case "session.open": {
       const capabilities: ProviderCapability[] = [];
+      if (input.config.paseoTools !== undefined) capabilities.push("tools.paseo.native");
       if (input.persistence) capabilities.push("session.persistence");
       if (input.config.toolPolicy) capabilities.push("permission.tool_policy");
       return capabilities;
     }
+    case "session.tool_result":
+      return ["tools.paseo.native"];
     case "session.prompt":
       return requiredPromptCapabilities(input.prompt);
     case "session.permission":
@@ -731,8 +758,18 @@ const providerPermissionResponseSchema: z.ZodType<ProviderPermissionResponse> =
       })
       .strip(),
   ]);
+const paseoToolResultSchema = z
+  .object({
+    content: z.array(z.json()),
+    structuredContent: z.json().optional(),
+    isError: z.boolean().optional(),
+  })
+  .strip();
 const sessionConfigSchema = z
   .object({
+    paseoTools: z
+      .array(z.object({ name: idSchema, description: z.string(), inputSchema: z.json() }).strict())
+      .optional(),
     cwd: z.string(),
     env: z.record(z.string(), z.string()),
     systemPrompt: z.string().optional(),
@@ -886,6 +923,14 @@ const configChangesSchema = z
   .strict();
 
 export const ProviderInputSchema: z.ZodType<ProviderInput> = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("session.tool_result"),
+      sessionId: idSchema,
+      callId: idSchema,
+      result: paseoToolResultSchema,
+    })
+    .strict(),
   z
     .object({ type: z.literal("catalog"), requestId: idSchema, cwd: z.string().optional() })
     .strict(),
@@ -1280,6 +1325,18 @@ const providerPermissionRequestSchema: z.ZodType<ProviderPermissionRequest> = z
   .strip();
 
 export const ProviderEventSchema: z.ZodType<ProviderEvent> = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("session.tool_call"),
+      sessionId: idSchema,
+      callId: idSchema,
+      name: idSchema,
+      input: z.json(),
+    })
+    .strip(),
+  z
+    .object({ type: z.literal("session.tool_cancel"), sessionId: idSchema, callId: idSchema })
+    .strip(),
   z.object({ type: z.literal("catalog"), requestId: idSchema, catalog: catalogSchema }).strip(),
   z
     .object({
