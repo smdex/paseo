@@ -226,9 +226,12 @@ export function selectedModel(runtime: {
 }): string | undefined {
   if (!runtime.model || !runtime.provider) return runtime.model;
   const method = runtime.auth_method === "api_key" ? "api key" : runtime.auth_method;
-  if (method) return routeModel(runtime.model, runtime.provider, method);
+  const routed = method ? routeModel(runtime.model, runtime.provider, method) : runtime.model;
+  if (routed !== runtime.model) return routed;
   const routes = runtime.routes?.filter(
-    (route) => route.model === runtime.model && route.provider === runtime.provider,
+    (route) =>
+      route.model === runtime.model &&
+      route.provider.toLowerCase() === runtime.provider!.toLowerCase(),
   );
   if (routes?.length === 1)
     return routeModel(runtime.model, runtime.provider, routes[0]!.api_method);
