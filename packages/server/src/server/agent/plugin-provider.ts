@@ -1074,13 +1074,32 @@ class PluginAgentClient implements AgentClient {
       limit: options.limit,
     });
     return sessions.map((session) => ({
-      providerHandleId: encodePersistence(session.persistence),
+      providerHandleId: session.id ?? encodePersistence(session.persistence),
+      canonicalProviderHandleId: encodePersistence(session.persistence),
       cwd: session.cwd,
       title: session.title ?? null,
       firstPromptPreview: null,
       lastPromptPreview: session.description ?? null,
       lastActivityAt: parseProviderDate(session.updatedAt),
     }));
+  }
+
+  async resolveImportSessionHandle(input: ImportProviderSessionInput): Promise<string> {
+    if (input.providerHandleId.startsWith("plugin:")) {
+      decodePersistenceId(input.providerHandleId);
+      return input.providerHandleId;
+    }
+    const sessions = await this.runtime.listSessions({
+      cwd: input.cwd,
+      query: input.providerHandleId,
+    });
+    const matches = sessions.filter((session) => session.id === input.providerHandleId);
+    if (matches.length !== 1) {
+      throw new Error(
+        `Plugin provider session identity must match exactly one session: ${input.providerHandleId}`,
+      );
+    }
+    return encodePersistence(matches[0]!.persistence);
   }
 
   async importSession(
@@ -1090,7 +1109,7 @@ class PluginAgentClient implements AgentClient {
     const session = await this.openSession({
       config: { ...context.config, provider: this.provider, cwd: input.cwd },
       launchContext: context.launchContext,
-      persistence: decodePersistenceId(input.providerHandleId),
+      persistence: decodePersistenceId(await this.resolveImportSessionHandle(input)),
       history: "replay",
       persist: true,
     });
