@@ -8,6 +8,11 @@ export class JcodeError extends Error {
     super(message);
     this.name = "JcodeError";
   }
+
+  toJSON() {
+    // Error.message is non-enumerable, but provider diagnostics cross a JSON boundary.
+    return { code: this.code, message: this.message };
+  }
 }
 
 export const envelopeSchema = z
