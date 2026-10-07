@@ -84,6 +84,7 @@ export class Session {
   private reasoningSequence = 0;
   private failed = false;
   private systemPrompt: string | undefined;
+  private routes: z.infer<typeof runtimeSchema>["routes"] = [];
   private pendingTools: Extract<ProviderInput, { type: "session.open" }>["config"]["paseoTools"];
 
   constructor(
@@ -263,6 +264,7 @@ export class Session {
       { session_id: this.requireNative().session_id },
       runtimeSchema,
     );
+    this.routes = runtime.routes;
     this.config = runtimeConfig(runtime);
     this.emit({ type: "session.config", sessionId: this.id, config: this.config });
   }
@@ -584,7 +586,7 @@ export class Session {
       case "model_info":
         this.config = {
           ...this.config,
-          model: selectedModel(event) ?? this.config.model,
+          model: selectedModel({ ...event, routes: this.routes }) ?? this.config.model,
           thinkingOption: event.reasoning_effort,
           thinkingOptions: thinkingOptions(event.provider, event.model),
         };
