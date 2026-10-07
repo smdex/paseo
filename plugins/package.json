@@ -1,6 +1,10 @@
 {
   "name": "@getpaseo/builtin-plugins",
+<<<<<<< HEAD
   "version": "0.12.0",
+=======
+  "version": "0.12.0-beta.3-smdex.1",
+>>>>>>> 3a88c4302 (bump versoin fto 0.11.2-smdex)
   "private": true,
   "type": "module",
   "scripts": {
