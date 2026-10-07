@@ -7,6 +7,7 @@ import type {
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
 import { setImmediate as nextTurn } from "node:timers/promises";
+import { ProviderEventSchema } from "@getpaseo/plugin/server/provider";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import type { PaseoToolCatalog, PaseoToolDefinition, PaseoToolResult } from "./tools/types.js";
@@ -292,6 +293,47 @@ function expectNestedChildren(events: AgentStreamEvent[]) {
 }
 
 describe("PluginAgentClientRegistry", () => {
+  test("reload applies enabled default tool policy instead of the previous disabled snapshot", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness({
+      capabilities: [...CAPABILITIES, "tools.paseo.native"],
+    });
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([harness.registration]);
+    const snapshots = new ProviderSnapshotManager({ logger });
+    const manager = new AgentManager({
+      logger,
+      clients: registry.clients(),
+      paseoToolsEnabled: false,
+      paseoToolCatalogFactory: (runtime) =>
+        createPaseoToolCatalog({
+          logger,
+          agentManager: manager,
+          agentStorage: new AgentStorage("/unused-native-tools-test", logger),
+          providerSnapshotManager: snapshots,
+          callerAgentId: runtime.callerAgentId,
+          paseoToolPolicy:
+            runtime.paseoToolPolicy ?? manager.getPaseoToolPolicy(runtime.callerAgentId!),
+        }),
+    });
+    const agent = await manager.createAgent(
+      { provider: harness.registration.id, cwd: "/workspace" },
+      undefined,
+      { workspaceId: undefined },
+    );
+    expect(harness.inputs.findLast((input) => input.type === "session.open")).toMatchObject({
+      config: { paseoTools: [] },
+    });
+    manager.setPaseoToolsEnabled(true);
+    const reloaded = await manager.reloadAgentSession(agent.id);
+    const open = harness.inputs.findLast((input) => input.type === "session.open");
+    if (open?.type !== "session.open") throw new Error("Expected reload input");
+    expect(open.config.paseoTools?.map((tool) => tool.name)).toContain("list_agents");
+    expect(manager.getPaseoToolPolicy(agent.id)).toBeUndefined();
+    await reloaded.session?.close();
+    await registry.shutdown();
+    await snapshots.shutdown();
+  });
   test.each([
     {
       label: "growing text",
@@ -952,6 +994,55 @@ describe("PluginAgentClientRegistry", () => {
     } finally {
       await session.close();
       registry.replace([]);
+    }
+  });
+
+  test("resolves exact native import identities through configured provider wrappers", async () => {
+    const persistence = { version: 1, data: { token: "native-root" } };
+    const opaque = `plugin:${JSON.stringify(persistence)}`;
+    let duplicate = false;
+    const harness = createProviderHarness({
+      capabilities: ["session.list", "session.persistence"],
+      handleInput: async (input, emit) => {
+        if (input.type !== "sessions") return false;
+        const row = { id: "native-root", persistence, cwd: "/workspace" };
+        emit(
+          ProviderEventSchema.parse({
+            type: "sessions",
+            requestId: input.requestId,
+            sessions: duplicate ? [row, row] : [row],
+          }),
+        );
+        return true;
+      },
+    });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const providers = buildProviderRegistry(createTestLogger(), {
+      pluginProviders: registry.definitions(),
+      providerOverrides: { [harness.registration.id]: { options: { configured: true } } },
+    });
+    const client = providers[harness.registration.id]!.createClient(createTestLogger());
+    try {
+      expect(await client.listImportableSessions?.()).toMatchObject([
+        { providerHandleId: "native-root", canonicalProviderHandleId: opaque },
+      ]);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native-root", cwd: "/workspace" }),
+      ).resolves.toBe(opaque);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: opaque, cwd: "/workspace" }),
+      ).resolves.toBe(opaque);
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native", cwd: "/workspace" }),
+      ).rejects.toThrow("exactly one session");
+      duplicate = true;
+      await expect(
+        client.resolveImportSessionHandle?.({ providerHandleId: "native-root", cwd: "/workspace" }),
+      ).rejects.toThrow("exactly one session");
+      expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+    } finally {
+      await registry.shutdown();
     }
   });
 

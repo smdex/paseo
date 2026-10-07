@@ -1447,6 +1447,19 @@ export class AgentManager {
     });
   }
 
+  async resolveImportSessionHandle(input: {
+    provider: AgentProvider;
+    providerHandleId: string;
+    cwd: string;
+  }): Promise<string> {
+    this.assertAcceptingAgentRegistrations();
+    this.requireEnabledProvider(input.provider);
+    const client = this.requireClient(input.provider);
+    return client.resolveImportSessionHandle
+      ? client.resolveImportSessionHandle(input)
+      : input.providerHandleId;
+  }
+
   importProviderSession(input: {
     provider: AgentProvider;
     providerHandleId: string;
@@ -5375,7 +5388,7 @@ export class AgentManager {
     ) {
       context.paseoTools = await this.paseoToolCatalogFactory({
         callerAgentId: agentId,
-        paseoToolPolicy,
+        paseoToolPolicy: paseoToolPolicy ?? {},
       });
     }
     return context;
