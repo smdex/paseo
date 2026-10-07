@@ -210,6 +210,7 @@ function connect(launch: ProviderLaunch, negotiated: readonly string[]): Provide
           .map((row) => {
             const timestamp = row.last_active_at_ms ?? row.updated_at_ms;
             return {
+              id: row.session_id,
               persistence: { version: 1, data: { sessionId: row.session_id } },
               cwd: row.working_dir ?? "",
               title: row.title,
