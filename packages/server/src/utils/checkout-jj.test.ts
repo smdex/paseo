@@ -6,11 +6,18 @@ import { describe, expect, it, afterEach } from "vitest";
 import {
   getJjChangeMeta,
   getJjCommitFileDiff,
+  getJjDefaultBranch,
   getJjDiff,
+  getJjRefDerivedState,
+  getJjShortstat,
   getJjSnapshotFacts,
   getJjStatus,
+  getJjWorktreeState,
+  hasJjBookmark,
   jjFactsToCheckoutSnapshotFacts,
+  listJjBookmarkSuggestions,
   listJjCommits,
+  resolveJjBranchCheckout,
 } from "./checkout-jj.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
 
@@ -574,5 +581,103 @@ describeIfJj("checkout-jj change meta", () => {
 
     const baseMeta = await getJjChangeMeta(fixture.repoDir, "@-");
     expect(baseMeta?.bookmarks).toEqual(["main"]);
+  });
+});
+
+describeIfJj("checkout-jj dispatch helpers", () => {
+  it("getJjShortstat sums working-copy additions/deletions", async () => {
+    const fixture = scratch({ files: { "a.txt": "1\n2\n3\n" } });
+    fixture.jj(["new", "-m", "wip"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "1\nCHANGED\n3\n4\n");
+    writeFileSync(join(fixture.repoDir, "b.txt"), "new\n");
+
+    const shortstat = await getJjShortstat(fixture.repoDir);
+    expect(shortstat).toEqual({ additions: 3, deletions: 1 });
+  });
+
+  it("getJjShortstat returns null on an empty working copy", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["new", "-m", "fresh"]);
+    const shortstat = await getJjShortstat(fixture.repoDir);
+    expect(shortstat).toBeNull();
+  });
+
+  it("getJjWorktreeState reports dirty only with real changes", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["new", "-m", "clean"]);
+    const clean = await getJjWorktreeState(fixture.repoDir);
+    expect(clean.isDirty).toBe(false);
+
+    writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
+    const dirty = await getJjWorktreeState(fixture.repoDir);
+    expect(dirty.isDirty).toBe(true);
+    expect(dirty.diffStat).toEqual({ additions: 1, deletions: 1 });
+  });
+
+  it("getJjRefDerivedState derives ahead/behind vs base and upstream presence", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@"]);
+    fixture.jj(["new", "main", "-m", "first feature"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "a\nmore\n");
+    fixture.jj(["new", "-m", "second feature"]);
+
+    // Working directly on the base bookmark: same-name guard, mirroring git's
+    // getAheadBehind (base === branch → null).
+    const onBase = await getJjRefDerivedState(fixture.repoDir);
+    expect(onBase.aheadBehind).toBeNull();
+
+    // A distinct workspace bookmark derives counts above the base.
+    fixture.jj(["bookmark", "create", "feature-z", "-r", "@"]);
+    fixture.jj(["new", "-m", "third feature"]);
+    const onFeature = await getJjRefDerivedState(fixture.repoDir);
+    expect(onFeature.aheadBehind).toEqual({ ahead: 3, behind: 0 });
+    // No remote exists, so upstreamStatus stays null.
+    expect(onFeature.upstreamStatus).toBeNull();
+    expect(onFeature.diffStat).toBeNull();
+  });
+
+  it("getJjDefaultBranch resolves main/master bookmarks", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    expect(await getJjDefaultBranch(fixture.repoDir)).toBeNull();
+    fixture.jj(["bookmark", "create", "main", "-r", "@"]);
+    expect(await getJjDefaultBranch(fixture.repoDir)).toBe("main");
+  });
+
+  it("hasJjBookmark and resolveJjBranchCheckout answer bookmark lookups", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "feature-x", "-r", "@"]);
+
+    expect(await hasJjBookmark(fixture.repoDir, "feature-x")).toBe(true);
+    expect(await hasJjBookmark(fixture.repoDir, "missing")).toBe(false);
+    await expect(resolveJjBranchCheckout(fixture.repoDir, "feature-x")).resolves.toEqual({
+      kind: "local",
+      name: "feature-x",
+    });
+    await expect(resolveJjBranchCheckout(fixture.repoDir, "missing")).resolves.toEqual({
+      kind: "not-found",
+    });
+  });
+
+  it("listJjBookmarkSuggestions lists bookmarks with local presence", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@"]);
+    fixture.jj(["new", "main", "-m", "work"]);
+    fixture.jj(["bookmark", "create", "feature-y", "-r", "@"]);
+
+    const suggestions = await listJjBookmarkSuggestions(fixture.repoDir);
+    const names = suggestions.map((s) => s.name);
+    expect(names).toContain("main");
+    expect(names).toContain("feature-y");
+    for (const suggestion of suggestions) {
+      expect(suggestion.hasLocal).toBe(true);
+      expect(suggestion.hasRemote).toBe(false);
+      expect(Number.isFinite(suggestion.committerDate)).toBe(true);
+    }
+
+    const filtered = await listJjBookmarkSuggestions(fixture.repoDir, { query: "feature" });
+    expect(filtered.map((s) => s.name)).toEqual(["feature-y"]);
+
+    const limited = await listJjBookmarkSuggestions(fixture.repoDir, { limit: 1 });
+    expect(limited).toHaveLength(1);
   });
 });

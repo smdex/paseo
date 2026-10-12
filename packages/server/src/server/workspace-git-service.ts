@@ -14,20 +14,26 @@ import {
   type CheckoutSnapshotFacts,
   type CheckoutDiffCompare,
   type CheckoutDiffResult,
-  getCheckoutDiff,
-  getCheckoutRefDerivedState,
-  getCheckoutSnapshotFacts,
-  getCheckoutShortstat,
-  getCheckoutStatus,
-  getCheckoutWorktreeState,
-  getPullRequestStatus,
   forgeAuthStateFromError,
   hasOriginRemote,
-  listBranchSuggestions,
-  resolveRepositoryDefaultBranch,
-  resolveBranchCheckout,
-  resolveAbsoluteGitDir,
 } from "../utils/checkout-git.js";
+import {
+  dispatchGetCheckoutDiff,
+  dispatchGetCheckoutRefDerivedState,
+  dispatchGetCheckoutSnapshotFacts,
+  dispatchGetCheckoutShortstat,
+  dispatchGetCheckoutStatus,
+  dispatchGetCheckoutWorktreeState,
+  dispatchGetPullRequestStatus,
+  dispatchHasLocalBranch,
+  dispatchListBranchSuggestions,
+  dispatchListPaseoWorktrees,
+  dispatchResolveAbsoluteGitDir,
+  dispatchResolveBranchCheckout,
+  dispatchResolveCheckoutWatchRoot,
+  dispatchResolveRepositoryDefaultBranch,
+  dispatchRunStashList,
+} from "../utils/checkout-dispatch.js";
 import type {
   ForgeAuthState,
   ForgeService,
@@ -42,7 +48,13 @@ import {
   type ForgeResolver,
 } from "../services/forge-resolver.js";
 import { parseGitRevParsePath } from "../utils/git-rev-parse-path.js";
-import { isPathInsideRoot, looksLikeDefiniteWindowsPath } from "../utils/path.js";
+import {
+  createRealpathAwarePathMatcher,
+  getRealpathAwareRelativePath,
+  isPathInsideRoot,
+  isRealpathInsideRoot,
+  looksLikeDefiniteWindowsPath,
+} from "../utils/path.js";
 import {
   createRunGitCommand,
   runGitCommand,
@@ -50,7 +62,7 @@ import {
 } from "../utils/run-git-command.js";
 import { GitObservationPaths } from "./git-observation-paths.js";
 import { branchNameFromRef } from "../utils/worktree-metadata.js";
-import { listPaseoWorktrees, type PaseoWorktreeInfo } from "../utils/worktree.js";
+import { type PaseoWorktreeInfo } from "../utils/worktree.js";
 import { READ_ONLY_GIT_ENV } from "./checkout-git-utils.js";
 import { classifyGitMetadataPath, getPrunedGitMetadataPaths } from "./git-metadata-event-rules.js";
 import {
@@ -165,6 +177,10 @@ export interface WorkspaceGitRuntimeSnapshot {
     behindOfOrigin: number | null;
     hasRemote: boolean;
     diffStat: { additions: number; deletions: number } | null;
+    /** Backend discriminator ("jj" only on jj repos; unset means git). */
+    vcs?: "git" | "jj";
+    /** jj change id of the working-copy commit (jj only). */
+    changeId?: string | null;
   };
   forge: {
     featuresEnabled: boolean;
@@ -357,24 +373,24 @@ type WorkspaceGitRefreshState =
 
 interface WorkspaceGitServiceDependencies {
   subscribe: SubscribeToFileChanges;
-  getCheckoutSnapshotFacts: typeof getCheckoutSnapshotFacts;
-  getCheckoutRefDerivedState: typeof getCheckoutRefDerivedState;
-  getCheckoutStatus: typeof getCheckoutStatus;
-  getCheckoutShortstat: typeof getCheckoutShortstat;
-  getCheckoutWorktreeState: typeof getCheckoutWorktreeState;
-  getCheckoutDiff: typeof getCheckoutDiff;
-  getPullRequestStatus: typeof getPullRequestStatus;
-  resolveBranchCheckout: typeof resolveBranchCheckout;
-  resolveRepositoryDefaultBranch: typeof resolveRepositoryDefaultBranch;
-  listBranchSuggestions: typeof listBranchSuggestions;
-  listPaseoWorktrees: typeof listPaseoWorktrees;
+  getCheckoutSnapshotFacts: typeof dispatchGetCheckoutSnapshotFacts;
+  getCheckoutRefDerivedState: typeof dispatchGetCheckoutRefDerivedState;
+  getCheckoutStatus: typeof dispatchGetCheckoutStatus;
+  getCheckoutShortstat: typeof dispatchGetCheckoutShortstat;
+  getCheckoutWorktreeState: typeof dispatchGetCheckoutWorktreeState;
+  getCheckoutDiff: typeof dispatchGetCheckoutDiff;
+  getPullRequestStatus: typeof dispatchGetPullRequestStatus;
+  resolveBranchCheckout: typeof dispatchResolveBranchCheckout;
+  resolveRepositoryDefaultBranch: typeof dispatchResolveRepositoryDefaultBranch;
+  listBranchSuggestions: typeof dispatchListBranchSuggestions;
+  listPaseoWorktrees: typeof dispatchListPaseoWorktrees;
   /**
    * Adapter instances to bind by forge id instead of building from the registry
    * — the injection seam for the daemon's shared GitHub adapter and for test
    * fakes. Any forge not listed here is built (and cached once) by the registry.
    */
   forgeOverrides?: Record<string, ForgeService>;
-  resolveAbsoluteGitDir: (cwd: string) => Promise<string | null>;
+  resolveAbsoluteGitDir: typeof dispatchResolveAbsoluteGitDir;
   hasOriginRemote: (cwd: string) => Promise<boolean>;
   runGitFetch: (
     cwd: string,
@@ -554,18 +570,18 @@ function buildDefaultWorkspaceGitServiceDeps(
 ): WorkspaceGitServiceDependencies {
   return {
     subscribe,
-    getCheckoutSnapshotFacts,
-    getCheckoutRefDerivedState,
-    getCheckoutStatus,
-    getCheckoutShortstat,
-    getCheckoutWorktreeState,
-    getCheckoutDiff,
-    getPullRequestStatus,
-    resolveBranchCheckout,
-    resolveRepositoryDefaultBranch,
-    listBranchSuggestions,
-    listPaseoWorktrees,
-    resolveAbsoluteGitDir,
+    getCheckoutSnapshotFacts: dispatchGetCheckoutSnapshotFacts,
+    getCheckoutRefDerivedState: dispatchGetCheckoutRefDerivedState,
+    getCheckoutStatus: dispatchGetCheckoutStatus,
+    getCheckoutShortstat: dispatchGetCheckoutShortstat,
+    getCheckoutWorktreeState: dispatchGetCheckoutWorktreeState,
+    getCheckoutDiff: dispatchGetCheckoutDiff,
+    getPullRequestStatus: dispatchGetPullRequestStatus,
+    resolveBranchCheckout: dispatchResolveBranchCheckout,
+    resolveRepositoryDefaultBranch: dispatchResolveRepositoryDefaultBranch,
+    listBranchSuggestions: dispatchListBranchSuggestions,
+    listPaseoWorktrees: dispatchListPaseoWorktrees,
+    resolveAbsoluteGitDir: dispatchResolveAbsoluteGitDir,
     hasOriginRemote,
     runGitFetch: fetchWorkspaceGitRemote,
     runGitCommand,
@@ -860,16 +876,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.assertNotDisposed();
     const normalizedCwd = resolve(cwd);
     const normalizedBranch = branch.trim();
-    const ref = `refs/heads/${normalizedBranch}`;
-    const key = JSON.stringify(["local-branch", normalizedCwd, ref]);
-    return this.readAuxiliaryCache(this.localBranchCache, key, options, async () => {
-      const result = await this.deps.runGitCommand(["rev-parse", "--verify", "--quiet", ref], {
-        cwd: normalizedCwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-        acceptExitCodes: [0, 1],
-      });
-      return result.exitCode === 0;
-    });
+    const key = JSON.stringify(["local-branch", normalizedCwd, normalizedBranch]);
+    return this.readAuxiliaryCache(this.localBranchCache, key, options, () =>
+      dispatchHasLocalBranch(normalizedCwd, normalizedBranch, this.deps.runGitCommand),
+    );
   }
 
   suggestBranchesForCwd(
@@ -897,10 +907,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const paseoOnly = options?.paseoOnly !== false;
     const key = JSON.stringify(["stashes", normalizedCwd, paseoOnly]);
     return this.readAuxiliaryCache(this.stashListCache, key, readOptions, async () => {
-      const { stdout } = await this.deps.runGitCommand(["stash", "list", "--format=%gd%x00%s"], {
-        cwd: normalizedCwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-      });
+      const stdout = await dispatchRunStashList(normalizedCwd, this.deps.runGitCommand);
       return parseWorkspaceGitStashList(stdout, { paseoOnly });
     });
   }
@@ -2122,11 +2129,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private async resolveCheckoutWatchRoot(cwd: string): Promise<string | null> {
     try {
-      const { stdout } = await this.deps.runGitCommand(["rev-parse", "--show-toplevel"], {
-        cwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-      });
-      return parseGitRevParsePath(stdout);
+      return await dispatchResolveCheckoutWatchRoot(cwd, this.deps.runGitCommand);
     } catch {
       return null;
     }
@@ -3399,6 +3402,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       behindOfOrigin: checkoutStatus.behindOfOrigin,
       hasRemote: checkoutStatus.hasRemote,
       diffStat,
+      vcs: checkoutStatus.vcs,
+      changeId: checkoutStatus.changeId ?? null,
     };
     const loadedAtMs = this.deps.now().getTime();
     target.latestGitLoadedAtMs = loadedAtMs;

@@ -5734,6 +5734,8 @@ export class Session {
       aheadBehind: snapshot.git.aheadBehind,
       aheadOfOrigin: snapshot.git.aheadOfOrigin,
       behindOfOrigin: snapshot.git.behindOfOrigin,
+      vcs: snapshot.git.vcs,
+      changeId: snapshot.git.changeId ?? null,
     };
   }
 
