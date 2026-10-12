@@ -5,6 +5,8 @@ import { open as openFile, readFile, stat as statFile } from "fs/promises";
 import { setImmediate } from "node:timers/promises";
 import { TTLCache } from "@isaacs/ttlcache";
 import type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
+// Re-exported for jj-side modules that build the same wire shapes.
+export type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
 import { parseGitHubRemoteIdentity, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import { maxBase64EncryptedPlaintextByteLength } from "@getpaseo/relay";
 import type { Logger } from "pino";
@@ -83,7 +85,7 @@ let shortstatCacheTtlMs = DEFAULT_SHORTSTAT_CACHE_TTL_MS;
 let shortstatCache = createShortstatCache(shortstatCacheTtlMs);
 const shortstatInFlight = new Map<string, Promise<CheckoutShortstat | null>>();
 
-interface CheckoutReadCacheOptions {
+export interface CheckoutReadCacheOptions {
   force?: boolean;
   reason?: string;
 }
@@ -878,6 +880,10 @@ export interface CheckoutStatusGitNonPaseo {
   hasRemote: boolean;
   remoteUrl: string | null;
   isPaseoOwnedWorktree: false;
+  /** Backend discriminator carried to the wire (optional; git leaves it unset). */
+  vcs?: "git" | "jj";
+  /** jj change id of the working-copy commit (jj only). */
+  changeId?: string | null;
 }
 
 export interface CheckoutStatusGitPaseo {
@@ -894,6 +900,10 @@ export interface CheckoutStatusGitPaseo {
   hasRemote: boolean;
   remoteUrl: string | null;
   isPaseoOwnedWorktree: true;
+  /** Backend discriminator carried to the wire (optional; git leaves it unset). */
+  vcs?: "git" | "jj";
+  /** jj change id of the working-copy commit (jj only). */
+  changeId?: string | null;
 }
 
 export type CheckoutStatusGit = CheckoutStatusGitNonPaseo | CheckoutStatusGitPaseo;

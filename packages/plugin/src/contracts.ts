@@ -24,6 +24,8 @@ export interface PluginWorkspaceSnapshot {
   readonly projectRootPath: string;
   readonly directory: string;
   readonly projectKind: "git" | "non_git" | "directory";
+  /** Backend discriminator when the project is VCS-backed: "jj" for Jujutsu. */
+  readonly vcs?: "git" | "jj";
   readonly kind: "directory" | "local_checkout" | "checkout" | "worktree";
   readonly name: string;
   readonly title: string | null;
