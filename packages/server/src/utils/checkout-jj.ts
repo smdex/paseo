@@ -12,13 +12,18 @@ import {
 } from "./run-jj-command.js";
 import type {
   AheadBehind,
+  BranchCheckoutResolution,
+  BranchSuggestion,
   CheckoutCommit,
   CheckoutCommitFile,
   CheckoutCommitsResult,
   CheckoutDiffCompare,
   CheckoutDiffResult,
+  CheckoutRefDerivedState,
+  CheckoutShortstat,
   CheckoutSnapshotFacts,
   CheckoutStatusResult,
+  CheckoutWorktreeState,
   UpstreamStatus,
 } from "./checkout-git.js";
 
@@ -631,12 +636,15 @@ export async function getJjStatus(
     behindOfOrigin: upstreamStatus?.aheadBehind.behind ?? null,
     hasRemote,
     remoteUrl,
+    vcs: "jj" as const,
+    changeId: workingCopy.meta.changeId,
   };
 
   if (jjFacts.paseoOwnedWorktree && baseRef) {
     return {
       isGit: true,
       ...common,
+      baseRef,
       mainRepoRoot: identity.primaryRoot,
       isPaseoOwnedWorktree: true,
     };
@@ -711,7 +719,7 @@ async function resolveJjDiffRefs(
     return ["diff", "--git"];
   }
   const jjFacts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
-  const baseRef = compare.baseRef ?? jjFacts?.resolvedBaseRef ?? null;
+  const baseRef = compare.baseRef ?? (jjFacts?.isJj ? jjFacts.resolvedBaseRef : null) ?? null;
   if (!baseRef) {
     return null;
   }
@@ -939,7 +947,7 @@ export async function getJjCommitFileDiff({
 
   const oldRevision = meta.parents.length > 0 ? (meta.parents[0] ?? meta.commitId) : null;
   const parsedFiles = await parseAndHighlightDiff(result.stdout, cwd, {
-    getOldFileContent: (file) =>
+    getOldFileContent: async (file) =>
       oldRevision ? readJjFileContentAt(cwd, oldRevision, file.path, context) : null,
     getNewFileContent: (file) => readJjFileContentAt(cwd, meta.commitId, file.path, context),
   });
@@ -954,4 +962,171 @@ export async function getJjCommitFileDiff({
     return null;
   }
   return file;
+}
+
+// ------------------------------------------------------- dispatch helpers
+
+/**
+ * Summed additions/deletions of the working-copy change, mirroring
+ * getCheckoutShortstat's {additions, deletions} contract. Untracked-refused
+ * files are excluded (jj reports no hunks for them); callers that must not
+ * miss them read the facts' untrackedPaths directly.
+ */
+export async function getJjShortstat(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<CheckoutShortstat | null> {
+  const result = await runJj(["diff", "--git"], { cwd }, context);
+  if (result.stdout.trim().length === 0) {
+    return null;
+  }
+  const files = parseDiff(result.stdout);
+  if (files.length === 0) {
+    return null;
+  }
+  let additions = 0;
+  let deletions = 0;
+  for (const file of files) {
+    additions += file.additions;
+    deletions += file.deletions;
+  }
+  return { additions, deletions };
+}
+
+/** Ref-derived state for the service's incremental refresh, jj-flavored. */
+export async function getJjRefDerivedState(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<CheckoutRefDerivedState> {
+  const jjFacts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
+  if (!jjFacts.isJj) {
+    return { aheadBehind: null, diffStat: null, upstreamStatus: null };
+  }
+  const currentBranch = jjFacts.derivedBookmark;
+  const baseRef = jjFacts.resolvedBaseRef;
+  const factsContext = { ...context, facts: jjFacts };
+  const [aheadBehind, diffStat, upstreamStatus] = await Promise.all([
+    baseRef && currentBranch ? getJjAheadBehind(cwd, baseRef, currentBranch, factsContext) : null,
+    getJjShortstat(cwd, factsContext),
+    getJjUpstreamStatus(cwd, currentBranch, jjFacts.remotes, factsContext),
+  ]);
+  return { aheadBehind, diffStat, upstreamStatus };
+}
+
+/** Worktree state for the service's worktree refresh, jj-flavored. */
+export async function getJjWorktreeState(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<CheckoutWorktreeState> {
+  const [jjFacts, diffStat] = await Promise.all([
+    context?.facts ?? getJjSnapshotFacts(cwd, context),
+    getJjShortstat(cwd, context),
+  ]);
+  const isDirty =
+    jjFacts.isJj && (!jjFacts.workingCopy.empty || jjFacts.workingCopy.untrackedPaths.length > 0);
+  return { isDirty, diffStat };
+}
+
+/** Default bookmark ("main", then "master"); null when neither exists. */
+export async function getJjDefaultBranch(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<string | null> {
+  return resolveDefaultBookmark(cwd, context);
+}
+
+/** Bookmark existence probe backing the service's hasLocalBranch surface. */
+export async function hasJjBookmark(
+  cwd: string,
+  name: string,
+  context?: JjCheckoutContext,
+): Promise<boolean> {
+  const result = await runJj(
+    ["log", "--no-graph", "-r", `bookmarks("${name}")`, "-T", COMMIT_ID_LINES_TEMPLATE],
+    { cwd, acceptExitCodes: [0, 1] },
+    context,
+  );
+  if (result.exitCode !== 0) {
+    // Invalid bookmark pattern (weird characters) — treat as absent.
+    return false;
+  }
+  return countLines(result.stdout) > 0;
+}
+
+interface JjBookmarkListEntry {
+  name: string;
+  commitId: string;
+  committerDate: number;
+  hasRemote: boolean;
+}
+
+/**
+ * Local bookmarks as branch suggestions. `mine()`-scoped commit metadata comes
+ * from a single template query; remote presence from the tracked counterpart.
+ */
+export async function listJjBookmarkSuggestions(
+  cwd: string,
+  options?: { query?: string; limit?: number },
+  context?: JjCheckoutContext,
+): Promise<BranchSuggestion[]> {
+  const query = options?.query ?? "";
+  // `committer` is not a standalone template function — `self.committer()` is.
+  const [localResult, remoteResult] = await Promise.all([
+    runJj(
+      [
+        "log",
+        "--no-graph",
+        "-r",
+        "bookmarks()",
+        "-T",
+        'bookmarks.map(|b| b.name() ++ "\\t" ++ commit_id ++ "\\t" ++ self.committer().timestamp().format("%s") ++ "\\n").join("")',
+      ],
+      { cwd },
+      context,
+    ),
+    runJj(
+      [
+        "log",
+        "--no-graph",
+        "-r",
+        "remote_bookmarks()",
+        "-T",
+        'remote_bookmarks.map(|b| b.name() ++ "\\n").join("")',
+      ],
+      { cwd },
+      context,
+    ),
+  ]);
+  const remoteNames = new Set(remoteResult.stdout.split("\n").filter((line) => line.length > 0));
+  const entries: JjBookmarkListEntry[] = [];
+  for (const line of localResult.stdout.split("\n")) {
+    if (!line) {
+      continue;
+    }
+    const [name, commitId, dateSeconds] = line.split("\t");
+    const committerDate = Number(dateSeconds);
+    if (!name || !commitId || !Number.isFinite(committerDate)) {
+      continue;
+    }
+    entries.push({ name, commitId, committerDate, hasRemote: remoteNames.has(name) });
+  }
+  const filtered = query ? entries.filter((entry) => entry.name.includes(query)) : entries;
+  const limited = options?.limit !== undefined ? filtered.slice(0, options.limit) : filtered;
+  return limited.map((entry) => ({
+    name: entry.name,
+    committerDate: entry.committerDate * 1000,
+    hasLocal: true,
+    hasRemote: entry.hasRemote,
+  }));
+}
+
+/** Bookmark-backed branch checkout resolution for validation flows. */
+export async function resolveJjBranchCheckout(
+  cwd: string,
+  name: string,
+): Promise<BranchCheckoutResolution> {
+  if (await hasJjBookmark(cwd, name)) {
+    return { kind: "local", name };
+  }
+  return { kind: "not-found" };
 }

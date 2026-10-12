@@ -291,6 +291,8 @@ const WorkspaceGitRuntimeSchema = z
     aheadBehind: z.strictObject({ ahead: z.number(), behind: z.number() }).nullable().optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    vcs: z.enum(["git", "jj"]).optional(),
+    changeId: z.string().nullable().optional(),
   })
   .nullable()
   .optional();

@@ -54,6 +54,7 @@ import type {
 } from "./workspace-git-service.js";
 import type { GitCommandRuntimeMetricsSnapshot } from "../utils/git-command-runtime-metrics.js";
 import { snapshotGitCommandRuntimeMetrics } from "../utils/run-git-command.js";
+import { isJjFeatureAvailable, warmJjRuntime } from "../utils/vcs-backend.js";
 import { createPluginClientId, isPluginClientId } from "./plugins/plugin-session-identity.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { deriveProjectSlug } from "./workspace-git-metadata.js";
@@ -661,6 +662,9 @@ export class VoiceAssistantWebSocketServer {
     workspaceLabelService?: WorkspaceLabelService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
+    // Warm the jj runtime probe so the first server_info already reflects it
+    // (isJjFeatureAvailable reads the sync mirror populated here).
+    warmJjRuntime();
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
@@ -1937,6 +1941,10 @@ export class VoiceAssistantWebSocketServer {
         fsEntryDuplicate: true,
         // COMPAT(checkoutDiscardChanges): added in v0.3.0, remove gate after 2027-02-08.
         checkoutDiscardChanges: true,
+        // COMPAT(checkoutJj): advertised from the same gate checkout dispatch uses
+        // (jj runtime probe + dispatch enablement) so routing and capability can
+        // never disagree. Warm-up runs at server construction.
+        checkoutJj: isJjFeatureAvailable(),
         // COMPAT(agentProfiles): added in v0.3.2, remove gate after 2027-02-11.
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
