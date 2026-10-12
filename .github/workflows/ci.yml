@@ -212,6 +212,32 @@ jobs:
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code opencode-ai
 
+      # Pinned jj for the jj checkout suites (checkout-jj, checkout-dispatch).
+      # Every job that executes those suites must install jj — a local skip must
+      # never become a silent CI skip (checkout-dispatch.test.ts asserts presence
+      # under CI). macOS observation job runs an explicit non-jj file list.
+      - name: Install jj (Jujutsu)
+        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v0.45.1"
+          case "${{ runner.os }}" in
+            Linux) asset="jj-${version}-x86_64-unknown-linux-musl.tar.gz" ;;
+            Windows) asset="jj-${version}-x86_64-pc-windows-msvc.zip" ;;
+            *) echo "unsupported runner OS for jj install: ${{ runner.os }}"; exit 1 ;;
+          esac
+          curl -fsSL -o "${RUNNER_TEMP}/${asset}" "https://github.com/jj-vcs/jj/releases/download/${version}/${asset}"
+          mkdir -p "${RUNNER_TEMP}/jj"
+          if [[ "${asset}" == *.zip ]]; then
+            unzip -o "${RUNNER_TEMP}/${asset}" -d "${RUNNER_TEMP}/jj"
+          else
+            tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/jj"
+          fi
+          bin="$(find "${RUNNER_TEMP}/jj" -type f -name jj | head -n 1)"
+          "${bin}" --version
+          echo "$(dirname "${bin}")" >> "$GITHUB_PATH"
+
       - &server_build
         name: Build server dependencies
         run: npm run build:server-deps
@@ -295,7 +321,8 @@ jobs:
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
 
-      - name: Build server dependencies
+      - &server_build
+        name: Build server dependencies
         run: npm run build:server-deps
 
       - name: Run file observation tests

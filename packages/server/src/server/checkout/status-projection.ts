@@ -70,6 +70,8 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       isPaseoOwnedWorktree: true,
       error: null,
       requestId,
+      vcs: snapshot.git.vcs,
+      changeId: snapshot.git.changeId ?? null,
     };
   }
 
@@ -90,6 +92,8 @@ export function buildCheckoutStatusPayloadFromSnapshot({
     isPaseoOwnedWorktree: false,
     error: null,
     requestId,
+    vcs: snapshot.git.vcs,
+    changeId: snapshot.git.changeId ?? null,
   };
 }
 

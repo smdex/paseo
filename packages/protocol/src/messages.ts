@@ -3665,6 +3665,10 @@ export const ServerInfoStatusPayloadSchema = z
         agentHistorySearch: z.boolean().optional(),
         // COMPAT(checkoutRefresh): added in v0.1.86, remove gate after 2026-11-29.
         checkoutRefresh: z.boolean().optional(),
+        // COMPAT(checkoutJj): first-class jj checkout support; advertised only when
+        // the daemon's jj runtime probe passes and dispatch is enabled. Remove the
+        // gate once the client floor ships jj-aware UI.
+        checkoutJj: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
         workspaceMultiplicity: z.boolean().optional(),
         // COMPAT(projectRemove): added in v0.1.97, drop the gate when floor >= v0.1.97.
@@ -3978,6 +3982,10 @@ const WorkspaceGitRuntimePayloadSchema = z
       .optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    // Backend discriminator: "jj" on Jujutsu repositories, unset on git.
+    vcs: z.enum(["git", "jj"]).optional(),
+    // jj change id of the working-copy commit (jj only; null when unknown).
+    changeId: z.string().nullable().optional(),
   })
   .optional()
   .nullable();
@@ -5238,6 +5246,11 @@ const CheckoutStatusCommonSchema = z.object({
   // upstream branch name is not necessarily currentBranch, so composing one is wrong.
   // aheadOfOrigin/behindOfOrigin are measured against exactly this ref.
   upstreamRef: z.string().nullable().optional(),
+  // Backend discriminator for the checkout: "jj" on Jujutsu repositories,
+  // unset on git. Drives contextual labels; older clients ignore it.
+  vcs: z.enum(["git", "jj"]).optional(),
+  // jj change id of the working-copy commit (jj only; null when unknown).
+  changeId: z.string().nullable().optional(),
 });
 
 const CheckoutStatusNotGitSchema = CheckoutStatusCommonSchema.extend({

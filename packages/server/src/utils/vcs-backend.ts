@@ -72,10 +72,47 @@ export function isVersionAtLeast(version: string, minimum: string): boolean {
 }
 
 let jjRuntimeProbeCache: Promise<JjRuntimeProbe> | null = null;
+/** Sync-readable mirror of the resolved probe (set once the promise settles). */
+let jjRuntimeProbeResolved: JjRuntimeProbe | null = null;
+/** Bumped on reset so a stale in-flight probe cannot repopulate the mirror. */
+let jjRuntimeProbeGeneration = 0;
 
 /** Test seam: drop the cached probe so env changes take effect. */
 export function resetJjRuntimeCache(): void {
   jjRuntimeProbeCache = null;
+  jjRuntimeProbeResolved = null;
+  jjRuntimeProbeGeneration += 1;
+}
+
+/**
+ * The dispatch activation switch: PASEO_JJ_DISPATCH=0 turns jj routing off for
+ * the whole daemon, restoring pre-jj behavior exactly (git implementations
+ * with their own repo detection). Default: on.
+ */
+export function isJjDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PASEO_JJ_DISPATCH !== "0";
+}
+
+/**
+ * Whether the daemon may advertise the `checkoutJj` feature: the jj runtime
+ * is usable AND dispatch is enabled. This is the same gate dispatch routing
+ * uses (per-repo detection aside), so a client never sees the feature advertised
+ * for a daemon that would route a jj repo to git — or the reverse.
+ *
+ * Synchronous on purpose: server_info construction is sync. Call
+ * {@link warmJjRuntime} once at daemon startup so the first server_info already
+ * reflects the probe; before warm-up completes this returns false.
+ */
+export function isJjFeatureAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!isJjDispatchEnabled(env) || env.PASEO_DISABLE_JJ === "1") {
+    return false;
+  }
+  return jjRuntimeProbeResolved?.ok === true;
+}
+
+/** Fire-and-forget startup warm-up for {@link isJjFeatureAvailable}. */
+export function warmJjRuntime(): void {
+  void resolveJjRuntime();
 }
 
 /**
@@ -89,7 +126,16 @@ export function resolveJjRuntime(env: NodeJS.ProcessEnv = process.env): Promise<
   if (env.PASEO_DISABLE_JJ === "1") {
     return Promise.resolve({ ok: false, version: null, reason: "disabled" });
   }
-  jjRuntimeProbeCache ??= probeJjBinary();
+  if (!jjRuntimeProbeCache) {
+    const generation = jjRuntimeProbeGeneration;
+    const probe = probeJjBinary().then((result) => {
+      if (generation === jjRuntimeProbeGeneration) {
+        jjRuntimeProbeResolved = result;
+      }
+      return result;
+    });
+    jjRuntimeProbeCache = probe;
+  }
   return jjRuntimeProbeCache;
 }
 
