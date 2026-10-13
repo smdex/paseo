@@ -200,6 +200,18 @@ describe("git-actions-policy", () => {
     expect(jjActions.secondary.at(-2)).toMatchObject({ id: "new-change", label: "New change" });
   });
 
+  it("hides deferred merge actions on jj checkouts", () => {
+    const base = { hasRemote: true, isOnBaseBranch: false, aheadCount: 2 } as const;
+    const gitActions = buildGitActions(createInput({ ...base, shipDefault: "merge" }));
+    const jjActions = buildGitActions(createInput({ ...base, shipDefault: "merge", isJj: true }));
+
+    expect(gitActions.primary).toMatchObject({ id: "merge-branch" });
+    expect(gitActions.secondary.map((action) => action.id)).toContain("merge-branch");
+    expect(jjActions.primary?.id).not.toBe("merge-branch");
+    expect(jjActions.secondary.map((action) => action.id)).not.toContain("merge-branch");
+    expect(jjActions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
+  });
+
   it("prioritizes pull when the branch is behind origin", () => {
     const actions = buildGitActions(
       createInput({

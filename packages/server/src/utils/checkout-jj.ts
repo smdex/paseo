@@ -1333,3 +1333,86 @@ export async function jjMoveBookmark(
     throw new Error(`Failed to move bookmark ${name}`);
   }
 }
+
+// ------------------------------------------------------------- remote ops
+
+export class JjPushTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JjPushTargetError";
+  }
+}
+
+/**
+ * The remote push/fetch target: the single configured remote, "origin" when
+ * present, and a typed error naming the candidates when ambiguous (never a
+ * silent default — user config could otherwise redirect pushes).
+ */
+async function selectJjRemote(cwd: string, context?: JjCheckoutContext): Promise<JjRemoteInfo> {
+  const remotes = await listJjRemotes(cwd, context);
+  if (remotes.length === 0) {
+    throw new JjPushTargetError("No git remote is configured for this repository.");
+  }
+  if (remotes.length === 1) {
+    return remotes[0];
+  }
+  const origin = remotes.find((remote) => remote.name === "origin");
+  if (origin) {
+    return origin;
+  }
+  const names = remotes.map((remote) => remote.name).join(", ");
+  throw new JjPushTargetError(
+    `Multiple git remotes are configured (${names}); set up tracking or push a specific bookmark.`,
+  );
+}
+
+/**
+ * Push the workspace bookmark. jj refuses undescribed commits (verified:
+ * "Won't push commit <id> since it has no description") — the message is
+ * surfaced verbatim as an actionable error. A bookmarkless checkout fails
+ * typed: pushing requires a named line of work (plan §7).
+ */
+export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<void> {
+  const bookmark = await getJjWorkspaceBookmark(cwd, context);
+  if (!bookmark) {
+    throw new JjPushTargetError(
+      "No bookmark tracks this line of work yet. Describe the change and create a bookmark before pushing.",
+    );
+  }
+  const remote = await selectJjRemote(cwd, context);
+  await runJj(["git", "push", "--bookmark", bookmark, "--remote", remote.name], { cwd }, context);
+}
+
+/**
+ * Fetch the selected remote. jj imports tracked bookmarks; the working copy
+ * keeps its changes and new upstream commits appear as ancestors of the
+ * tracked bookmarks (the jj-native update flow — rebase/merge is explicit).
+ */
+export async function jjPull(cwd: string, context?: JjCheckoutContext): Promise<void> {
+  const remote = await selectJjRemote(cwd, context);
+  await runJj(["git", "fetch", "--remote", remote.name], { cwd }, context);
+}
+
+/**
+ * Rename the workspace bookmark (`jj bookmark rename OLD NEW`, verified on
+ * 0.45.1). Returns the previous and current names for the wire payload.
+ */
+export async function jjRenameBookmark(
+  cwd: string,
+  newName: string,
+  context?: JjCheckoutContext,
+): Promise<{ previousBranch: string | null; currentBranch: string | null }> {
+  assertSafeJjRef(newName, "bookmark");
+  const bookmark = await getJjWorkspaceBookmark(cwd, context);
+  if (!bookmark) {
+    throw new Error("No bookmark tracks this line of work, so there is nothing to rename.");
+  }
+  if (bookmark === newName) {
+    return { previousBranch: bookmark, currentBranch: bookmark };
+  }
+  if (await hasJjBookmark(cwd, newName, context)) {
+    throw new Error(`Bookmark already exists: ${newName}`);
+  }
+  await runJj(["bookmark", "rename", bookmark, newName], { cwd }, context);
+  return { previousBranch: bookmark, currentBranch: newName };
+}
