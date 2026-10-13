@@ -18,6 +18,8 @@ interface BranchSwitcherProps {
   workspaceId: string;
   workspaceDirectory: string | null;
   isGitCheckout: boolean;
+  /** Backend of the checkout; stash affordances are skipped on jj. */
+  vcs?: "git" | "jj" | null;
   testID?: string;
 }
 
@@ -32,6 +34,7 @@ export function BranchSwitcher({
   workspaceId,
   workspaceDirectory,
   isGitCheckout,
+  vcs = null,
   testID = "workspace-header-branch-switcher",
 }: BranchSwitcherProps) {
   const { t } = useTranslation();
@@ -48,6 +51,7 @@ export function BranchSwitcher({
     workspaceDirectory,
     currentBranchName,
     isGitCheckout,
+    vcs,
     isConnected,
     toast,
     queryClient,

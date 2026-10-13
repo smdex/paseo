@@ -847,6 +847,11 @@ export const ptBR: TranslationResources = {
           pending: "Arquivando...",
           success: "Arquivado",
         },
+        newChange: {
+          label: "Nova mudança",
+          pending: "Iniciando nova mudança...",
+          success: "Nova mudança iniciada",
+        },
         mergePr: {
           squash: "Merge",
           merge: "Merge",
@@ -927,6 +932,7 @@ export const ptBR: TranslationResources = {
         },
         toasts: {
           failedCommit: "Falha ao fazer commit",
+          failedNewChange: "Falha ao iniciar uma nova mudança",
           failedPull: "Falha ao fazer pull",
           failedPush: "Falha ao fazer push",
           failedPullAndPush: "Falha ao fazer pull e push",

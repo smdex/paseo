@@ -25,6 +25,7 @@ export type CheckoutGitAsyncActionId =
   | "disable-pr-auto-merge"
   | "merge-branch"
   | "merge-from-base"
+  | "new-change"
   | "discard-changes";
 
 type CheckoutKey = string;
@@ -122,6 +123,7 @@ interface CheckoutGitActionsStoreState {
   mergeBranch: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   mergeFromBase: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   discardChanges: (params: { serverId: string; cwd: string; paths: string[] }) => Promise<void>;
+  newChange: (params: { serverId: string; cwd: string }) => Promise<void>;
 }
 
 async function runCheckoutAction({
@@ -384,6 +386,20 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           throw new Error(
             payload.error?.message ?? i18n.t("workspace.fileActions.confirmRevert.failed"),
           );
+        }
+      },
+    });
+  },
+  newChange: async ({ serverId, cwd }) => {
+    await runCheckoutAction({
+      serverId,
+      cwd,
+      actionId: "new-change",
+      run: async () => {
+        const client = resolveClient(serverId);
+        const payload = await client.newChange({ cwd });
+        if (payload.error) {
+          throw new Error(payload.error.message);
         }
       },
     });

@@ -851,6 +851,11 @@ export const es: TranslationResources = {
           pending: "Archivando...",
           success: "Archivado",
         },
+        newChange: {
+          label: "Nuevo cambio",
+          pending: "Iniciando nuevo cambio...",
+          success: "Nuevo cambio iniciado",
+        },
         mergePr: {
           squash: "Fusionar PR (squash)",
           merge: "Fusionar PR (merge)",
@@ -937,6 +942,7 @@ export const es: TranslationResources = {
         },
         toasts: {
           failedCommit: "No se pudo comprometer",
+          failedNewChange: "No se pudo iniciar un nuevo cambio",
           failedPull: "No se pudo tirar",
           failedPush: "No se pudo empujar",
           failedPullAndPush: "No se pudo tirar y empujar",

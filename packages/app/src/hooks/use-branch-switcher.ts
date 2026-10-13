@@ -15,6 +15,8 @@ interface UseBranchSwitcherInput {
   workspaceDirectory: string | null;
   currentBranchName: string | null;
   isGitCheckout: boolean;
+  /** Backend of the checkout; jj auto-snapshots so stash affordances are skipped. */
+  vcs?: "git" | "jj" | null;
   isConnected: boolean;
   toast: ToastApi;
   queryClient: QueryClient;
@@ -35,6 +37,7 @@ export function useBranchSwitcher({
   workspaceDirectory,
   currentBranchName,
   isGitCheckout,
+  vcs = null,
   isConnected,
   toast,
   queryClient,
@@ -92,6 +95,8 @@ export function useBranchSwitcher({
 
   const maybeRestoreStashForBranch = useCallback(
     async (branchId: string) => {
+      // jj has no stash: the working copy is snapshotted on every switch.
+      if (vcs === "jj") return;
       if (!operations) return;
       try {
         const stashPayload = await operations.listPaseoStashes();
@@ -115,7 +120,7 @@ export function useBranchSwitcher({
         // Non-critical — user can still restore on next branch switch
       }
     },
-    [operations, invalidateStashAndCheckout, toast, t],
+    [operations, vcs, invalidateStashAndCheckout, toast, t],
   );
 
   const stashAndSwitch = useCallback(

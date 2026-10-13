@@ -1130,3 +1130,206 @@ export async function resolveJjBranchCheckout(
   }
   return { kind: "not-found" };
 }
+
+// ---------------------------------------------------------------- mutations
+
+const SAFE_JJ_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+function assertSafeJjRef(name: string, label: string): void {
+  if (!SAFE_JJ_REF_PATTERN.test(name)) {
+    throw new Error(`Invalid ${label}: ${name}`);
+  }
+}
+
+/**
+ * The bookmark that represents this workspace's line of work: the unique
+ * nearest-ancestor bookmark of @. Everything the mutation layer advances or
+ * moves refers to this bookmark (the stored base ref is never touched).
+ */
+export async function getJjWorkspaceBookmark(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<string | null> {
+  const facts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
+  return facts.isJj ? facts.derivedBookmark : null;
+}
+
+function advanceBookmarkArgs(bookmark: string): string[] {
+  assertSafeJjRef(bookmark, "bookmark");
+  // Scoped to exactly this bookmark (glob with no wildcards), so the base
+  // bookmark and unrelated bookmarks never advance. Verified on 0.45.1: jj
+  // new/jj commit move the bookmark from the parent onto the new working-copy
+  // change, keeping the workspace line git-visible in colocated repos.
+  return ["--config", `experimental-advance-branches.enabled-branches=["${bookmark}"]`];
+}
+
+export interface JjMutationResult {
+  /** Change id of the (new) working-copy change after the mutation. */
+  changeId: string;
+  /** Commit id of the working-copy change after the mutation. */
+  commitId: string;
+  /** Workspace bookmark advanced onto the working-copy change, if any. */
+  bookmark: string | null;
+}
+
+const WORKING_COPY_IDS_TEMPLATE = 'change_id ++ "\\n" ++ commit_id ++ "\\n"';
+
+async function readWorkingCopyIds(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<{ changeId: string; commitId: string }> {
+  const result = await runJj(
+    ["log", "--no-graph", "-r", "@", "-T", WORKING_COPY_IDS_TEMPLATE],
+    { cwd },
+    context,
+  );
+  const [changeId, commitId] = result.stdout.trim().split("\n");
+  if (!changeId || !commitId) {
+    throw new Error(`jj returned no working-copy ids for ${cwd}`);
+  }
+  return { changeId, commitId };
+}
+
+/**
+ * Finish the current change and start a new empty working-copy change.
+ * `jj commit` = describe @ + new @; with the advance config the workspace
+ * bookmark moves onto the new @, so the finished work lands ON the bookmark
+ * line (git-visible in colocated repos) exactly like a git branch tip.
+ */
+export async function jjCommit(
+  cwd: string,
+  options: { message: string },
+  context?: JjCheckoutContext,
+): Promise<JjMutationResult> {
+  const message = options.message.trim();
+  if (!message) {
+    throw new Error("Commit message is required");
+  }
+  const bookmark = await getJjWorkspaceBookmark(cwd, context);
+  await runJj(
+    ["commit", "-m", message, ...(bookmark ? advanceBookmarkArgs(bookmark) : [])],
+    { cwd },
+    context,
+  );
+  return finishMutation(cwd, bookmark, context);
+}
+
+/** Start a new working-copy change on top of the current one, keeping it. */
+export async function jjNew(
+  cwd: string,
+  options?: { message?: string },
+  context?: JjCheckoutContext,
+): Promise<JjMutationResult> {
+  const bookmark = await getJjWorkspaceBookmark(cwd, context);
+  const message = options?.message?.trim();
+  await runJj(
+    [
+      "new",
+      ...(message ? ["-m", message] : []),
+      ...(bookmark ? advanceBookmarkArgs(bookmark) : []),
+    ],
+    { cwd },
+    context,
+  );
+  return finishMutation(cwd, bookmark, context);
+}
+
+/** Set or replace the description of the current working-copy change. */
+export async function jjDescribe(
+  cwd: string,
+  options: { message: string },
+  context?: JjCheckoutContext,
+): Promise<JjMutationResult> {
+  const message = options.message.trim();
+  if (!message) {
+    throw new Error("Description is required");
+  }
+  await runJj(["describe", "-m", message], { cwd }, context);
+  return finishMutation(cwd, null, context);
+}
+
+/**
+ * Discard working-copy changes to the given paths (restore them from the
+ * parent). Empty path list is a no-op, mirroring git's discardChanges.
+ */
+export async function jjDiscard(cwd: string, paths: string[]): Promise<void> {
+  const fileset = jjFilesetArg(paths);
+  if (!fileset) {
+    return;
+  }
+  await runJj(["restore", ...fileset], { cwd });
+}
+
+async function finishMutation(
+  cwd: string,
+  bookmark: string | null,
+  context?: JjCheckoutContext,
+): Promise<JjMutationResult> {
+  const ids = await readWorkingCopyIds(cwd, context);
+  return { ...ids, bookmark };
+}
+
+/**
+ * Point the working copy at an existing bookmark's change (`jj edit`). The
+ * caller must have validated the bookmark exists and the tree is clean: jj
+ * edits are only safe when @ carries no unmerged work.
+ */
+export async function jjEditBookmark(cwd: string, bookmark: string): Promise<void> {
+  assertSafeJjRef(bookmark, "bookmark");
+  await runJj(["edit", bookmark], { cwd });
+}
+
+/**
+ * Create a bookmark on the current working-copy change. Mirrors the git
+ * branch-creation flow: the workspace continues on a fresh bookmarked line.
+ */
+export async function jjCreateBookmark(cwd: string, name: string): Promise<void> {
+  assertSafeJjRef(name, "bookmark");
+  await runJj(["bookmark", "create", name], { cwd });
+}
+
+/**
+ * Move a bookmark to a revision, guarded by its expected current target so a
+ * stale expectation fails loudly instead of silently skipping.
+ */
+export async function jjMoveBookmark(
+  cwd: string,
+  name: string,
+  options: { fromRevset: string; toRevset: string },
+  context?: JjCheckoutContext,
+): Promise<void> {
+  assertSafeJjRef(name, "bookmark");
+  // `--from` mismatches exit 0 with "No bookmarks to update" (verified on
+  // 0.45.1), so the guard must be verified, not trusted.
+  const bookmarkHere = `bookmarks.match("${name}").len() ++ "\\n"`;
+  const before = await runJj(
+    ["log", "--no-graph", "-r", options.fromRevset, "-T", bookmarkHere],
+    { cwd },
+    context,
+  );
+  if (before.stdout.trim() !== "1") {
+    throw new Error(`Bookmark ${name} is not at the expected revision`);
+  }
+  await runJj(
+    [
+      "bookmark",
+      "move",
+      "--allow-backwards",
+      name,
+      "--from",
+      options.fromRevset,
+      "--to",
+      options.toRevset,
+    ],
+    { cwd },
+    context,
+  );
+  const after = await runJj(
+    ["log", "--no-graph", "-r", options.toRevset, "-T", bookmarkHere],
+    { cwd },
+    context,
+  );
+  if (after.stdout.trim() !== "1") {
+    throw new Error(`Failed to move bookmark ${name}`);
+  }
+}

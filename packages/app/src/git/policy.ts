@@ -21,6 +21,7 @@ export type GitActionId =
   | "disable-pr-auto-merge"
   | "merge-branch"
   | "merge-from-base"
+  | "new-change"
   | "archive-workspace";
 
 export interface GitAction {
@@ -77,6 +78,8 @@ export interface BuildGitActionsInput {
   behindOfOrigin: number | null;
   shouldPromoteArchive: boolean;
   shipDefault: "merge" | "pr";
+  /** True on jj checkouts; gates the jj-only "new change" action. */
+  isJj: boolean;
   runtime: Record<GitActionId, GitActionRuntimeState>;
 }
 
@@ -282,6 +285,18 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
     handler: input.runtime["merge-from-base"].handler,
   });
 
+  allActions.set("new-change", {
+    id: "new-change",
+    label: i18n.t("workspace.git.actions.newChange.label"),
+    pendingLabel: i18n.t("workspace.git.actions.newChange.pending"),
+    successLabel: i18n.t("workspace.git.actions.newChange.success"),
+    disabled: input.runtime["new-change"].disabled,
+    status: input.runtime["new-change"].status,
+    icon: input.runtime["new-change"].icon,
+    startsGroup: true,
+    handler: input.runtime["new-change"].handler,
+  });
+
   allActions.set("archive-workspace", {
     id: "archive-workspace",
     label: i18n.t("workspace.git.actions.archive.label"),
@@ -300,6 +315,9 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
   const secondaryIds = [...REMOTE_ACTION_IDS];
   if (!input.isOnBaseBranch) {
     secondaryIds.push(...getFeatureActionIds(input));
+  }
+  if (input.isJj) {
+    secondaryIds.push("new-change");
   }
   secondaryIds.push("archive-workspace");
 
