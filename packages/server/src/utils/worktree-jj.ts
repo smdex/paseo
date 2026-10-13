@@ -185,43 +185,52 @@ export async function createJjWorktree(options: {
   );
 
   let branchName: string;
-  if (source.kind === "branch-off") {
-    // Workspace-owned FEATURE bookmark at the workspace head: the name the
-    // caller asked for (or the slug when none). The base bookmark is never
-    // created or advanced by this flow (plan §2/§6).
-    const desired = source.branchName?.trim();
-    const candidate = desired && desired.length > 0 ? desired : workspaceName;
-    const branchValidation = validateBranchSlug(candidate);
-    if (!branchValidation.valid) {
-      await rollbackJjWorkspace(primaryRoot, workspaceName, worktreePath);
-      throw new Error(`Invalid branch name: ${branchValidation.error}`);
+  try {
+    if (source.kind === "branch-off") {
+      // Workspace-owned FEATURE bookmark at the workspace head: the name the
+      // caller asked for (or the slug when none). The base bookmark is never
+      // created or advanced by this flow (plan §2/§6).
+      const desired = source.branchName?.trim();
+      const candidate = desired && desired.length > 0 ? desired : workspaceName;
+      const branchValidation = validateBranchSlug(candidate);
+      if (!branchValidation.valid) {
+        throw new Error(`Invalid branch name: ${branchValidation.error}`);
+      }
+      if (await hasJjBookmark(primaryRoot, candidate)) {
+        throw new Error(`Bookmark already exists: ${candidate}`);
+      }
+      // Created from the workspace so it lands on the workspace head (@ there).
+      await runJjWorkspaceSafe(["bookmark", "create", candidate], { cwd: worktreePath });
+      branchName = candidate;
+    } else {
+      // Checkout semantics: the workspace sits at the existing bookmark's head;
+      // no new bookmark is created (mirrors `git worktree add <branch>`).
+      branchName = source.branchName;
     }
-    if (await hasJjBookmark(primaryRoot, candidate)) {
-      await rollbackJjWorkspace(primaryRoot, workspaceName, worktreePath);
-      throw new Error(`Bookmark already exists: ${candidate}`);
-    }
-    // Created from the workspace so it lands on the workspace head (@ there).
-    await runJjWorkspaceSafe(["bookmark", "create", candidate], { cwd: worktreePath });
-    branchName = candidate;
-  } else {
-    // Checkout semantics: the workspace sits at the existing bookmark's head;
-    // no new bookmark is created (mirrors `git worktree add <branch>`).
-    branchName = source.branchName;
-  }
 
-  writePaseoWorktreeMetadata(worktreePath, {
-    baseRefName,
-    baseRef: pinnedBase,
-  });
-
-  await seedPaseoConfigFile({ sourceCwd: primaryRoot, targetCwd: worktreePath });
-
-  if (options.runSetup) {
-    await runWorktreeSetupCommands({
-      worktreePath,
-      branchName,
-      cleanupOnFailure: true,
+    writePaseoWorktreeMetadata(worktreePath, {
+      baseRefName,
+      baseRef: pinnedBase,
+      // Managed ownership (review fix 7): mutations advance exactly this
+      // bookmark; derivation never substitutes for it.
+      jjBookmark: branchName,
     });
+
+    await seedPaseoConfigFile({ sourceCwd: primaryRoot, targetCwd: worktreePath });
+
+    if (options.runSetup) {
+      // cleanupOnFailure stays FALSE for jj: the git-only cleanup helper would
+      // run `git worktree remove` and leave the jj workspace registered
+      // (review fix 14) — the encompassing catch below rolls back jj-first.
+      await runWorktreeSetupCommands({
+        worktreePath,
+        branchName,
+        cleanupOnFailure: false,
+      });
+    }
+  } catch (error) {
+    await rollbackJjWorkspace(primaryRoot, workspaceName, worktreePath);
+    throw error;
   }
 
   return {
@@ -327,11 +336,27 @@ export interface DeleteJjPaseoWorktreeOptions {
   paseoHome?: string;
   worktreesBaseRoot?: string;
   /**
+   * Stable pin identity (workspaceId preferred). Falls back to the workspace
+   * name; a stable key keeps pins unique across same-name recreations
+   * (review fix 3).
+   */
+  pinKey?: string;
+  /**
    * Durable pin persistence (plan §6): called with the recovery bookmark name
    * BEFORE the workspace is forgotten; when provided and it fails, deletion
    * aborts with nothing removed.
    */
   persistRecoveryPin?: (pin: string) => Promise<void>;
+}
+
+/** Unsnapshotted workspace files would be lost by forget+remove (review fix 2). */
+export class JjUnsnapshottedFilesError extends Error {
+  constructor(readonly untrackedPaths: string[]) {
+    super(
+      `The jj workspace has ${untrackedPaths.length} file(s) jj refused to snapshot; archive them manually first`,
+    );
+    this.name = "JjUnsnapshottedFilesError";
+  }
 }
 
 /**
@@ -369,18 +394,35 @@ export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOption
     return;
   }
 
-  // The workspace's head commit must be readable before forget; a stale
-  // working copy (rewritten from another workspace) is refreshed first.
+  // Snapshot the workspace FIRST from inside it (review fix 2): reading
+  // `<name>@` from the primary does NOT snapshot the secondary's files, so
+  // unsnapshotted edits would be lost by forget+remove. The stale-safe run
+  // also recovers a stale working copy.
+  const snapshot = await runJjWorkspaceSafe(["status"], { cwd: resolvedWorktree });
+  const untrackedPaths = parseUntrackedPaths(snapshot.stdout);
+  if (untrackedPaths.length > 0) {
+    throw new JjUnsnapshottedFilesError(untrackedPaths);
+  }
   const headCommitId = await resolveWorkspaceHead(primaryRoot, match.name, resolvedWorktree);
 
-  // 1. Recovery pin: private bookmark at the workspace head. `paseo/…`
-  //    bookmarks are never push targets (push flows use the workspace
-  //    bookmark model), so the pin stays local.
-  const pin = recoveryPinName(match.name);
-  await runJj(["bookmark", "create", pin, "--revision", headCommitId], {
-    cwd: primaryRoot,
-    acceptExitCodes: [0, 1],
-  });
+  // 1. Recovery pin: private bookmark at the workspace head, STRICT (review
+  //    fix 3): any creation failure aborts with nothing removed; an existing
+  //    pin is moved to the captured head with a guarded --from and verified.
+  //    `paseo/…` bookmarks are never push targets.
+  const pin = recoveryPinName(options.pinKey ?? match.name);
+  const pinTarget = await readBookmarkTarget(primaryRoot, pin);
+  if (pinTarget === null) {
+    await runJj(["bookmark", "create", pin, "--revision", headCommitId], { cwd: primaryRoot });
+  } else if (pinTarget !== headCommitId) {
+    await runJj(
+      ["bookmark", "move", "--allow-backwards", pin, "--from", pinTarget, "--to", headCommitId],
+      { cwd: primaryRoot },
+    );
+  }
+  const pinnedAt = await readBookmarkTarget(primaryRoot, pin);
+  if (pinnedAt !== headCommitId) {
+    throw new Error(`Recovery pin ${pin} did not land on the workspace head; aborting deletion`);
+  }
 
   // 2. Durable persistence BEFORE forgetting. An empty workspace's change
   //    becomes unreachable after forget, so the pin bookmark is the only
@@ -388,7 +430,6 @@ export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOption
   if (options.persistRecoveryPin) {
     await options.persistRecoveryPin(pin);
   }
-
   // 3. Teardown + forget + remove.
   for (const teardownCwd of options.teardownCwds ?? [resolvedWorktree]) {
     // Repo-configured teardown commands are VCS-agnostic (paseo.json driven).
@@ -428,6 +469,43 @@ async function resolveWorkspaceHead(
 
 export function recoveryPinName(workspaceName: string): string {
   return `paseo/recovery/${workspaceName}`;
+}
+
+/** The exact commit a local bookmark points at; null when it does not resolve. */
+async function readBookmarkTarget(cwd: string, bookmark: string): Promise<string | null> {
+  const result = await runJj(
+    ["log", "--no-graph", "-r", `bookmarks(exact:"${bookmark}")`, "-T", COMMIT_ID_TEMPLATE],
+    { cwd, acceptExitCodes: [0, 1] },
+  );
+  const commitId = result.stdout.trim().split("\n")[0];
+  return commitId && result.exitCode === 0 ? commitId : null;
+}
+
+function parseUntrackedPaths(statusStdout: string): string[] {
+  // jj reports refused snapshots under "Untracked paths:" (verified on
+  // 0.45.1: files over snapshot.max-new-file-size land there).
+  const marker = statusStdout.indexOf("Untracked paths:");
+  if (marker === -1) {
+    return [];
+  }
+  return statusStdout
+    .slice(marker + "Untracked paths:".length)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("(the "))
+    .map((line) => line.replace(/^\.\.\//, ""));
+}
+
+/** Resolve a revset to its stable commit id (pinned-base helper for restores). */
+export async function resolveJjPinnedRevision(cwd: string, revset: string): Promise<string> {
+  const result = await runJj(["log", "--no-graph", "-r", revset, "-T", COMMIT_ID_TEMPLATE], {
+    cwd,
+  });
+  const commitId = result.stdout.trim().split("\n")[0];
+  if (!commitId) {
+    throw new Error(`Cannot resolve jj revision: ${revset}`);
+  }
+  return commitId;
 }
 
 /** True when the revset (e.g. a recovery bookmark) resolves to a commit. */

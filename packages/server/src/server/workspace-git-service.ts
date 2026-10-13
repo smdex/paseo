@@ -38,6 +38,7 @@ import {
 import { runJjCommand } from "../utils/run-jj-command.js";
 import {
   isJjDispatchEnabled,
+  isJjFeatureAvailable,
   resolveJjRepoIdentity,
   type JjRepoIdentity,
 } from "../utils/vcs-backend.js";
@@ -668,9 +669,11 @@ function resolveWorkspaceGitServiceDeps(
   return { ...buildDefaultWorkspaceGitServiceDeps(subscribe), ...deps };
 }
 
-/** Dispatch-gated jj identity probe: null whenever the jj surface is off. */
+/** Dispatch+runtime-gated jj identity probe: null whenever the jj surface is off. */
 function resolveDispatchedJjRepoIdentity(cwd: string): JjRepoIdentity | null {
-  return isJjDispatchEnabled() ? resolveJjRepoIdentity(cwd) : null;
+  // The warmed feature gate tracks the runtime probe, so observation never
+  // binds a target to the jj store while dispatch would refuse the runtime.
+  return isJjDispatchEnabled() && isJjFeatureAvailable() ? resolveJjRepoIdentity(cwd) : null;
 }
 
 /** Flat head-operation probe for the jj publication fence; null = unknown. */
@@ -685,6 +688,17 @@ async function readJjHeadOpIdViaCli(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+interface JjHeadOpProbe {
+  result: string | null;
+  /** True when an event arrived after the probe started; its result cannot prove the head. */
+  superseded: boolean;
+}
+
+interface JjHeadOpProbeEntry {
+  promise: Promise<JjHeadOpProbe>;
+  superseded: boolean;
 }
 
 export class WorkspaceGitServiceImpl implements WorkspaceGitService {
@@ -709,7 +723,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly workspaceTargets = new Map<string, WorkspaceGitTarget>();
   private readonly repoTargets = new Map<string, RepoGitTarget>();
   /** In-flight jj head-op probes keyed by shared store path (fence coalescing). */
-  private readonly jjHeadOpIdProbes = new Map<string, Promise<string | null>>();
+  private readonly jjHeadOpIdProbes = new Map<string, JjHeadOpProbeEntry>();
   private readonly workingTreeWatchTargets = new Map<string, WorkingTreeWatchTarget>();
   private readonly workingTreeWatchSetups = new Map<string, Promise<WorkingTreeWatchTarget>>();
   private readonly workingTreeWatchResolutions = new Map<string, Promise<WorkingTreeWatchTarget>>();
@@ -2550,7 +2564,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
       return;
     }
-    const headOpId = await this.readRepoJjHeadOpId(target);
+    const headProbe = await this.readRepoJjHeadOpId(target);
+    const headOpId = headProbe.superseded ? null : headProbe.result;
     if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
       return;
     }
@@ -2558,10 +2573,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     for (const workspaceKey of target.workspaceKeys) {
       const workspaceTarget = this.workspaceTargets.get(workspaceKey);
       // Publication fence: suppress only when the head operation is exactly
-      // the one the workspace's published snapshot was read at. Any external
-      // operation, or an own operation whose facts were never published,
-      // keeps this workspace refreshing — the miss direction is one extra
-      // refresh, never a lost one.
+      // the one the workspace's published snapshot was read at AND no event
+      // arrived after this probe started (a superseded probe cannot prove the
+      // head is still its result). Any external operation, or an own
+      // operation whose facts were never published, keeps this workspace
+      // refreshing — the miss direction is one extra refresh, never a lost
+      // one.
       if (headOpId !== null && workspaceTarget?.lastPublishedJjOpId === headOpId) {
         continue;
       }
@@ -2581,18 +2598,29 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   /** Head-op probe coalesced per shared store so event bursts share one run. */
-  private readRepoJjHeadOpId(target: RepoGitTarget): Promise<string | null> {
+  private readRepoJjHeadOpId(target: RepoGitTarget): Promise<JjHeadOpProbe> {
     const existing = this.jjHeadOpIdProbes.get(target.repoGitRoot);
     if (existing) {
-      return existing;
+      // Publication-fence soundness (review fix 8): sharing an in-flight
+      // probe whose result predates THIS event could suppress a refresh for
+      // an external operation that landed after the probe started. Mark the
+      // shared probe superseded; consumers then skip suppression.
+      existing.superseded = true;
+      return existing.promise;
     }
-    const probe = this.deps.readJjHeadOpId(target.cwd).finally(() => {
-      if (this.jjHeadOpIdProbes.get(target.repoGitRoot) === probe) {
-        this.jjHeadOpIdProbes.delete(target.repoGitRoot);
-      }
-    });
-    this.jjHeadOpIdProbes.set(target.repoGitRoot, probe);
-    return probe;
+    const entry: JjHeadOpProbeEntry = {
+      superseded: false,
+      promise: this.deps
+        .readJjHeadOpId(target.cwd)
+        .then((result): JjHeadOpProbe => ({ result, superseded: entry.superseded }))
+        .finally(() => {
+          if (this.jjHeadOpIdProbes.get(target.repoGitRoot)?.promise === entry.promise) {
+            this.jjHeadOpIdProbes.delete(target.repoGitRoot);
+          }
+        }),
+    };
+    this.jjHeadOpIdProbes.set(target.repoGitRoot, entry);
+    return entry.promise;
   }
 
   /**
@@ -3262,22 +3290,15 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     previous: Set<string> = new Set(),
   ): Promise<{ ignored: Set<string>; failed: boolean }> {
     const ignored = new Set<string>();
-    // jj-backed checkouts: colocated repos keep the git evaluation — the
-    // shared `.git` is coherent there (documented read-only exception; jj
-    // auto-export keeps refs in sync). Native jj has no git repository to ask
-    // and jj 0.45 has no ignored-directory listing, so use a static floor of
-    // dependency/build cache directories instead of spawning git against a
-    // store the git CLI cannot even see. ponytail(jj-ignore): replace with a
-    // jj-native ignore evaluation when the CLI grows one.
+    // jj-backed ignore evaluation for EVERY jj checkout (review fix 10: the
+    // colocated git exception is gone, and the static floor hid tracked
+    // files). Candidates are the cache-directory floor plus top-level
+    // gitignore directories; a candidate is excluded only when it contains NO
+    // tracked file (checked via `jj file list`), so builds that commit their
+    // output stay observable.
     const jjIdentity = this.deps.resolveJjRepoIdentity(rootPath);
-    if (jjIdentity && !jjIdentity.colocated) {
-      for (const name of JJ_FALLBACK_IGNORED_DIRECTORIES) {
-        const candidate = join(rootPath, name);
-        if (existsSync(candidate)) {
-          ignored.add(candidate);
-        }
-      }
-      return { ignored, failed: false };
+    if (jjIdentity) {
+      return this.loadJjIgnoredDirs(rootPath);
     }
     try {
       const result = await this.deps.runGitCommand(
@@ -3302,6 +3323,72 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return { ignored: previous, failed: true };
     }
 
+    return { ignored, failed: false };
+  }
+
+  /**
+   * jj-owned ignore evaluation (review fix 10). One `jj file list` call yields
+   * the tracked tree; candidates (cache floor + top-level gitignore dirs) are
+   * excluded only when fully untracked. No git spawns on any jj checkout.
+   */
+  private async loadJjIgnoredDirs(
+    rootPath: string,
+  ): Promise<{ ignored: Set<string>; failed: boolean }> {
+    const ignored = new Set<string>();
+    let trackedFiles: string[] = [];
+    try {
+      const listed = await runJjCommand(["file", "list"], { cwd: rootPath });
+      trackedFiles = listed.stdout.split("\n").filter((line) => line.length > 0);
+    } catch {
+      // Without the tracked tree nothing can be safely excluded.
+      return { ignored, failed: true };
+    }
+    const trackedDirectories = new Set(
+      trackedFiles.flatMap((file) => {
+        const separator = file.lastIndexOf("/");
+        return separator > 0 ? [file.slice(0, separator)] : [];
+      }),
+    );
+    const candidates = new Set<string>(JJ_FALLBACK_IGNORED_DIRECTORIES);
+    try {
+      const gitignore = await readFile(join(rootPath, ".gitignore"), "utf8");
+      for (const rawLine of gitignore.split("\n")) {
+        let line = rawLine.trim();
+        if (!line || line.startsWith("#") || line.startsWith("!")) {
+          continue;
+        }
+        // Directory patterns carry a trailing slash; strip it. Patterns with
+        // an EMBEDDED slash address subdirectories — skip those (only
+        // top-level ignores can become watcher-excluded roots).
+        if (line.endsWith("/")) {
+          line = line.slice(0, -1);
+        }
+        if (line.includes("/")) {
+          continue;
+        }
+        candidates.add(line);
+      }
+    } catch {
+      // No readable .gitignore: the static floor still applies.
+    }
+    for (const name of candidates) {
+      const candidate = join(rootPath, name);
+      if (!existsSync(candidate)) {
+        continue;
+      }
+      if (trackedFiles.some((file) => file === name || file.startsWith(`${name}/`))) {
+        // Tracked content inside: keep it observable.
+        continue;
+      }
+      if (
+        [...trackedDirectories].some(
+          (directory) => directory === name || directory.startsWith(`${name}/`),
+        )
+      ) {
+        continue;
+      }
+      ignored.add(candidate);
+    }
     return { ignored, failed: false };
   }
 

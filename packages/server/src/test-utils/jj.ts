@@ -29,7 +29,7 @@ export interface ScratchJjRepoFixture {
   /** The initialized jj repo root. */
   repoDir: string;
   /** Run jj in the fixture repo with deterministic config/env. */
-  jj: (args: string[]) => { stdout: string; stderr: string; status: number | null };
+  jj: (args: string[], cwd?: string) => { stdout: string; stderr: string; status: number | null };
   dispose: () => void;
 }
 
@@ -85,7 +85,9 @@ export function createScratchJjRepo(options?: {
   return {
     dir,
     repoDir,
-    jj: (args) => run(args, repoDir),
+    // cwd defaults to the repo root; passing a workspace dir targets it (the
+    // run helper resolves the same deterministic config/env either way).
+    jj: (args, cwd) => run(args, cwd ?? repoDir),
     dispose: () => {
       rmSync(dir, { recursive: true, force: true });
     },

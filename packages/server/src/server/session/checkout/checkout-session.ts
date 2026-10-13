@@ -44,15 +44,15 @@ import {
   createPullRequest,
   forgeAuthStateFromError,
   isForgeAuthError,
-  listCheckoutCommits,
-  getCommitFileDiff,
 } from "../../../utils/checkout-git.js";
 import {
   dispatchCommitChanges,
   dispatchDescribeChange,
+  dispatchGetCommitFileDiff,
   dispatchDiscardChanges,
   dispatchMergeFromBase,
   dispatchMergeToBase,
+  dispatchListCheckoutCommits,
   dispatchNewChange,
   dispatchPullCurrentBranch,
   dispatchPushCurrentBranch,
@@ -279,9 +279,9 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      const { baseRef, commits } = await listCheckoutCommits({
-        cwd: expandTilde(cwd),
-        context: { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      const { baseRef, commits } = await dispatchListCheckoutCommits(expandTilde(cwd), {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
       });
       this.host.emit({
         type: "checkout.commits.list.response",
@@ -306,7 +306,7 @@ export class CheckoutSession {
       if (path.length === 0 || isAbsolute(path) || path.split(/[\\/]/).includes("..")) {
         throw new Error(`Invalid path: ${path}`);
       }
-      const file = await getCommitFileDiff({ cwd: expandTilde(cwd), sha, path, signal });
+      const file = await dispatchGetCommitFileDiff(expandTilde(cwd), sha, path, signal);
       this.host.emit({
         type: "checkout.commits.file_diff.response",
         payload: { cwd, sha, path, file, error: null, requestId },

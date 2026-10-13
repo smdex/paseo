@@ -24,8 +24,10 @@ import {
   getCheckoutSnapshotFacts,
   getCheckoutStatus,
   getCheckoutWorktreeState,
+  getCommitFileDiff,
   getPullRequestStatus,
   listBranchSuggestions,
+  listCheckoutCommits,
   mergeFromBase,
   mergeToBase,
   pullCurrentBranch,
@@ -34,12 +36,16 @@ import {
   resolveAbsoluteGitDir,
   resolveBranchCheckout,
   resolveRepositoryDefaultBranch,
+  type CheckoutCommitsResult,
 } from "./checkout-git.js";
 import { parseGitRevParsePath } from "./git-rev-parse-path.js";
 import { runGitCommand, type RunGitCommand } from "./run-git-command.js";
+import { runJjCommand } from "./run-jj-command.js";
 import { listPaseoWorktrees, type PaseoWorktreeInfo } from "./worktree.js";
-import { listJjPaseoWorktrees } from "./worktree-jj.js";
+import { jjRevisionResolves, listJjPaseoWorktrees } from "./worktree-jj.js";
+import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import {
+  getJjCommitFileDiff,
   getJjDefaultBranch,
   getJjDiff,
   getJjRefDerivedState,
@@ -60,6 +66,7 @@ import {
   jjRenameBookmark,
   type JjMutationResult,
   listJjBookmarkSuggestions,
+  listJjCommits,
   resolveJjBranchCheckout,
   type JjCheckoutContext,
 } from "./checkout-jj.js";
@@ -314,9 +321,18 @@ export async function dispatchExecuteCreateBranchFromBase(
     });
     return;
   }
-  // New working-copy change on the base, bookmarked as the workspace line.
-  // The base bookmark itself is never moved by this flow.
-  await jjNew(cwd, {});
+  // New working-copy change ON THE VALIDATED BASE (review fix 12: `jj new`
+  // on the current @ would stack the line on an unrelated change), then the
+  // feature bookmark at that change. Advancement is pinned EMPTY for the
+  // `jj new` so user config cannot move any existing bookmark; the new
+  // bookmark becomes the line of work afterwards. The base is never moved.
+  if (!(await jjRevisionResolves(cwd, params.baseBranch))) {
+    throw new Error(`Base branch not found: ${params.baseBranch}`);
+  }
+  await runJjCommand(
+    ["new", params.baseBranch, "--config", "experimental-advance-branches.enabled-branches=[]"],
+    { cwd },
+  );
   await jjCreateBookmark(cwd, params.newBranchName);
 }
 
@@ -413,6 +429,29 @@ export async function dispatchStashPop(cwd: string, stashIndex: number): Promise
     return;
   }
   throw new NotSupportedOnJjError("Stash pop");
+}
+
+/** History reads: jj repos get jj changes; git keeps the git implementation. */
+export async function dispatchListCheckoutCommits(
+  cwd: string,
+  context?: CheckoutContext,
+): Promise<CheckoutCommitsResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return listCheckoutCommits({ cwd, context });
+  }
+  return listJjCommits({ cwd, context: toJjContext(context) });
+}
+
+export async function dispatchGetCommitFileDiff(
+  cwd: string,
+  sha: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<ParsedDiffFile | null> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return getCommitFileDiff({ cwd, sha, path, signal });
+  }
+  return getJjCommitFileDiff({ cwd, change: sha, path });
 }
 
 /** Push the current line of work; jj pushes the workspace bookmark explicitly. */

@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   JjUnavailableError,
   NotSupportedOnJjError,
   dispatchDescribeChange,
+  dispatchExecuteCreateBranchFromBase,
   dispatchGetCheckoutStatus,
   dispatchListPaseoWorktrees,
   dispatchNewChange,
@@ -36,6 +37,12 @@ function setEnv(name: string, value: string | undefined): void {
   } else {
     process.env[name] = value;
   }
+}
+
+/** jj dispatch is opt-in until Phase F; suites that exercise jj routing enable it. */
+function enableJjDispatch(): void {
+  setEnv("PASEO_JJ_DISPATCH", "1");
+  resetJjRuntimeCache();
 }
 
 afterEach(() => {
@@ -103,6 +110,8 @@ describe("checkout dispatch gate", () => {
   });
 
   describeIfJj("jj routing", () => {
+    beforeEach(() => enableJjDispatch());
+
     it("routes a jj repository to the jj status (vcs/changeId set)", async () => {
       const dir = scratchJj();
       const status = await dispatchGetCheckoutStatus(dir);
@@ -208,6 +217,7 @@ describe.skipIf(process.env.CI === undefined || jjAvailable)("jj presence under 
 });
 
 describeIfJj("jj change mutations", () => {
+  beforeEach(() => enableJjDispatch());
   it("describes the working-copy change and reports its ids", async () => {
     const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
     disposables.push(fixture.dispose);
@@ -255,5 +265,53 @@ describe("jj-only change mutations on git repositories", () => {
     await expect(dispatchDescribeChange(dir, { message: "x" })).rejects.toBeInstanceOf(
       NotSupportedOnJjError,
     );
+  });
+});
+
+describeIfJj("jj branch creation from base", () => {
+  beforeEach(() => enableJjDispatch());
+
+  it("creates the feature line ON the validated base, not the current change", async () => {
+    const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+    disposables.push(fixture.dispose);
+    const baseCommit = fixture
+      .jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"])
+      .stdout.trim();
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+
+    // Unrelated dirty working change on top of the base.
+    writeFileSync(join(fixture.repoDir, "unrelated.txt"), "x\n");
+
+    await dispatchExecuteCreateBranchFromBase(fixture.repoDir, {
+      baseBranch: "main",
+      newBranchName: "feat/from-base",
+    });
+
+    // The new bookmark's line starts at the base commit (its parent chain),
+    // and the base bookmark itself never moved.
+    const parent = fixture
+      .jj(["log", "--no-graph", "-r", "feat/from-base-", "-T", "commit_id"])
+      .stdout.trim();
+    expect(parent).toBe(baseCommit);
+    const mainStill = fixture
+      .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+      .stdout.trim();
+    expect(mainStill).toBe(baseCommit);
+    // The workspace now sits on the new feature line.
+    const current = fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "bookmarks.join(',')"])
+      .stdout.trim();
+    expect(current).toContain("feat/from-base");
+  });
+
+  it("fails typed on an unknown base", async () => {
+    const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+    disposables.push(fixture.dispose);
+    await expect(
+      dispatchExecuteCreateBranchFromBase(fixture.repoDir, {
+        baseBranch: "no-such-bookmark",
+        newBranchName: "feat/x",
+      }),
+    ).rejects.toThrow(/base branch not found/i);
   });
 });
