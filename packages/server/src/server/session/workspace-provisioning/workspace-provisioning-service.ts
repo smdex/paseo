@@ -1,3 +1,4 @@
+import { resolveEffectiveBackend } from "../../../utils/checkout-dispatch.js";
 import {
   readJjWorkspaceIncarnation,
   assertJjWorkspaceIncarnation,
@@ -103,13 +104,19 @@ export class WorkspaceProvisioningError extends Error {
   }
 }
 
-function validateArchivedJjIncarnation(workspace: PersistedWorkspaceRecord): void {
-  if (workspace.archivedAt && (workspace.jjWorkspaceId || workspace.recoveryBookmark)) {
-    assertJjWorkspaceIncarnation(
-      workspace.worktreeRoot ?? workspace.cwd,
-      workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
-    );
+async function validateArchivedJjIncarnation(workspace: PersistedWorkspaceRecord): Promise<void> {
+  if (!workspace.archivedAt) return;
+  const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
+  const expected = workspace.jjWorkspaceId ?? workspace.recoveryBookmark;
+  if (expected) {
+    assertJjWorkspaceIncarnation(backingRoot, expected);
+    return;
   }
+  if (workspace.kind !== "worktree") return;
+  const sourceBackend = await resolveEffectiveBackend(workspace.mainRepoRoot ?? backingRoot);
+  const backingBackend = await resolveEffectiveBackend(backingRoot);
+  if (sourceBackend === "jj" || backingBackend === "jj")
+    assertJjWorkspaceIncarnation(backingRoot, null);
 }
 
 export function createWorkspaceProvisioningService(deps: {
@@ -424,7 +431,7 @@ export function createWorkspaceProvisioningService(deps: {
   async function ensureWorkspaceRecordUnarchived(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
-    validateArchivedJjIncarnation(workspace);
+    await validateArchivedJjIncarnation(workspace);
     const project = await projectRegistry.get(workspace.projectId);
     if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
     const timestamp = new Date().toISOString();

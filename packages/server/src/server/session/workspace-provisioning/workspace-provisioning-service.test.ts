@@ -982,54 +982,57 @@ test("a directory that goes away while the git read is in flight keeps its place
   });
 });
 
-test.skipIf(!isJjAvailable())(
-  "directory provisioning refuses an archived jj record at a replacement incarnation",
-  async () => {
-    const fixture = createScratchJjRepo({ files: { "base.txt": "base\n" } });
-    try {
-      fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
-      const created = await createJjWorktree({
-        cwd: fixture.repoDir,
-        worktreeSlug: "reused",
-        worktreesRoot: path.join(tmpDir, "worktrees"),
-        source: { kind: "branch-off", baseBranch: "main", branchName: "new-feature" },
-      });
-      const project = await projectRegistry.getOrCreateActiveByRoot({
-        rootPath: fixture.repoDir,
-        kind: "git",
-        displayName: "project",
-        timestamp: ARCHIVED_AT,
-      });
-      const saved = createPersistedWorkspaceRecord({
-        workspaceId: "old",
-        projectId: project.projectId,
-        cwd: created.worktreePath,
-        kind: "worktree",
-        worktreeRoot: created.worktreePath,
-        jjWorkspaceId: "old-incarnation",
-        recoveryBookmark: "paseo/recovery/old",
-        displayName: "old",
-        isPaseoOwnedWorktree: true,
-        mainRepoRoot: fixture.repoDir,
-        createdAt: ARCHIVED_AT,
-        updatedAt: ARCHIVED_AT,
-        archivedAt: ARCHIVED_AT,
-      });
-      await workspaceRegistry.upsert(saved);
-      const head = fixture.jj(
-        ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
-        created.worktreePath,
-      ).stdout;
-      await expect(
-        provisioning.findOrCreateWorkspaceForDirectory(created.worktreePath),
-      ).rejects.toThrow("different incarnation");
-      expect(await workspaceRegistry.get("old")).toEqual(saved);
-      expect(
-        fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
-          .stdout,
-      ).toBe(head);
-    } finally {
-      fixture.dispose();
-    }
-  },
-);
+for (const savedAuthority of [true, false]) {
+  test.skipIf(!isJjAvailable())(
+    `directory provisioning refuses an archived jj record at a replacement incarnation (saved authority=${savedAuthority})`,
+    async () => {
+      const fixture = createScratchJjRepo({ files: { "base.txt": "base\n" } });
+      try {
+        fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+        const created = await createJjWorktree({
+          cwd: fixture.repoDir,
+          worktreeSlug: "reused",
+          worktreesRoot: path.join(tmpDir, "worktrees"),
+          source: { kind: "branch-off", baseBranch: "main", branchName: "new-feature" },
+        });
+        const project = await projectRegistry.getOrCreateActiveByRoot({
+          rootPath: fixture.repoDir,
+          kind: "git",
+          displayName: "project",
+          timestamp: ARCHIVED_AT,
+        });
+        const saved = createPersistedWorkspaceRecord({
+          workspaceId: "old",
+          projectId: project.projectId,
+          cwd: created.worktreePath,
+          kind: "worktree",
+          worktreeRoot: created.worktreePath,
+          ...(savedAuthority
+            ? { jjWorkspaceId: "old-incarnation", recoveryBookmark: "paseo/recovery/old" }
+            : {}),
+          displayName: "old",
+          isPaseoOwnedWorktree: true,
+          mainRepoRoot: fixture.repoDir,
+          createdAt: ARCHIVED_AT,
+          updatedAt: ARCHIVED_AT,
+          archivedAt: ARCHIVED_AT,
+        });
+        await workspaceRegistry.upsert(saved);
+        const head = fixture.jj(
+          ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+          created.worktreePath,
+        ).stdout;
+        await expect(
+          provisioning.findOrCreateWorkspaceForDirectory(created.worktreePath),
+        ).rejects.toThrow("different incarnation");
+        expect(await workspaceRegistry.get("old")).toEqual(saved);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
+            .stdout,
+        ).toBe(head);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+}
