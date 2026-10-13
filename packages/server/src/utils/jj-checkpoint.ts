@@ -281,6 +281,13 @@ const RestorePhaseSchema = z.object({
   status: z.enum(["pending", "completed"]),
 });
 export type JjRestorePhase = z.infer<typeof RestorePhaseSchema>;
+const RestoreReferenceSchema = RestorePhaseSchema.omit({ status: true });
+type JjRestoreReference = z.infer<typeof RestoreReferenceSchema>;
+
+function restoreReference(phase: JjRestorePhase): JjRestoreReference {
+  const { status: _status, ...reference } = phase;
+  return reference;
+}
 
 // Registration precedes UUID/metadata materialization. This root-keyed fact
 // must be discoverable even by a newly registered child with no UUID yet.
@@ -295,19 +302,67 @@ function jjRestorePhasePath(backingRoot: string, paseoHome?: string): string {
   );
 }
 
+async function readRestoreJson(path: string): Promise<unknown> {
+  try {
+    return JSON.parse(await fs.readFile(path, "utf8"));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function validateRestoreReference(
+  reference: JjRestoreReference,
+  backingRoot: string,
+  paseoHome?: string,
+): Promise<void> {
+  const archive = await readJjArchiveCheckpoint(backingRoot, reference.recoveryPin, paseoHome);
+  if (
+    !archive ||
+    reference.backingRoot !== workspaceLifecycleKey(backingRoot) ||
+    archive.backingRoot !== reference.backingRoot ||
+    archive.sharedStore !== reference.sharedStore ||
+    archive.incarnation !== reference.incarnation ||
+    archive.generation !== reference.archiveGeneration ||
+    !archive.recoveryPins.includes(reference.recoveryPin) ||
+    JSON.stringify(archive.selection) !== JSON.stringify(reference.selection)
+  )
+    throw new JjCheckpointError(
+      "The jj restoration reference differs from its retained archive authority; reconcile before unarchive, mutation or publication.",
+    );
+}
+
 export async function readJjRestorePhase(
   backingRoot: string,
   paseoHome?: string,
 ): Promise<JjRestorePhase | null> {
   try {
-    const phase = RestorePhaseSchema.parse(
-      JSON.parse(await fs.readFile(jjRestorePhasePath(backingRoot, paseoHome), "utf8")),
-    );
-    if (phase.backingRoot !== workspaceLifecycleKey(backingRoot))
-      throw new Error("Restore backing differs");
+    const path = jjRestorePhasePath(backingRoot, paseoHome);
+    const [payload, witness] = await Promise.all([
+      readRestoreJson(path),
+      readRestoreJson(`${path}.reference`),
+    ]);
+    const reference = witness === undefined ? null : RestoreReferenceSchema.parse(witness);
+    if (reference) await validateRestoreReference(reference, backingRoot, paseoHome);
+    if (payload === undefined) {
+      if (reference)
+        throw new JjCheckpointError(
+          "The required jj restoration phase is missing; its retained reference requires reconciliation before unarchive, mutation or publication.",
+        );
+      return null;
+    }
+    const phase = RestorePhaseSchema.parse(payload);
+    const authority = restoreReference(phase);
+    // Older phase payloads have no witness; they remain readable but never
+    // bypass their exact archived authority. New begins retain the witness.
+    await validateRestoreReference(authority, backingRoot, paseoHome);
+    if (reference && JSON.stringify(reference) !== JSON.stringify(authority))
+      throw new JjCheckpointError(
+        "The jj restoration phase differs from its retained reference; reconciliation is required.",
+      );
     return phase;
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    if (error instanceof JjCheckpointError) throw error;
     throw new JjCheckpointError(
       "The saved jj restoration phase cannot be read; reconcile it before unarchive, mutation or publication.",
     );
@@ -341,6 +396,13 @@ export async function beginJjCheckpointRestoration(
     selection: checkpoint.selection,
     status: "pending",
   };
+  const reference = restoreReference(phase);
+  await validateRestoreReference(reference, phase.backingRoot, paseoHome);
+  // A missing payload after this boundary is required state, not legacy absence.
+  await writeJsonFileAtomic(
+    `${jjRestorePhasePath(phase.backingRoot, paseoHome)}.reference`,
+    reference,
+  );
   await writeJsonFileAtomic(jjRestorePhasePath(phase.backingRoot, paseoHome), phase);
   return phase;
 }

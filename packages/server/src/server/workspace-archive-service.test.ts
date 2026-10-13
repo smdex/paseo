@@ -1358,6 +1358,12 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       const restored = (await readJjCheckpoint(root, h.fixture.dir))!;
       const { readJjRestorePhase } = await import("../utils/jj-checkpoint.js");
       expect((await readJjRestorePhase(root, h.fixture.dir))!.status).toBe("completed");
+      const { readdirSync } = await import("node:fs");
+      const phaseDirectory = path.join(h.fixture.dir, "projects", "jj-checkpoints", "restores");
+      expect(
+        readdirSync(phaseDirectory).filter((file) => file.endsWith(".reference")),
+      ).toHaveLength(1);
+
       expect(restored.publication).toEqual(publication);
       expect(restored.savedWip).toEqual([wip]);
       expect(restored.completedChanges).toEqual(checkpoint.completedChanges);
@@ -1446,7 +1452,10 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
 
   test.each(
     [false, true].flatMap((subproject) =>
-      ["registered", "uuid", "metadata", "pending-edit"].map((stage) => ({ subproject, stage })),
+      ["registered", "uuid", "metadata", "pending-edit", "lost-phase"].map((stage) => ({
+        subproject,
+        stage,
+      })),
     ),
   )(
     "interrupted restore refuses a fresh child after registry reload ($stage, subproject=$subproject)",
@@ -1487,7 +1496,15 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
         revision: pin,
       });
       if (stage !== "registered") writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
-      if (stage === "metadata") writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
+      if (stage === "metadata" || stage === "lost-phase")
+        writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
+      if (stage === "lost-phase") {
+        const { readdirSync } = await import("node:fs");
+        const directory = path.join(h.fixture.dir, "projects", "jj-checkpoints", "restores");
+        const payload = readdirSync(directory).find((file) => file.endsWith(".json"))!;
+        expect(existsSync(path.join(directory, `${payload}.reference`))).toBe(true);
+        rmSync(path.join(directory, payload));
+      }
       if (stage === "pending-edit") {
         await restoreJjCheckpoint({
           backingRoot: root,
@@ -1538,23 +1555,60 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
           }));
         },
       });
+      const refusal =
+        stage === "lost-phase"
+          ? "restoration phase is missing"
+          : "restoration requires reconciliation";
       expect(await service.inspect("lifecycle-a")).toMatchObject({ kind: "unavailable" });
-      await expect(service.restore("lifecycle-a")).rejects.toThrow(
-        "restoration requires reconciliation",
-      );
+      await expect(service.restore("lifecycle-a")).rejects.toThrow(refusal);
       await expect(
         jjDescribe(archived.cwd, { message: "Must not edit the fresh child" }, context),
-      ).rejects.toThrow("restoration requires reconciliation");
-      await expect(jjPush(archived.cwd, context)).rejects.toThrow(
-        "restoration requires reconciliation",
-      );
+      ).rejects.toThrow(refusal);
+      await expect(jjPush(archived.cwd, context)).rejects.toThrow(refusal);
       expect((await getJjChangeMeta(root, "@"))!.commitId).toBe(child.commitId);
       expect(await reloaded.get("lifecycle-a")).toEqual(archived);
-      expect((await readJjRestorePhase(root, h.fixture.dir))!.status).toBe("pending");
+      if (stage === "lost-phase")
+        await expect(readJjRestorePhase(root, h.fixture.dir)).rejects.toThrow(refusal);
+      else expect((await readJjRestorePhase(root, h.fixture.dir))!.status).toBe("pending");
       expect(readFileSync(path.join(root, "sub", "work.txt"), "utf8")).toBe(
         "retained exact-pin work\n",
       );
       expect(await jjRevisionResolves(h.fixture.repoDir, pin)).toBe(true);
+    },
+  );
+
+  test.each(["incarnation", "recoveryPin", "archiveGeneration"])(
+    "restore witness validates its %s against retained archive authority",
+    async (field) => {
+      const h = await lifecycleHarness();
+      const root = h.created.worktreePath;
+      const { readJjRestorePhase, beginJjCheckpointRestoration, readJjArchiveCheckpoint } =
+        await import("../utils/jj-checkpoint.js");
+      const { readdirSync } = await import("node:fs");
+      expect(await readJjRestorePhase(root, h.fixture.dir)).toBeNull(); // Never-phase compatibility.
+      await h.archive(createWorkspaceArchiveAuthorityPorts(h.registry));
+      const archived = (await h.registry.get("lifecycle-a"))!;
+      const checkpoint = (await readJjArchiveCheckpoint(
+        root,
+        archived.recoveryBookmark!,
+        h.fixture.dir,
+      ))!;
+      await beginJjCheckpointRestoration(checkpoint, archived.recoveryBookmark!, h.fixture.dir);
+      const directory = path.join(h.fixture.dir, "projects", "jj-checkpoints", "restores");
+      const referencePath = path.join(
+        directory,
+        readdirSync(directory).find((file) => file.endsWith(".reference"))!,
+      );
+      const reference = JSON.parse(readFileSync(referencePath, "utf8"));
+      if (field === "incarnation") reference.incarnation = "different-incarnation";
+      else if (field === "recoveryPin") reference.recoveryPin = "paseo/recovery/different-pin";
+      else reference.archiveGeneration++;
+      writeFileSync(referencePath, JSON.stringify(reference));
+      await expect(readJjRestorePhase(root, h.fixture.dir)).rejects.toThrow(
+        "differs from its retained archive authority",
+      );
+      expect(await h.registry.get("lifecycle-a")).toEqual(archived);
+      expect(await jjRevisionResolves(h.fixture.repoDir, archived.recoveryBookmark!)).toBe(true);
     },
   );
 
