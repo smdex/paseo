@@ -405,4 +405,46 @@ describe("jj command cancellation", () => {
     await deletion;
     expect(enteredDeletion).toBe(true);
   });
+
+  it.each([false, true])(
+    "timeout with signal-owned lifetime=%s preserves its result/exit contract",
+    async (owned) => {
+      let killed = () => {};
+      const didKill = new Promise<void>((resolve) => {
+        killed = resolve;
+      });
+      class DelayedTimeoutProcess extends FakeJjProcess {
+        public emitKill(): void {
+          killed();
+        }
+      }
+      const child = new DelayedTimeoutProcess();
+      const run = createRunJjCommand("timeout-lifetime", { spawn: () => child });
+      const controller = new AbortController();
+      const pending = run(["git", "fetch"], {
+        cwd: `/tmp/jj-timeout-lifetime-${owned}`,
+        timeout: 5,
+        ...(owned ? { signal: controller.signal } : {}),
+      });
+      const rejected = expect(pending).rejects.toThrow("timed out after 5ms");
+      let settled = false;
+      void pending
+        .finally(() => {
+          settled = true;
+        })
+        .catch(() => {});
+      try {
+        await didKill;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(!owned);
+        controller.abort(new Error("closed observation after timeout"));
+        child.emitExit(0);
+        await rejected;
+        expect(settled).toBe(true);
+      } finally {
+        child.emitExit(0);
+        await pending.catch(() => {});
+      }
+    },
+  );
 });

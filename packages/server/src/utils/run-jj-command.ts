@@ -320,7 +320,9 @@ function executeJjCommand(
           `jj command timed out after ${timeout}ms: ${command} (provenance: ${context.provenance})`,
         );
         child.kill("SIGKILL");
-        settle(() => reject(timeoutError));
+        // Signal-owned callers retain subprocess ownership through actual close.
+        // Ordinary callers keep the existing immediate timeout result contract.
+        if (!options.signal) settle(() => reject(timeoutError));
       }, timeout);
 
       stdout.on("data", (chunk: Buffer | string) => {
@@ -415,6 +417,7 @@ function executeJjCommand(
         }
 
         if (timeoutError) {
+          settle(() => reject(timeoutError));
           return;
         }
 
