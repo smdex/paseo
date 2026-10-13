@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -434,6 +435,143 @@ test("reopening an archived workspace refreshes placement without renaming it", 
   expect(reopened.updatedAt).toEqual(expect.any(String));
   expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
 });
+
+function realGitProvisioning(): WorkspaceProvisioningService {
+  return createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    isDirectory,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd) => {
+        const status = await getCheckoutStatus(cwd, { logger, paseoHome: tmpDir });
+        return checkoutLiteFromGitSnapshot(
+          cwd,
+          status.isGit
+            ? status
+            : {
+                isGit: false,
+                currentBranch: null,
+                remoteUrl: null,
+                repoRoot: null,
+                isPaseoOwnedWorktree: false,
+                mainRepoRoot: null,
+              },
+        );
+      },
+    }),
+  });
+}
+
+test.each(["active", "archived"] as const)(
+  "reopening an %s ordinary Git subproject reconciles Git-to-directory conversion",
+  async (state) => {
+    const repo = path.join(tmpDir, "repo");
+    const cwd = path.join(repo, "sub");
+    mkdirSync(cwd, { recursive: true });
+    execFileSync("git", ["init", "--initial-branch=main", repo], { stdio: "pipe" });
+    const file = path.join(cwd, "saved.txt");
+    writeFileSync(file, "preserved subproject work\n");
+    const service = realGitProvisioning();
+    const created = await service.findOrCreateWorkspaceForDirectory(cwd);
+    expect(created).toMatchObject({
+      cwd,
+      kind: "local_checkout",
+      worktreeRoot: repo,
+      isPaseoOwnedWorktree: false,
+    });
+    await workspaceRegistry.update(created.workspaceId, (current) => ({
+      ...current,
+      title: "Pinned subproject",
+      baseBranch: "main",
+    }));
+    if (state === "archived") await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
+    renameSync(path.join(repo, ".git"), path.join(tmpDir, "retained-git"));
+
+    const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+
+    expect(reopened).toMatchObject({
+      workspaceId: created.workspaceId,
+      projectId: created.projectId,
+      cwd,
+      kind: "directory",
+      branch: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+      displayName: created.displayName,
+      title: "Pinned subproject",
+      baseBranch: "main",
+      archivedAt: null,
+    });
+    expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
+    expect((await projectRegistry.get(created.projectId))?.kind).toBe("non_git");
+    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(readFileSync(file, "utf8")).toBe("preserved subproject work\n");
+    expect(existsSync(path.join(tmpDir, "retained-git", "HEAD"))).toBe(true);
+    expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+      created.workspaceId,
+    );
+  },
+);
+
+test.each(["active", "archived"] as const)(
+  "reopening an %s ordinary Git subproject reconciles a nearer repository boundary",
+  async (state) => {
+    const repo = path.join(tmpDir, "repo");
+    const nestedRepo = path.join(repo, "nested");
+    const cwd = path.join(nestedRepo, "sub");
+    mkdirSync(cwd, { recursive: true });
+    execFileSync("git", ["init", "--initial-branch=main", repo], { stdio: "pipe" });
+    const file = path.join(cwd, "saved.txt");
+    writeFileSync(file, "preserved nested work\n");
+    const service = realGitProvisioning();
+    const created = await service.findOrCreateWorkspaceForDirectory(cwd);
+    expect(created.worktreeRoot).toBe(repo);
+    if (state === "archived") await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
+    execFileSync("git", ["init", "--initial-branch=nested-main", nestedRepo], { stdio: "pipe" });
+    execFileSync("git", ["-C", nestedRepo, "add", "sub/saved.txt"], { stdio: "pipe" });
+    execFileSync(
+      "git",
+      [
+        "-C",
+        nestedRepo,
+        "-c",
+        "user.name=Provisioning Test",
+        "-c",
+        "user.email=provisioning@example.test",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "Initial nested checkout",
+      ],
+      { stdio: "pipe" },
+    );
+
+    const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+
+    expect(reopened).toMatchObject({
+      workspaceId: created.workspaceId,
+      projectId: created.projectId,
+      cwd,
+      kind: "local_checkout",
+      branch: "nested-main",
+      worktreeRoot: nestedRepo,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+      displayName: created.displayName,
+      archivedAt: null,
+    });
+    expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
+    expect((await projectRegistry.get(created.projectId))?.rootPath).toBe(cwd);
+    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(readFileSync(file, "utf8")).toBe("preserved nested work\n");
+    expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+      created.workspaceId,
+    );
+  },
+);
 
 test("opening a subpath of an archived git workspace mints a fresh workspace at the exact subpath", async () => {
   const repo = path.join(tmpDir, "repo");
