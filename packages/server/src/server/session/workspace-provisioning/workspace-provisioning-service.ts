@@ -1,3 +1,7 @@
+import {
+  readJjWorkspaceIncarnation,
+  assertJjWorkspaceIncarnation,
+} from "../../../utils/worktree-metadata.js";
 import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
 import { describeHookWorkspace } from "../../plugins/lifecycle/index.js";
 import { basename, resolve } from "node:path";
@@ -96,6 +100,15 @@ export class WorkspaceProvisioningError extends Error {
         : `Archived project: ${projectId}`,
     );
     this.name = "WorkspaceProvisioningError";
+  }
+}
+
+function validateArchivedJjIncarnation(workspace: PersistedWorkspaceRecord): void {
+  if (workspace.archivedAt && (workspace.jjWorkspaceId || workspace.recoveryBookmark)) {
+    assertJjWorkspaceIncarnation(
+      workspace.worktreeRoot ?? workspace.cwd,
+      workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
+    );
   }
 }
 
@@ -257,6 +270,8 @@ export function createWorkspaceProvisioningService(deps: {
       workspaceId: context?.workspaceId ?? generateWorkspaceId(),
       projectId: project.projectId,
       ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
+      jjWorkspaceId:
+        readJjWorkspaceIncarnation(checkout.worktreeRoot ?? normalizedCwd) ?? undefined,
       title: title?.trim() || null,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -293,6 +308,7 @@ export function createWorkspaceProvisioningService(deps: {
         baseBranch: input.baseBranch,
         mainRepoRoot: repoRoot,
       }),
+      jjWorkspaceId: readJjWorkspaceIncarnation(worktreeRoot) ?? undefined,
       title: input.title,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -408,6 +424,7 @@ export function createWorkspaceProvisioningService(deps: {
   async function ensureWorkspaceRecordUnarchived(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
+    validateArchivedJjIncarnation(workspace);
     const project = await projectRegistry.get(workspace.projectId);
     if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
     const timestamp = new Date().toISOString();

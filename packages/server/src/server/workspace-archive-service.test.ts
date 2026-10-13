@@ -29,6 +29,7 @@ import {
 } from "./workspace-registry.js";
 import { createWorkspaceRecoveryService } from "./session/workspace-recovery/workspace-recovery-service.js";
 import { jjRevisionResolves, listJjWorkspaces } from "../utils/worktree-jj.js";
+import { readJjWorkspaceIncarnation } from "../utils/worktree-metadata.js";
 import { createJjWorktree } from "../utils/worktree-jj.js";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
 
@@ -1094,6 +1095,22 @@ describeIfJj("archiveByScope on jj (sibling recovery authority)", () => {
       mainRepoRoot: fixture.repoDir,
     };
     const pinsByWorkspace = new Map<string, string>();
+    const incarnation = readJjWorkspaceIncarnation(created.worktreePath)!;
+    const siblingRecords = new Map(
+      ["ws-root", "ws-archived-earlier"].map((workspaceId) => [
+        workspaceId,
+        createPersistedWorkspaceRecord({
+          ...rootRef,
+          workspaceId,
+          projectId: "project",
+          displayName: workspaceId,
+          jjWorkspaceId: incarnation,
+          createdAt: "now",
+          updatedAt: "now",
+          archivedAt: workspaceId === "ws-root" ? null : "earlier",
+        }),
+      ]),
+    );
 
     const deps = createArchiveDeps({
       paseoHome: fixture.dir,
@@ -1101,6 +1118,7 @@ describeIfJj("archiveByScope on jj (sibling recovery authority)", () => {
       activeWorkspaces: [rootRef],
       findWorkspaceIdForCwd: async () => "ws-root",
     });
+    deps.getWorkspace = async (id) => siblingRecords.get(id) ?? null;
     deps.findWorkspaceIdsForBackingPath = async () => ["ws-root", "ws-archived-earlier"];
     deps.setWorkspaceRecoveryPin = async (workspaceId, pin) => {
       pinsByWorkspace.set(workspaceId, pin);
@@ -1149,6 +1167,7 @@ describeIfJj("jj durable archive and recovery", () => {
           displayName: workspaceId,
           branch: "feature",
           worktreeRoot: created.worktreePath,
+          jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
           baseBranch: "main",
           mainRepoRoot: fixture.repoDir,
           isPaseoOwnedWorktree: true,
@@ -1162,6 +1181,7 @@ describeIfJj("jj durable archive and recovery", () => {
       paseoWorktreesBaseRoot: worktreesRoot,
       activeWorkspaces: [],
     });
+    deps.getWorkspace = (id) => registry.get(id);
     deps.listActiveWorkspaces = async () =>
       (await registry.list()).filter((record) => !record.archivedAt);
     deps.archiveWorkspaceRecord = async (id) => {
@@ -1191,6 +1211,8 @@ describeIfJj("jj durable archive and recovery", () => {
     const root = await reloaded.get("ws-root");
     expect(sub?.recoveryBookmark).toMatch(/^paseo\/recovery\//);
     expect(root?.recoveryBookmark).toBe(sub?.recoveryBookmark);
+    expect(sub?.jjWorkspaceId).toMatch(/^[a-f0-9-]{36}$/);
+    expect(root?.jjWorkspaceId).toBe(sub?.jjWorkspaceId);
     const project = createPersistedProjectRecord({
       projectId: "project",
       rootPath: fixture.repoDir,
@@ -1233,6 +1255,48 @@ describeIfJj("jj durable archive and recovery", () => {
 });
 
 describeIfJj("jj archive with legacy placement", () => {
+  test("refuses an unknown legacy incarnation before archiving records or touching a live checkout", async () => {
+    const fixture = createScratchJjRepo({ files: { "file.txt": "keep live\n" } });
+    cleanupPaths.push(fixture.dir);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = path.join(fixture.dir, "custom-worktrees");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "unknown",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "unknown-feature" },
+    });
+    const record = createPersistedWorkspaceRecord({
+      workspaceId: "legacy",
+      projectId: "project",
+      cwd: created.worktreePath,
+      worktreeRoot: created.worktreePath,
+      kind: "worktree",
+      displayName: "legacy",
+      mainRepoRoot: fixture.repoDir,
+      isPaseoOwnedWorktree: true,
+      createdAt: "now",
+      updatedAt: "now",
+    });
+    const deps = createArchiveDeps({
+      paseoHome: fixture.dir,
+      paseoWorktreesBaseRoot: worktreesRoot,
+      activeWorkspaces: [record],
+    });
+    deps.getWorkspace = async () => record;
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: "legacy" },
+        requestId: "unknown",
+      }),
+    ).rejects.toThrow("unknown or different incarnation");
+    expect(await deps.listActiveWorkspaces()).toEqual([record]);
+    expect(readFileSync(path.join(created.worktreePath, "file.txt"), "utf8")).toBe("keep live\n");
+    expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name).sort()).toEqual([
+      "default",
+      "unknown",
+    ]);
+  });
   test("routes a live native jj backing path safely when mainRepoRoot is absent", async () => {
     const fixture = createScratchJjRepo({ colocate: false, files: { "file.txt": "safe\n" } });
     cleanupPaths.push(fixture.dir);
@@ -1259,6 +1323,19 @@ describeIfJj("jj archive with legacy placement", () => {
         },
       ],
     });
+    const legacyRecord = createPersistedWorkspaceRecord({
+      workspaceId: "ws-legacy",
+      projectId: "project",
+      cwd: created.worktreePath,
+      worktreeRoot: created.worktreePath,
+      kind: "worktree",
+      isPaseoOwnedWorktree: true,
+      jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+      displayName: "legacy",
+      createdAt: "now",
+      updatedAt: "now",
+    });
+    deps.getWorkspace = async () => legacyRecord;
     let pin = "";
     deps.findWorkspaceIdsForBackingPath = async () => ["ws-legacy"];
     deps.setWorkspaceRecoveryPin = async (_id, value) => {
@@ -1299,6 +1376,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     await registry.upsert(
       createPersistedWorkspaceRecord({
         workspaceId: "lifecycle-a",
+        jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
         projectId: "project",
         cwd: created.worktreePath,
         worktreeRoot: created.worktreePath,

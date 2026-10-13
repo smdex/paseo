@@ -206,9 +206,10 @@ export async function dispatchGetCheckoutDiff(
   cwd: string,
   compare: CheckoutDiffCompare,
   context?: CheckoutContext,
+  signal?: AbortSignal,
 ): Promise<CheckoutDiffResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
-    return getCheckoutDiff(cwd, compare, context);
+    return getCheckoutDiff(cwd, compare, context, signal);
   }
   return getJjDiff(cwd, compare, toJjContext(context));
 }

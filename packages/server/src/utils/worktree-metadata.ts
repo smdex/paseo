@@ -187,6 +187,37 @@ export async function getPaseoWorktreeMetadataPath(worktreeRoot: string): Promis
   throw new Error(`Not a jj workspace: ${worktreeRoot}`);
 }
 
+/** A reused pathname is not the same jj backing checkout. */
+export function readJjWorkspaceIncarnation(worktreeRoot: string): string | null {
+  const path = join(worktreeRoot, ".jj", "paseo", "incarnation");
+  if (!existsSync(path)) return null;
+  const identity = readFileSync(path, "utf8").trim();
+  if (!identity || identity.includes("\n"))
+    throw new Error(`Invalid jj workspace incarnation: ${path}`);
+  return identity;
+}
+
+export function writeJjWorkspaceIncarnation(worktreeRoot: string, identity: string): void {
+  const dir = join(getJjDirForWorkspaceRoot(worktreeRoot), "paseo");
+  const current = readJjWorkspaceIncarnation(worktreeRoot);
+  if (current && current !== identity) throw new Error("Cannot replace a jj workspace incarnation");
+  if (current === identity) return;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "incarnation"), `${identity}\n`, { flag: "wx" });
+}
+
+export function assertJjWorkspaceIncarnation(
+  worktreeRoot: string,
+  expected: string | null | undefined,
+): void {
+  const actual = readJjWorkspaceIncarnation(worktreeRoot);
+  if (!expected || !actual || actual !== expected) {
+    throw new Error(
+      "The backing jj checkout has an unknown or different incarnation; retained recovery data and live files were not changed.",
+    );
+  }
+}
+
 export function isQualifiedRef(ref: string): boolean {
   return ref.trim().startsWith("refs/");
 }
