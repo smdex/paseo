@@ -26,6 +26,11 @@ import {
   getCheckoutWorktreeState,
   getPullRequestStatus,
   listBranchSuggestions,
+  mergeFromBase,
+  mergeToBase,
+  pullCurrentBranch,
+  pushCurrentBranch,
+  renameCurrentBranch,
   resolveAbsoluteGitDir,
   resolveBranchCheckout,
   resolveRepositoryDefaultBranch,
@@ -50,6 +55,9 @@ import {
   jjEditBookmark,
   jjFactsToCheckoutSnapshotFacts,
   jjNew,
+  jjPull,
+  jjPush,
+  jjRenameBookmark,
   type JjMutationResult,
   listJjBookmarkSuggestions,
   resolveJjBranchCheckout,
@@ -405,6 +413,67 @@ export async function dispatchStashPop(cwd: string, stashIndex: number): Promise
     return;
   }
   throw new NotSupportedOnJjError("Stash pop");
+}
+
+/** Push the current line of work; jj pushes the workspace bookmark explicitly. */
+export async function dispatchPushCurrentBranch(
+  cwd: string,
+  forgeService?: Parameters<typeof pushCurrentBranch>[1],
+): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return pushCurrentBranch(cwd, forgeService);
+  }
+  return jjPush(cwd);
+}
+
+/** Pull/fetch; jj fetches the selected remote (tracked bookmark import). */
+export async function dispatchPullCurrentBranch(
+  cwd: string,
+  forgeService?: Parameters<typeof pullCurrentBranch>[1],
+): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return pullCurrentBranch(cwd, forgeService);
+  }
+  return jjPull(cwd);
+}
+
+/** Rename the current line of work (branch on git, bookmark on jj). */
+export async function dispatchRenameCurrentBranch(
+  cwd: string,
+  branch: string,
+): Promise<{ previousBranch: string | null; currentBranch: string | null }> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return renameCurrentBranch(cwd, branch);
+  }
+  return jjRenameBookmark(cwd, branch);
+}
+
+/** Merge the workspace into its base — deferred on jj (plan §7). */
+export async function dispatchMergeToBase(
+  cwd: string,
+  options: Parameters<typeof mergeToBase>[1],
+  context?: CheckoutContext,
+): Promise<string> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return mergeToBase(cwd, options, context);
+  }
+  throw new NotSupportedOnJjError(
+    "Merging into the base is not supported on jj repositories yet; use jj rebase/squash in a terminal",
+  );
+}
+
+/** Update the workspace from its base — deferred on jj (plan §7). */
+export async function dispatchMergeFromBase(
+  cwd: string,
+  options: Parameters<typeof mergeFromBase>[1],
+  context?: CheckoutContext,
+): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return mergeFromBase(cwd, options, context);
+  }
+  throw new NotSupportedOnJjError(
+    "Updating from the base is not supported on jj repositories yet; use jj git fetch and rebase in a terminal",
+  );
 }
 
 /**

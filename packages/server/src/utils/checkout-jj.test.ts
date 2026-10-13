@@ -18,6 +18,9 @@ import {
   listJjBookmarkSuggestions,
   listJjCommits,
   resolveJjBranchCheckout,
+  jjPull,
+  jjPush,
+  jjRenameBookmark,
 } from "./checkout-jj.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
 
@@ -140,7 +143,7 @@ describeIfJj("checkout-jj snapshot facts", () => {
   it("derives the unique nearest ancestor bookmark when an older bookmark also exists", async () => {
     const fixture = scratch({ files: { "a.txt": "a\n" } });
     fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
-    fixture.jj(["new", "-m", "work"]);
+    fixture.jj(["new", "@-", "-m", "work"]);
     fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
     fixture.jj(["new"]);
 
@@ -679,5 +682,94 @@ describeIfJj("checkout-jj dispatch helpers", () => {
 
     const limited = await listJjBookmarkSuggestions(fixture.repoDir, { limit: 1 });
     expect(limited).toHaveLength(1);
+  });
+});
+
+describeIfJj("checkout-jj remote ops", () => {
+  it("jjPush fails typed without a workspace bookmark", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    await expect(jjPush(fixture.repoDir)).rejects.toThrow(/no bookmark tracks this line/i);
+  });
+
+  it("jjPush fails typed without any remote", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
+    await expect(jjPush(fixture.repoDir)).rejects.toThrow(/no git remote is configured/i);
+  });
+
+  it("jjPush pushes the workspace bookmark to the single remote", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    const origin = scratchBareGitOrigin();
+    fixture.jj(["git", "remote", "add", "origin", origin]);
+    fixture.jj(["new", "@-", "-m", "described work"]);
+
+    await jjPush(fixture.repoDir).catch((error: unknown) => {
+      // No bookmark yet → typed failure is the expected first outcome.
+      expect(String(error)).toMatch(/no bookmark tracks this line/i);
+    });
+
+    fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
+    await jjPush(fixture.repoDir);
+
+    const remoteRefs = spawnSync("git", ["ls-remote", origin], { encoding: "utf8" });
+    expect(remoteRefs.status).toBe(0);
+    expect(remoteRefs.stdout).toContain("refs/heads/feature");
+  });
+
+  it("jjPull fetches tracked bookmarks from the remote", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    const origin = scratchBareGitOrigin();
+    fixture.jj(["git", "remote", "add", "origin", origin]);
+    fixture.jj(["new", "@-", "-m", "work"]);
+    fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
+    fixture.jj(["git", "push", "--bookmark", "feature", "--remote", "origin"]);
+
+    // Move the workspace forward locally, then pull: the tracked remote
+    // bookmark is imported and visible as origin/feature.
+    fixture.jj(["new", "-m", "local follow-up"]);
+    await jjPull(fixture.repoDir);
+    // Tracking is implicit on push (verified: "already tracked"); the default
+    // list template hides the @origin suffix while local == remote, so assert
+    // the remote revset resolves to the same commit as the local bookmark.
+    const remoteCommit = fixture.jj([
+      "--no-pager",
+      "--color",
+      "never",
+      "log",
+      "--no-graph",
+      "-r",
+      "feature@origin",
+      "-T",
+      "commit_id",
+    ]);
+    const localCommit = fixture.jj([
+      "--no-pager",
+      "--color",
+      "never",
+      "log",
+      "--no-graph",
+      "-r",
+      "feature",
+      "-T",
+      "commit_id",
+    ]);
+    expect(remoteCommit.status).toBe(0);
+    expect(remoteCommit.stdout.trim()).toBe(localCommit.stdout.trim());
+  });
+
+  it("jjRenameBookmark renames the workspace bookmark and reports both names", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["new", "@-", "-m", "work"]);
+    fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
+
+    const result = await jjRenameBookmark(fixture.repoDir, "renamed-feature");
+    expect(result).toEqual({ previousBranch: "feature", currentBranch: "renamed-feature" });
+    expect(fixture.jj(["bookmark", "list"]).stdout).toContain("renamed-feature");
+
+    // With the workspace bookmark gone there is nothing to rename — typed.
+    fixture.jj(["bookmark", "delete", "renamed-feature"]);
+    await expect(jjRenameBookmark(fixture.repoDir, "anything")).rejects.toThrow(
+      /nothing to rename/i,
+    );
   });
 });
