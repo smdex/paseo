@@ -826,6 +826,11 @@ export const ko: TranslationResources = {
           pending: "보관하는 중...",
           success: "보관됨",
         },
+        newChange: {
+          label: "새 체인지",
+          pending: "새 체인지 시작 중...",
+          success: "새 체인지가 시작되었습니다",
+        },
         mergePr: {
           squash: "PR 병합(스쿼시)",
           merge: "PR 병합(병합)",
@@ -893,6 +898,7 @@ export const ko: TranslationResources = {
         },
         toasts: {
           failedCommit: "커밋하지 못했습니다",
+          failedNewChange: "새 체인지 시작 실패",
           failedPull: "가져오지 못했습니다",
           failedPush: "푸시하지 못했습니다",
           failedPullAndPush: "풀 후 푸시하지 못했습니다",

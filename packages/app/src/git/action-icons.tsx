@@ -5,6 +5,7 @@ import {
   Download,
   GitCommitHorizontal,
   GitMerge,
+  Plus,
   RefreshCcw,
   Upload,
 } from "lucide-react-native";
@@ -17,6 +18,7 @@ const ThemedArrowDownUp = withUnistyles(ArrowDownUp);
 const ThemedGitMerge = withUnistyles(GitMerge);
 const ThemedRefreshCcw = withUnistyles(RefreshCcw);
 const ThemedArchive = withUnistyles(Archive);
+const ThemedPlus = withUnistyles(Plus);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -28,4 +30,5 @@ export const GIT_ACTION_ICONS = {
   merge: <ThemedGitMerge size={16} uniProps={mutedColorMapping} />,
   mergeFromBase: <ThemedRefreshCcw size={16} uniProps={mutedColorMapping} />,
   archive: <ThemedArchive size={16} uniProps={mutedColorMapping} />,
+  newChange: <ThemedPlus size={16} uniProps={mutedColorMapping} />,
 };

@@ -821,6 +821,11 @@ export const en = {
           pending: "Archiving...",
           success: "Archived",
         },
+        newChange: {
+          label: "New change",
+          pending: "Starting new change...",
+          success: "New change started",
+        },
         mergePr: {
           squash: "Merge PR (squash)",
           merge: "Merge PR (merge)",
@@ -894,6 +899,7 @@ export const en = {
         },
         toasts: {
           failedCommit: "Failed to commit",
+          failedNewChange: "Failed to start a new change",
           failedPull: "Failed to pull",
           failedPush: "Failed to push",
           failedPullAndPush: "Failed to pull and push",

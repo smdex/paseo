@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   JjUnavailableError,
   NotSupportedOnJjError,
+  dispatchDescribeChange,
   dispatchGetCheckoutStatus,
   dispatchListPaseoWorktrees,
+  dispatchNewChange,
   dispatchRunStashList,
 } from "./checkout-dispatch.js";
 import {
@@ -168,5 +170,56 @@ describe("jj feature advertisement gate", () => {
 describe.skipIf(process.env.CI === undefined || jjAvailable)("jj presence under CI (meta)", () => {
   it("asserts jj is installed in CI so skipped-local never means skipped-CI", () => {
     expect(jjAvailable, "jj must be installed on CI runners that run jj tests").toBe(true);
+  });
+});
+
+describeIfJj("jj change mutations", () => {
+  it("describes the working-copy change and reports its ids", async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    disposables.push(fixture.dispose);
+
+    const result = await dispatchDescribeChange(fixture.repoDir, { message: "describe me" });
+
+    expect(result.changeId).toMatch(/^[a-z0-9]+$/);
+    expect(result.commitId).toMatch(/^[0-9a-f]+$/);
+    const description = fixture.jj(["log", "-r", "@", "--no-graph", "-T", "description"]);
+    expect(description.status).toBe(0);
+    expect(description.stdout.trim()).toBe("describe me");
+  });
+
+  it("rejects an empty description", async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    disposables.push(fixture.dispose);
+
+    await expect(dispatchDescribeChange(fixture.repoDir, { message: "   " })).rejects.toThrow(
+      /description is required/i,
+    );
+  });
+
+  it("starts a new empty working-copy change on top of the described one", async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    disposables.push(fixture.dispose);
+    await dispatchDescribeChange(fixture.repoDir, { message: "first change" });
+
+    const result = await dispatchNewChange(fixture.repoDir);
+
+    expect(result.changeId).toMatch(/^[a-z0-9]+$/);
+    expect(result.commitId).toMatch(/^[0-9a-f]+$/);
+    const parent = fixture.jj(["log", "-r", "@-", "--no-graph", "-T", "description"]);
+    expect(parent.status).toBe(0);
+    expect(parent.stdout.trim()).toBe("first change");
+    const workingCopy = fixture.jj(["log", "-r", "@", "--no-graph", "-T", "description"]);
+    expect(workingCopy.status).toBe(0);
+    expect(workingCopy.stdout.trim()).toBe("");
+  });
+});
+
+describe("jj-only change mutations on git repositories", () => {
+  it("rejects new change and describe with NotSupportedOnJjError", async () => {
+    const dir = scratchGit();
+    await expect(dispatchNewChange(dir)).rejects.toBeInstanceOf(NotSupportedOnJjError);
+    await expect(dispatchDescribeChange(dir, { message: "x" })).rejects.toBeInstanceOf(
+      NotSupportedOnJjError,
+    );
   });
 });

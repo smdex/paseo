@@ -821,6 +821,11 @@ export const zhCN: TranslationResources = {
           pending: "正在归档...",
           success: "已归档",
         },
+        newChange: {
+          label: "新变更",
+          pending: "正在开始新变更...",
+          success: "已开始新变更",
+        },
         mergePr: {
           squash: "Merge PR (squash)",
           merge: "Merge PR (merge)",
@@ -878,6 +883,7 @@ export const zhCN: TranslationResources = {
         },
         toasts: {
           failedCommit: "Commit 失败",
+          failedNewChange: "开始新变更失败",
           failedPull: "Pull 失败",
           failedPush: "Push 失败",
           failedPullAndPush: "Pull 并 push 失败",
