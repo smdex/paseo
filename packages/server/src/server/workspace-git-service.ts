@@ -53,6 +53,7 @@ import type {
   PullRequestMergeable,
 } from "../services/forge-service.js";
 import { createForgeService } from "../services/forge-registry.js";
+import { requireForgeRepositoryContext } from "../services/forge-cli-command.js";
 import {
   createForgeResolver,
   type ForgeResolution,
@@ -465,6 +466,7 @@ interface WorkspaceGitTarget {
   observationReensureTimer: NodeJS.Timeout | null;
   forgePrStatusPollSubscription: { unsubscribe: () => void } | null;
   forgePrStatusPollKey: string | null;
+  forgePrStatusPollGeneration: number;
   refreshState: WorkspaceGitRefreshState;
   latestGit: WorkspaceGitRuntimeSnapshot["git"] | null;
   latestGitLoadedAtMs: number | null;
@@ -1308,6 +1310,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       observationReensureTimer: null,
       forgePrStatusPollSubscription: null,
       forgePrStatusPollKey: null,
+      forgePrStatusPollGeneration: 0,
       refreshState: { status: "idle" },
       latestGit: null,
       latestGitLoadedAtMs: null,
@@ -3094,7 +3097,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     const git = target.latestGit;
-    if (!git?.remoteUrl) {
+    if (!git || (git.vcs !== "jj" && !git.remoteUrl)) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
@@ -3109,14 +3112,13 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     const pollTarget = this.resolveForgePrStatusPollTarget(target);
-    const remoteUrl = git.remoteUrl;
     if (!pollTarget) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
     const pollKey = buildWorkspaceForgePrStatusPollKey({
       forge: resolution.forge,
-      remoteUrl,
+      remoteUrl: git.vcs === "jj" ? null : git.remoteUrl,
       target: pollTarget,
     });
     const previousPollKey = target.forgePrStatusPollKey;
@@ -3127,6 +3129,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     this.stopForgePrStatusPollForTarget(target);
     target.forgePrStatusPollKey = pollKey;
+    const generation = target.forgePrStatusPollGeneration;
     if (resolution.service.retainCurrentPullRequestStatusPoll) {
       target.forgePrStatusPollSubscription = resolution.service.retainCurrentPullRequestStatusPoll({
         cwd: target.cwd,
@@ -3139,7 +3142,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         onStatus: (status) => {
           if (
             !this.isActiveObservedWorkspaceTarget(target) ||
-            target.forgePrStatusPollKey !== pollKey
+            target.forgePrStatusPollGeneration !== generation ||
+            target.forgePrStatusPollKey !== pollKey ||
+            this.getForgePrStatusPollKey(target) !== pollKey
           ) {
             return;
           }
@@ -3174,6 +3179,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       service: resolution.service,
       pollTarget,
       pollImmediately,
+      pollKey,
+      generation,
     });
   }
 
@@ -3183,12 +3190,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     service,
     pollTarget,
     pollImmediately,
+    pollKey,
+    generation,
   }: {
     target: WorkspaceGitTarget;
     forge: string;
     service: ForgeService;
     pollTarget: WorkspaceForgePrStatusPollTarget;
     pollImmediately: boolean;
+    pollKey: string;
+    generation: number;
   }): { unsubscribe: () => void } {
     let closed = false;
     let timer: NodeJS.Timeout | null = null;
@@ -3207,7 +3218,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     };
 
     const poll = async () => {
-      if (closed || !this.isActiveObservedWorkspaceTarget(target)) {
+      if (
+        closed ||
+        !this.isActiveObservedWorkspaceTarget(target) ||
+        target.forgePrStatusPollGeneration !== generation ||
+        this.getForgePrStatusPollKey(target) !== pollKey
+      ) {
         return;
       }
       try {
@@ -3221,7 +3237,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
             : {}),
           reason: "self-heal-forge-pr-status",
         });
-        if (!closed && this.isActiveObservedWorkspaceTarget(target)) {
+        if (
+          !closed &&
+          this.isActiveObservedWorkspaceTarget(target) &&
+          target.forgePrStatusPollGeneration === generation &&
+          this.getForgePrStatusPollKey(target) === pollKey
+        ) {
           latestStatus = status;
           consecutiveErrors = 0;
           this.rememberForgePrStatusSnapshot(target, buildForgeSnapshotFromStatus(status, forge), {
@@ -3269,7 +3290,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const git = target.latestGit;
     if (git?.vcs === "jj") {
       const repository = target.jjForgeResolution?.repository;
-      return repository?.headRef
+      return repository?.headRef && repository.headSha
         ? { headRef: repository.headRef, headSha: repository.headSha ?? undefined, repository }
         : null;
     }
@@ -3292,9 +3313,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private stopForgePrStatusPollForTarget(target: WorkspaceGitTarget): void {
-    target.forgePrStatusPollSubscription?.unsubscribe();
+    const subscription = target.forgePrStatusPollSubscription;
+    target.forgePrStatusPollGeneration += 1;
     target.forgePrStatusPollSubscription = null;
     target.forgePrStatusPollKey = null;
+    subscription?.unsubscribe();
   }
 
   /**
@@ -3746,22 +3769,27 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     await this.bindWorkspaceRepoTarget(target, facts);
     const context: CheckoutContext = { ...baseContext, facts };
     const checkoutStatus = await this.deps.getCheckoutStatus(cwd, context);
-    target.jjForgeResolution = null;
-    target.jjForgeError = undefined;
+    let jjForgeResolution: ForgeResolution | null = null;
+    let jjForgeError: Error | undefined;
     if (checkoutStatus.isGit && checkoutStatus.vcs === "jj") {
       try {
         const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
           paseoHome: this.paseoHome,
         });
         const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
-        target.jjForgeResolution = resolution
-          ? { ...resolution, repository: { ...repository, host: resolution.host } }
-          : null;
+        if (resolution) {
+          const resolvedRepository = { ...repository, host: resolution.host };
+          requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
+          jjForgeResolution = { ...resolution, repository: resolvedRepository };
+        }
       } catch (error) {
-        target.jjForgeError = error instanceof Error ? error : new Error(String(error));
+        jjForgeError = error instanceof Error ? error : new Error(String(error));
       }
     }
     if (!checkoutStatus.isGit) {
+      target.jjForgeResolution = jjForgeResolution;
+      target.jjForgeError = jjForgeError;
+      this.stopForgePrStatusPollForTarget(target);
       target.latestGit = buildNotGitSnapshot(cwd).git;
       const loadedAtMs = this.deps.now().getTime();
       target.latestGitLoadedAtMs = loadedAtMs;
@@ -3779,6 +3807,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           .catch(() => null)
       : (target.latestGit?.diffStat ?? null);
 
+    target.jjForgeResolution = jjForgeResolution;
+    target.jjForgeError = jjForgeError;
     target.latestGit = {
       isGit: true,
       repoRoot: checkoutStatus.repoRoot,
@@ -3811,6 +3841,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (previousForgePrStatusPollKey !== this.getForgePrStatusPollKey(target)) {
       target.latestForge = buildForgeUnavailableSnapshot();
       target.latestForgeLoadedAtMs = target.latestGitLoadedAtMs;
+      // Rotate authority before the replacement provider read can suspend.
+      this.updateForgePrStatusPollForTarget(target);
     }
     return facts;
   }
@@ -3848,6 +3880,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       forgeService.invalidate({ cwd: target.cwd, repository: resolution.repository });
     }
 
+    const pollKey = this.getForgePrStatusPollKey(target);
+    const generation = target.forgePrStatusPollGeneration;
     const forgeSnapshot = await loadForgeSnapshot({
       cwd: target.cwd,
       forgeService,
@@ -3859,6 +3893,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       facts,
       runGitCommand: runRefreshGitCommand,
     });
+    if (
+      target.closed ||
+      target.forgePrStatusPollGeneration !== generation ||
+      this.getForgePrStatusPollKey(target) !== pollKey
+    )
+      return;
     // Carry the resolved forge (probe-aware) so the wire projection labels
     // self-managed GitLab hosts correctly instead of falling back to "github".
     target.latestForge = { ...forgeSnapshot, forge: resolution.forge };
@@ -3879,7 +3919,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private getForgePrStatusPollKey(target: WorkspaceGitTarget): string | null {
     const git = target.latestGit;
-    if (!git || (!git.currentBranch && git.vcs !== "jj") || !git.remoteUrl) {
+    if (!git || (git.vcs !== "jj" && (!git.currentBranch || !git.remoteUrl))) {
       return null;
     }
 
@@ -3898,7 +3938,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     return buildWorkspaceForgePrStatusPollKey({
       forge: resolution.forge,
-      remoteUrl: git.remoteUrl,
+      remoteUrl: git.vcs === "jj" ? null : git.remoteUrl,
       target: pollTarget,
     });
   }
@@ -4485,7 +4525,7 @@ function buildWorkspaceForgePrStatusPollKey({
   target,
 }: {
   forge: string;
-  remoteUrl: string;
+  remoteUrl: string | null;
   target: WorkspaceForgePrStatusPollTarget;
 }): string {
   return JSON.stringify([

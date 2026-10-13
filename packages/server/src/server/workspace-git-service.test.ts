@@ -2,9 +2,15 @@ import { createTestLogger } from "../test-utils/test-logger.js";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import os from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { importJjCheckpoint, writeJjCheckpoint } from "../utils/jj-checkpoint.js";
 import path, { join } from "node:path";
 import type pino from "pino";
-import type { ForgeService } from "../services/forge-service.js";
+import type {
+  ForgeService,
+  ForgeRepositoryContext,
+  CurrentPullRequestStatus,
+} from "../services/forge-service.js";
 import type {
   CheckoutSnapshotFacts,
   CheckoutStatusGit,
@@ -698,9 +704,15 @@ describe("WorkspaceGitServiceImpl", () => {
     );
     const lateSubscriptions = watcherGates.map(() => createAsyncSubscription());
     const lateUnsubscribes = lateSubscriptions.map(({ unsubscribe }) => unsubscribe);
-    const subscribe = vi.fn(
-      () => watcherGates[subscribe.mock.calls.length - 1]?.promise ?? Promise.reject(),
+    const workingTreeGates = new Map(
+      cwds.slice(0, watcherGates.length).map((cwd, index) => [cwd, watcherGates[index]!]),
     );
+    const subscribe = vi.fn((watchPath: string) => {
+      if (!cwds.includes(watchPath)) return Promise.resolve(createAsyncSubscription());
+      const gate = workingTreeGates.get(watchPath);
+      if (!gate) throw new Error(`Queued working-tree watcher started early: ${watchPath}`);
+      return gate.promise;
+    });
     const runGitCommand = vi.fn(async (_args: string[], options: { cwd: string }) => ({
       stdout: `${options.cwd}\n`,
       stderr: "",
@@ -738,7 +750,10 @@ describe("WorkspaceGitServiceImpl", () => {
         workspaceObservationSetupAdmissionPendingCount: 0,
       });
     });
-    expect(subscribe).toHaveBeenCalledTimes(WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY);
+    expect(subscribe.mock.calls.filter(([watchPath]) => cwds.includes(watchPath))).toHaveLength(
+      WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
+    );
+    expect(subscribe.mock.calls.some(([watchPath]) => watchPath.endsWith(".git"))).toBe(true);
 
     watcherGates.forEach((gate, index) => gate.resolve(lateSubscriptions[index]!));
     refreshGates.forEach((gate, cwd) => gate.resolve(createCheckoutStatus(cwd)));
@@ -856,7 +871,15 @@ describe("WorkspaceGitServiceImpl", () => {
     );
 
     expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(0);
+    await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
+    // One shared fetch checks the fresh binding before and after its read.
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(2);
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledWith(REPO_CWD);
+    expect(service.getMetrics()).toMatchObject({
+      workspaceTargetCount: 1,
+      repositoryTargetCount: 1,
+      repositoryWorkspaceLinkCount: 1,
+    });
 
     subscription.unsubscribe();
     service.dispose();
@@ -902,22 +925,34 @@ describe("WorkspaceGitServiceImpl", () => {
       expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
     });
 
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(0);
+    // The shared fetch is still pending: exactly one fresh pre-fetch binding probe.
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(1);
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledWith(REPO_CWD);
+    expect(service.getMetrics()).toMatchObject({
+      workspaceTargetCount: 2,
+      repositoryTargetCount: 1,
+      repositoryWorkspaceLinkCount: 2,
+    });
     expect(hasOriginRemote).toHaveBeenCalledTimes(0);
     expect(runGitFetch).toHaveBeenCalledTimes(1);
 
     firstFetch.resolve();
-    await flushPromises();
+    await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => {
       expect(getCheckoutSnapshotFacts).toHaveBeenCalledTimes(2);
       expect(getCheckoutRefDerivedState).toHaveBeenCalledTimes(2);
     });
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(2);
 
     await vi.advanceTimersByTimeAsync(180_000);
     await flushPromises();
 
-    expect(runGitFetch).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(runGitFetch).toHaveBeenCalledTimes(2);
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+    });
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(4);
 
     first.unsubscribe();
     second.unsubscribe();
@@ -1023,7 +1058,7 @@ describe("WorkspaceGitServiceImpl", () => {
     });
 
     releaseFetch.resolve();
-    await flushPromises();
+    await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => {
       expect(getCheckoutSnapshotFacts).toHaveBeenCalledTimes(4);
@@ -1070,7 +1105,7 @@ describe("WorkspaceGitServiceImpl", () => {
     });
 
     releaseFetch.resolve();
-    await flushPromises();
+    await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => {
       expect(getCheckoutRefDerivedState).toHaveBeenCalledTimes(1);
@@ -1539,3 +1574,226 @@ test.skipIf(!isJjAvailable())(
     }
   },
 );
+
+describe.skipIf(!isJjAvailable())("native jj poll authority replacement", () => {
+  test.each(
+    [
+      { forge: "github" as const, host: "github.com", retained: true },
+      { forge: "gitlab" as const, host: "gitlab.com", retained: false },
+      { forge: "gitea" as const, host: "gitea.com", retained: false },
+    ].flatMap((provider) =>
+      ["head", "repository", "remote-head"].map((change) => ({
+        forge: provider.forge,
+        host: provider.host,
+        retained: provider.retained,
+        change,
+      })),
+    ),
+  )(
+    "$forge rejects the old poll during a deferred $change read",
+    async ({ forge: forgeName, host, retained, change }) => {
+      const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+      expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+      for (const [name, owner] of [
+        ["publication", "fork1"],
+        ["other", "fork2"],
+      ]) {
+        expect(
+          repo.jj(["git", "remote", "add", name!, `https://${host}/${owner}/repo.git`]).status,
+        ).toBe(0);
+      }
+      const checkpoint = await importJjCheckpoint({
+        backingRoot: repo.repoDir,
+        head: {
+          commitId: repo.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim(),
+          changeId: repo.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+        },
+        paseoHome: repo.dir,
+      });
+      const publication = {
+        localBookmark: "main",
+        remoteBookmark: "main",
+        remoteName: "publication",
+        remoteUrl: `https://${host}/fork1/repo.git`,
+        sourceRepository: "fork1/repo",
+        targetRepository: "base1/repo",
+      };
+      await writeJjCheckpoint({ ...checkpoint, publication }, repo.dir);
+      const status = (title: string): CurrentPullRequestStatus => ({
+        url: `https://${host}/base1/repo/pull/1`,
+        title,
+        state: "open",
+        baseRefName: "main",
+        headRefName: "main",
+        isMerged: false,
+      });
+      const oldRead = createDeferred<CurrentPullRequestStatus>();
+      const replacementRead = createDeferred<CurrentPullRequestStatus>();
+      let replacementStarted = false;
+      let initialRepository: ForgeRepositoryContext | undefined;
+      let holdOldPoll = false;
+      const adapter = createGitHubServiceStub();
+      adapter.getCurrentPullRequestStatus = vi.fn(async (input) => {
+        expect(input.repository).toBeDefined();
+        initialRepository ??= input.repository;
+        if (JSON.stringify(input.repository) !== JSON.stringify(initialRepository)) {
+          replacementStarted = true;
+          return replacementRead.promise;
+        }
+        if (holdOldPoll && input.reason === "self-heal-forge-pr-status") return oldRead.promise;
+        return status("initial");
+      });
+      const oldUnsubscribe = vi.fn();
+      const retain = vi.fn(
+        (
+          _input: Parameters<NonNullable<ForgeService["retainCurrentPullRequestStatusPoll"]>>[0],
+        ) => ({ unsubscribe: oldUnsubscribe }),
+      );
+      if (retained) adapter.retainCurrentPullRequestStatusPoll = retain;
+      const gitSentinel = vi.fn(async () => {
+        throw new Error("native jj must not run Git");
+      });
+      vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+      vi.useFakeTimers();
+      const service = new WorkspaceGitServiceImpl({
+        logger: createTestLogger(),
+        paseoHome: repo.dir,
+        deps: {
+          forgeOverrides: { [forgeName]: adapter },
+          runGitCommand: gitSentinel,
+          createRunGitCommand: () => gitSentinel,
+          getPullRequestStatus: gitSentinel,
+          runJjFetch: async () => {},
+          subscribe: async () => ({ unsubscribe: async () => {}, updateIgnore: async () => {} }),
+          createWatcherLivenessCanary: () => ({
+            path: "",
+            filterEvents: (events) => events,
+            verify: async () => {},
+          }),
+        },
+      });
+      const snapshots: WorkspaceGitRuntimeSnapshot[] = [];
+      const subscription = service.registerWorkspace({ cwd: repo.repoDir }, (snapshot) =>
+        snapshots.push(snapshot),
+      );
+      try {
+        let initialResult: WorkspaceGitRuntimeSnapshot | undefined;
+        const initialRead = service
+          .getSnapshot(repo.repoDir, { force: true, includeForge: true, reason: "manual-refresh" })
+          .then((snapshot) => {
+            initialResult = snapshot;
+            return snapshot;
+          });
+        await vi.waitFor(() => expect(initialResult).toBeDefined(), { timeout: 20_000 });
+        const initial = await initialRead;
+        expect(initial.git.remoteUrl).toBeNull();
+        expect(initial.forge.pullRequest?.title).toBe("initial");
+        expect(initialRepository).toMatchObject({
+          host,
+          sourceRepository: "fork1/repo",
+          targetRepository: "base1/repo",
+          remoteHeadSha: null,
+        });
+        const oldPoll = retain.mock.calls.at(-1)?.[0];
+        if (retained) expect(oldPoll).toBeDefined();
+        else {
+          holdOldPoll = true;
+          await vi.advanceTimersByTimeAsync(180_000);
+          expect(adapter.getCurrentPullRequestStatus).toHaveBeenCalledWith(
+            expect.objectContaining({
+              reason: "self-heal-forge-pr-status",
+              repository: initialRepository,
+            }),
+          );
+        }
+        if (change === "head")
+          expect(repo.jj(["describe", "-r", "main", "-m", "replacement head"]).status).toBe(0);
+        else if (change === "repository")
+          await writeJjCheckpoint(
+            {
+              ...checkpoint,
+              publication: {
+                ...publication,
+                remoteName: "other",
+                remoteUrl: `https://${host}/fork2/repo.git`,
+                sourceRepository: "fork2/repo",
+                targetRepository: "base2/repo",
+              },
+            },
+            repo.dir,
+          );
+        else {
+          const remoteRefs = join(
+            repo.repoDir,
+            ".jj",
+            "repo",
+            "store",
+            "git",
+            "refs",
+            "remotes",
+            "publication",
+          );
+          mkdirSync(remoteRefs, { recursive: true });
+          writeFileSync(join(remoteRefs, "main"), `${initialRepository!.headSha}\n`);
+          expect(repo.jj(["git", "import"]).status).toBe(0);
+          expect(repo.jj(["bookmark", "track", "main@publication"]).status).toBe(0);
+        }
+        const refresh = service.getSnapshot(repo.repoDir, {
+          force: true,
+          includeForge: true,
+          reason: "manual-refresh",
+        });
+        await vi.waitFor(() => expect(replacementStarted).toBe(true), { timeout: 20_000 });
+        // The fresh read is still suspended. Old authority must already be gone.
+        if (retained) {
+          expect(oldUnsubscribe).toHaveBeenCalled();
+          oldPoll!.onStatus!(status("stale old poll"));
+        } else {
+          oldRead.resolve(status("stale old poll"));
+          await flushPromises();
+        }
+        expect(service.peekSnapshot(repo.repoDir)?.forge.pullRequest?.title).not.toBe(
+          "stale old poll",
+        );
+        expect(
+          snapshots.some((snapshot) => snapshot.forge.pullRequest?.title === "stale old poll"),
+        ).toBe(false);
+        let replacedResult: WorkspaceGitRuntimeSnapshot | undefined;
+        const completedRefresh = refresh.then((snapshot) => {
+          replacedResult = snapshot;
+          return snapshot;
+        });
+        replacementRead.resolve(status("replacement"));
+        await vi.waitFor(() => expect(replacedResult).toBeDefined(), { timeout: 20_000 });
+        const replaced = await completedRefresh;
+        expect(replaced.forge.pullRequest?.title).toBe("replacement");
+        expect(replaced.git.remoteUrl).toBeNull();
+        const nextRepository = vi
+          .mocked(adapter.getCurrentPullRequestStatus)
+          .mock.calls.at(-1)?.[0].repository;
+        if (change === "head") expect(nextRepository?.headSha).not.toBe(initialRepository?.headSha);
+        else if (change === "repository")
+          expect(nextRepository).toMatchObject({
+            sourceRepository: "fork2/repo",
+            targetRepository: "base2/repo",
+            headSha: initialRepository?.headSha,
+          });
+        else
+          expect(nextRepository).toMatchObject({
+            headSha: initialRepository?.headSha,
+            remoteHeadSha: initialRepository?.headSha,
+          });
+        expect(gitSentinel).not.toHaveBeenCalled();
+      } finally {
+        oldRead.resolve(status("closed"));
+        replacementRead.resolve(status("closed"));
+        subscription.unsubscribe();
+        await service.dispose();
+        vi.useRealTimers();
+        vi.unstubAllEnvs();
+        repo.dispose();
+      }
+    },
+    60_000,
+  );
+});
