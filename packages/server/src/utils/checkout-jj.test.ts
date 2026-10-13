@@ -22,6 +22,7 @@ import {
   jjPull,
   jjPush,
   jjRenameBookmark,
+  jjDiscard,
   jjNew,
   jjDescribe,
   jjCommit,
@@ -857,7 +858,6 @@ describeIfJj("checkout-jj root-relative filesets (subdirectory callers)", () => 
     writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
     writeFileSync(join(fixture.repoDir, "sub", "c.txt"), "changed\n");
 
-    const { jjDiscard } = await import("./checkout-jj.js");
     await jjDiscard(join(fixture.repoDir, "sub"), ["a.txt"]);
 
     expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe("original\n");
@@ -1409,6 +1409,14 @@ describeIfJj("durable native change checkpoint", () => {
     await expect(
       jjDescribe(fixture.repoDir, { message: "cannot erase partial result" }, context),
     ).rejects.toThrow("previous jj operation requires reconciliation");
+    writeFileSync(
+      join(fixture.repoDir, "a.txt"),
+      "Keep this WIP while reconciliation is required\n",
+    );
+    await expect(jjDiscard(fixture.repoDir, ["a.txt"], context)).rejects.toThrow("discard refused");
+    expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe(
+      "Keep this WIP while reconciliation is required\n",
+    );
   });
 
   it("requires reconciliation if checkpoint state disappears or live ownership changes", async () => {
