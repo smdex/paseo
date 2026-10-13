@@ -663,7 +663,11 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, paths, requestId } = msg;
     try {
-      await dispatchDiscardChanges(cwd, paths);
+      await dispatchDiscardChanges(cwd, paths, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+        logger: this.logger,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "discard-changes");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({

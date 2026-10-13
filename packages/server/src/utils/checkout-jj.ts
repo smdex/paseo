@@ -1761,13 +1761,32 @@ async function mutateJjChange(
  * Paths are workspace-root-relative, so the restore runs from the workspace
  * ROOT even when the caller sits in a subdirectory.
  */
-export async function jjDiscard(cwd: string, paths: string[]): Promise<void> {
+export async function jjDiscard(
+  cwd: string,
+  paths: string[],
+  context?: JjCheckoutContext,
+): Promise<void> {
   const fileset = jjFilesetArg(paths);
   if (!fileset) {
     return;
   }
   const root = await jjWorkspaceRoot(cwd);
-  await runJj(["restore", ...fileset], { cwd: root });
+  await withWorkspaceLifecycle(root, async () => {
+    const facts = await getJjSnapshotFacts(root, { ...context, facts: null });
+    if (!facts.isJj)
+      throw new JjCheckpointError("The jj workspace is unavailable; discard refused.");
+    const checkpoint = await readJjCheckpoint(root, context?.paseoHome);
+    if (
+      checkpoint?.operations.some(
+        (operation) =>
+          operation.status === "pending" || operation.status === "reconciliation_required",
+      )
+    )
+      throw new JjCheckpointError(
+        "A previous jj operation requires reconciliation; discard refused and files remain on disk.",
+      );
+    await runJj(["restore", ...fileset], { cwd: root }, context);
+  });
 }
 
 /**
