@@ -514,7 +514,6 @@ interface RepoGitTarget {
   intervalId: NodeJS.Timeout | null;
   fetchInFlight: boolean;
   jjFetchController: AbortController | null;
-  jjFetchPromise: Promise<void> | null;
   bufferedFetchMetadataEvents: FileChange[];
   recentFetchRemoteRefChanges: Map<
     string,
@@ -703,6 +702,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly snapshotUpdatedListeners = new Set<WorkspaceGitSnapshotUpdatedListener>();
   private readonly workspaceTargets = new Map<string, WorkspaceGitTarget>();
   private readonly repoTargets = new Map<string, RepoGitTarget>();
+  private readonly pendingJjFetches = new Set<Promise<void>>();
   /** In-flight jj head-op probes keyed by shared store path (fence coalescing). */
   private readonly jjHeadOpIdProbes = new Map<string, JjHeadOpProbeEntry>();
   private readonly workingTreeWatchTargets = new Map<string, WorkingTreeWatchTarget>();
@@ -1141,9 +1141,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
     this.workspaceTargets.clear();
 
-    const fetches: Promise<void>[] = [];
+    const fetches = Array.from(this.pendingJjFetches);
     for (const target of this.repoTargets.values()) {
-      if (target.jjFetchPromise) fetches.push(target.jjFetchPromise);
       this.closeRepoTarget(target);
     }
     this.repoTargets.clear();
@@ -2300,7 +2299,6 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       intervalId: null,
       fetchInFlight: false,
       jjFetchController: null,
-      jjFetchPromise: null,
       bufferedFetchMetadataEvents: [],
       recentFetchRemoteRefChanges: new Map(),
       knownRemoteRefs: null,
@@ -3939,11 +3937,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         .finally(async () => {
           target.fetchInFlight = false;
           target.jjFetchController = null;
-          await this.scheduleJjStoreMetadataRefresh(target);
+          try {
+            await this.scheduleJjStoreMetadataRefresh(target);
+          } finally {
+            this.pendingJjFetches.delete(fetchPromise);
+          }
         });
-      target.jjFetchPromise = fetchPromise;
+      // Last-subscriber release removes the repo target before the child exits.
+      // Keep its completion owned by the service so disposal still waits for it.
+      this.pendingJjFetches.add(fetchPromise);
       await fetchPromise;
-      if (target.jjFetchPromise === fetchPromise) target.jjFetchPromise = null;
       return;
     }
 
