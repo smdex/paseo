@@ -4,11 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { expandUserPath, resolvePathFromBase } from "../path-utils.js";
 import { runGitCommand } from "../../utils/run-git-command.js";
-import {
-  detectVcsBackend,
-  isJjDispatchEnabled,
-  resolveJjRuntime,
-} from "../../utils/vcs-backend.js";
+import { resolveEffectiveBackend } from "../../utils/checkout-dispatch.js";
 
 export type ExplorerEntryKind = "file" | "directory";
 export type ExplorerFileKind = "text" | "image" | "binary";
@@ -726,8 +722,14 @@ export async function renameExplorerEntry({
     // jj workspaces snapshot renames automatically on the next command, so a
     // plain filesystem rename is the correct (and only needed) move there —
     // `git mv` would shell git against a jj checkout (review fix 11).
-    const isJjCheckout =
-      detectVcsBackend(realRoot) === "jj" && (await resolveJjRuntime()).ok && isJjDispatchEnabled();
+    let isJjCheckout = false;
+    try {
+      isJjCheckout = (await resolveEffectiveBackend(realRoot)) === "jj";
+    } catch {
+      throw new Error(
+        "This directory is a jj repository, but the jj tool is unavailable; rename is unavailable until it is installed.",
+      );
+    }
     const repository = isJjCheckout
       ? { exitCode: 128 }
       : await runGitCommand(["rev-parse", "--is-inside-work-tree"], {
