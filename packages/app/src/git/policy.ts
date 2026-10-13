@@ -343,11 +343,9 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (canPush(input)) {
     return "push";
   }
-  if (canMergePr(input)) {
-    return getDefaultDirectPullRequestMergeActionId(input);
-  }
-  if (canEnablePrAutoMerge(input)) {
-    return getDefaultEnablePullRequestAutoMergeActionId(input);
+  const prMergePrimary = getPrMergePrimaryActionId(input);
+  if (prMergePrimary) {
+    return prMergePrimary;
   }
   if (hasEnabledPrAutoMerge(input)) {
     return "pr";
@@ -355,11 +353,14 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shipDefault === "pr" && canUsePullRequestActionAsShipDefault(input)) {
     return "pr";
   }
-  if (!input.isOnBaseBranch && input.aheadCount > 0) {
-    return "merge-branch";
-  }
-  if (!input.isOnBaseBranch && canMergeFromBase(input)) {
-    return "merge-from-base";
+  // Local merges are deferred on jj (plan §7) and never promote there.
+  if (!input.isJj) {
+    if (!input.isOnBaseBranch && input.aheadCount > 0) {
+      return "merge-branch";
+    }
+    if (!input.isOnBaseBranch && canMergeFromBase(input)) {
+      return "merge-from-base";
+    }
   }
   if (input.githubFeaturesEnabled && input.hasPullRequest && input.pullRequestUrl) {
     return "pr";
@@ -374,6 +375,20 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   return null;
 }
 
+/** PR-merge promotion in its original precedence; deferred on jj (plan §7). */
+function getPrMergePrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
+  if (input.isJj) {
+    return null;
+  }
+  if (canMergePr(input)) {
+    return getDefaultDirectPullRequestMergeActionId(input);
+  }
+  if (canEnablePrAutoMerge(input)) {
+    return getDefaultEnablePullRequestAutoMergeActionId(input);
+  }
+  return null;
+}
+
 function getPullRequestActionIds(filter: {
   roles: readonly PullRequestActionRole[];
   input: BuildGitActionsInput;
@@ -384,6 +399,11 @@ function getPullRequestActionIds(filter: {
 }
 
 function getFeatureActionIds(input: BuildGitActionsInput): GitActionId[] {
+  // Local merges and change-request checkouts are deferred on jj (plan §7);
+  // the availability hierarchy hides them rather than rendering disabled.
+  if (input.isJj) {
+    return getPullRequestActionIds({ roles: ["status"], input });
+  }
   return [
     "merge-from-base",
     "merge-branch",
