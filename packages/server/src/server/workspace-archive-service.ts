@@ -20,6 +20,8 @@ import type {
 } from "./workspace-registry.js";
 import { createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { deleteJjPaseoWorktree } from "../utils/worktree-jj.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
 
 export type ActiveWorkspaceRef = Pick<
@@ -46,6 +48,10 @@ export interface ArchiveDependencies {
   // path (no explicit workspaceId).
   listActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
   archiveWorkspaceRecord: (workspaceId: string) => Promise<void>;
+  // jj only: persists the workspace's recovery bookmark into its registry
+  // record BEFORE the workspace is forgotten, so archive-then-restore can
+  // re-create the workspace at its pinned change. Aborts jj deletion on failure.
+  setWorkspaceRecoveryPin?: (workspaceId: string, pin: string) => Promise<void>;
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
@@ -400,14 +406,7 @@ async function maybeRemoveDirectory(
   }
 
   try {
-    await deletePaseoWorktree({
-      cwd: backing.mainRepoRoot,
-      worktreePath: backing.path,
-      teardownCwds: [],
-      worktreesRoot: backing.paseoWorktreesRoot ?? undefined,
-      paseoHome: dependencies.paseoHome,
-      worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
-    });
+    await deleteBackingWorktreeForBackend(dependencies, backing);
     dependencies.github.invalidate({ cwd: backing.path });
     return true;
   } catch (error) {
@@ -417,6 +416,43 @@ async function maybeRemoveDirectory(
     );
     return false;
   }
+}
+
+/**
+ * jj workspaces archive through the recovery-pin sequence (worktree-jj.ts);
+ * git worktrees keep deletePaseoWorktree. Routed by the effective backend of
+ * the backing main repo root.
+ */
+async function deleteBackingWorktreeForBackend(
+  dependencies: ArchiveDependencies,
+  backing: BackingDirectory,
+): Promise<void> {
+  const sourceRepoRoot = backing.mainRepoRoot;
+  if (sourceRepoRoot && (await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+    let persistRecoveryPin: ((pin: string) => Promise<void>) | undefined;
+    const workspaceId = await dependencies.findWorkspaceIdForCwd(backing.path);
+    if (workspaceId && dependencies.setWorkspaceRecoveryPin) {
+      persistRecoveryPin = (pin) => dependencies.setWorkspaceRecoveryPin!(workspaceId, pin);
+    }
+    await deleteJjPaseoWorktree({
+      cwd: sourceRepoRoot,
+      worktreePath: backing.path,
+      teardownCwds: [],
+      worktreesRoot: backing.paseoWorktreesRoot ?? undefined,
+      paseoHome: dependencies.paseoHome,
+      worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
+      persistRecoveryPin,
+    });
+    return;
+  }
+  await deletePaseoWorktree({
+    cwd: backing.mainRepoRoot,
+    worktreePath: backing.path,
+    teardownCwds: [],
+    worktreesRoot: backing.paseoWorktreesRoot ?? undefined,
+    paseoHome: dependencies.paseoHome,
+    worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
+  });
 }
 
 async function filterAllowedTeardownTargets(

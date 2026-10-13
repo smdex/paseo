@@ -33,6 +33,7 @@ import {
 import { parseGitRevParsePath } from "./git-rev-parse-path.js";
 import { runGitCommand, type RunGitCommand } from "./run-git-command.js";
 import { listPaseoWorktrees, type PaseoWorktreeInfo } from "./worktree.js";
+import { listJjPaseoWorktrees } from "./worktree-jj.js";
 import {
   getJjDefaultBranch,
   getJjDiff,
@@ -106,7 +107,7 @@ export class NotSupportedOnJjError extends Error {
  * workspaces have no usable local .git, and git discovery could otherwise
  * select an unrelated enclosing repository.
  */
-async function resolveEffectiveBackend(cwd: string): Promise<VcsBackend | "git-default"> {
+export async function resolveEffectiveBackend(cwd: string): Promise<VcsBackend | "git-default"> {
   if (!isJjDispatchEnabled()) {
     return "git-default";
   }
@@ -419,7 +420,7 @@ export async function dispatchListPaseoWorktrees(options: {
   if ((await resolveEffectiveBackend(options.cwd)) !== "jj") {
     return listPaseoWorktrees(options);
   }
-  return [];
+  return listJjPaseoWorktrees(options);
 }
 
 /**

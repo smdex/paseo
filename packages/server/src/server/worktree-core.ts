@@ -7,6 +7,8 @@ import {
   validateBranchSlug,
   type CreatedWorktree,
 } from "../utils/worktree.js";
+import { createJjWorktree } from "../utils/worktree-jj.js";
+import { NotSupportedOnJjError, resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import {
   resolveWorktreeCreationIntent,
   type ResolveWorktreeCreationIntentInput,
@@ -116,7 +118,7 @@ async function createWorktreeCoreWithPriority(
   }
 
   return {
-    worktree: await createWorktree({
+    worktree: await createWorktreeForBackend({
       cwd: repoRoot,
       worktreeSlug: normalizedSlug,
       source: intent,
@@ -128,6 +130,32 @@ async function createWorktreeCoreWithPriority(
     repoRoot,
     created: true,
   };
+}
+
+/**
+ * Backend routing for worktree creation: jj repositories get jj workspaces
+ * (checkout-change-request / checkout-github-pr intents are deferred on jj and
+ * fail typed); git repositories keep the existing worktree path unchanged.
+ */
+async function createWorktreeForBackend(input: {
+  cwd: string;
+  worktreeSlug: string;
+  source: Parameters<typeof createWorktree>[0]["source"];
+  runSetup: boolean;
+  paseoHome?: string;
+  worktreesRoot?: string;
+}): Promise<CreatedWorktree> {
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    // Change-request / PR checkout intents are deferred on jj (plan §7): fail
+    // typed BEFORE any process spawns.
+    if (input.source.kind !== "branch-off" && input.source.kind !== "checkout-branch") {
+      throw new NotSupportedOnJjError(
+        `Worktree source "${input.source.kind}" is not supported on jj repositories yet`,
+      );
+    }
+    return createJjWorktree(input);
+  }
+  return createWorktree(input);
 }
 
 async function resolveForge(

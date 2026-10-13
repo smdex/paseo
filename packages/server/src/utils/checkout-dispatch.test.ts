@@ -12,6 +12,7 @@ import {
   dispatchNewChange,
   dispatchRunStashList,
 } from "./checkout-dispatch.js";
+import { createJjWorktree } from "./worktree-jj.js";
 import {
   isJjDispatchEnabled,
   isJjFeatureAvailable,
@@ -136,10 +137,43 @@ describe("checkout dispatch gate", () => {
       await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(NotSupportedOnJjError);
     });
 
-    it("reports no additional worktrees on jj until Phase D", async () => {
+    it("lists no Paseo workspaces when none were created", async () => {
       const dir = scratchJj();
       const worktrees = await dispatchListPaseoWorktrees({ cwd: dir, paseoHome: dir });
       expect(worktrees).toEqual([]);
+    });
+
+    it("lists created jj workspaces through the dispatch", async () => {
+      const dir = scratchJj();
+      spawnSync(
+        "jj",
+        [
+          "--config",
+          "user.name=Paseo Test",
+          "--config",
+          "user.email=paseo-test@example.invalid",
+          "bookmark",
+          "create",
+          "main",
+          "-r",
+          "@-",
+        ],
+        { cwd: dir },
+      );
+      const worktreesRoot = join(dir, "..", "dispatch-worktrees");
+      await createJjWorktree({
+        cwd: dir,
+        worktreeSlug: "dispatched",
+        source: { kind: "branch-off", baseBranch: "main", branchName: "feat/dispatched" },
+        worktreesRoot,
+      });
+      const worktrees = await dispatchListPaseoWorktrees({
+        cwd: dir,
+        paseoHome: dir,
+        worktreesRoot,
+      });
+      expect(worktrees).toHaveLength(1);
+      expect(worktrees[0]?.path).toContain("dispatched");
     });
 
     it("reflects the warmed probe in isJjFeatureAvailable", async () => {
