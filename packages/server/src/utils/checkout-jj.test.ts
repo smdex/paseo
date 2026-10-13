@@ -13,6 +13,7 @@ import {
   getJjSnapshotFacts,
   getJjStatus,
   getJjWorktreeState,
+  getJjWorkspaceBookmark,
   hasJjBookmark,
   jjFactsToCheckoutSnapshotFacts,
   listJjBookmarkSuggestions,
@@ -21,6 +22,10 @@ import {
   jjPull,
   jjPush,
   jjRenameBookmark,
+  jjNew,
+  jjDescribe,
+  jjCommit,
+  jjEdit,
 } from "./checkout-jj.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
 import {
@@ -934,12 +939,42 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     expect(status.currentBranch).toBeNull();
   });
 
+  it("persists explicit null ownership and rejects materialized comparison mismatch", async () => {
+    const managed = managedFixture({ jjBookmark: null });
+    const metadata = readPaseoWorktreeMetadata(managed.workspacePath)!;
+    writePaseoWorktreeMetadata(managed.workspacePath, {
+      baseRefName: metadata.baseRefName,
+      baseRef: metadata.baseRef,
+      jjBookmark: null,
+    });
+    const context = {
+      worktreesRoot: managed.worktreesRoot,
+      paseoHome: join(managed.worktreesRoot, "home"),
+    };
+    await jjDescribe(managed.workspacePath, { message: "explicit no owner" }, context);
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    expect(
+      (await readJjCheckpoint(managed.workspacePath, context.paseoHome))!.metadata,
+    ).toMatchObject({ version: 2, jjBookmark: null });
+    expect(await getJjWorkspaceBookmark(managed.workspacePath, context)).toBeNull();
+    writePaseoWorktreeMetadata(managed.workspacePath, {
+      baseRefName: "other-base",
+      baseRef: metadata.baseRef,
+      jjBookmark: null,
+    });
+    await expect(
+      jjDescribe(managed.workspacePath, { message: "must not adopt altered base" }, context),
+    ).rejects.toThrow("metadata does not match");
+    expect((await getJjChangeMeta(managed.workspacePath, "@"))!.description.trim()).toBe(
+      "explicit no owner",
+    );
+  });
+
   it("commit from a subdirectory advances the recorded owner, never the base", async () => {
     const managed = managedFixture({ jjBookmark: "feat/owned" });
     const subprojectDir = join(managed.workspacePath, "subdir");
     mkdirSync(subprojectDir, { recursive: true });
     writeFileSync(join(managed.workspacePath, "work.txt"), "work\n");
-    const { jjCommit } = await import("./checkout-jj.js");
     const mainBefore = managed
       .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
       .stdout.trim();
@@ -1163,5 +1198,241 @@ describeIfJj("jj local core parity", () => {
       remoteUrl: null,
     });
     await expect(jjPull(fixture.repoDir)).rejects.toThrow(/Multiple git remotes.*fork.*upstream/);
+  });
+});
+
+describeIfJj("durable native change checkpoint", () => {
+  it("keeps the described message on Finish and journals retained heads outside .jj", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    writeFileSync(join(fixture.repoDir, "a.txt"), "edited\n");
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    expect(before).not.toBeNull();
+    await jjDescribe(
+      fixture.repoDir,
+      { message: "My full description\n\nDetails", expectedChangeId: before!.changeId },
+      context,
+    );
+    await jjCommit(fixture.repoDir, { message: "" }, context);
+    const finished = await getJjChangeMeta(fixture.repoDir, "@-");
+    expect(finished!.description.trim()).toBe("My full description\n\nDetails");
+    const { readJjCheckpoint, jjCheckpointPath } = await import("./jj-checkpoint.js");
+    const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
+    expect(checkpoint!.completedChanges.map((head) => head.changeId)).toEqual([before!.changeId]);
+    expect(checkpoint!.operations.map((operation) => operation.status)).toEqual([
+      "completed",
+      "completed",
+    ]);
+    expect(checkpoint!.recoveryPins).toHaveLength(4);
+    // Live bookmarks follow native rewrites. The retained recovery coordinate
+    // is the pin at its captured full operation, not a promise of a frozen live ref.
+    const captured = checkpoint!.operations[0]!;
+    expect(fixture.jj(["util", "gc", "--expire", "now"]).status).toBe(0);
+    expect(
+      fixture
+        .jj([
+          "--at-op",
+          captured.beforeOperation,
+          "log",
+          "--no-graph",
+          "-r",
+          `bookmarks(exact:"${captured.recoveryPin}")`,
+          "-T",
+          "commit_id",
+        ])
+        .stdout.trim(),
+    ).toBe(before!.commitId);
+
+    expect(jjCheckpointPath(fixture.repoDir, context.paseoHome).startsWith(context.paseoHome)).toBe(
+      true,
+    );
+  });
+
+  it("New retains the previous native selection as durable WIP", async () => {
+    const fixture = scratch({ colocate: false, files: { "file.txt": "base\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    writeFileSync(join(fixture.repoDir, "file.txt"), "saved unfinished work\n");
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await jjNew(fixture.repoDir, { expectedChangeId: before.changeId }, context);
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    expect((await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.savedWip).toEqual([
+      { commitId: before.commitId, changeId: before.changeId },
+    ]);
+    expect((await getJjChangeMeta(fixture.repoDir, "@-"))!.changeId).toBe(before.changeId);
+  });
+
+  it("refuses a changed draft and an excluded file without losing disk bytes", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const old = await getJjChangeMeta(fixture.repoDir, "@");
+    fixture.jj(["new"]);
+    await expect(
+      jjDescribe(
+        fixture.repoDir,
+        { message: "old draft", expectedChangeId: old!.changeId },
+        context,
+      ),
+    ).rejects.toThrow("changed since this form opened");
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "empty captured ID", expectedChangeId: "" }, context),
+    ).rejects.toThrow("changed since this form opened");
+    await expect(
+      jjEdit(fixture.repoDir, { changeId: "", acknowledgeRewrites: true }, context),
+    ).rejects.toThrow("full, stable change ID");
+    const bytes = Buffer.alloc(1_200_000, 7);
+    writeFileSync(join(fixture.repoDir, "too-large.bin"), bytes);
+    await expect(jjCommit(fixture.repoDir, { message: "not included" }, context)).rejects.toThrow(
+      "too-large.bin",
+    );
+    expect(readFileSync(join(fixture.repoDir, "too-large.bin"))).toEqual(bytes);
+  });
+
+  it("edits the same stable change ID, warns about descendants and retains WIP", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const selected = await getJjChangeMeta(fixture.repoDir, "@-");
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    await expect(
+      jjEdit(fixture.repoDir, { changeId: selected!.changeId }, context),
+    ).rejects.toThrow("native rewrite warning");
+    await jjEdit(
+      fixture.repoDir,
+      { changeId: selected!.changeId, acknowledgeRewrites: true },
+      context,
+    );
+    const current = await getJjChangeMeta(fixture.repoDir, "@");
+    expect(current!.changeId).toBe(selected!.changeId);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "native rewritten\n");
+    await jjDescribe(
+      fixture.repoDir,
+      { message: "same ID", expectedChangeId: selected!.changeId, acknowledgeRewrites: true },
+      context,
+    );
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(selected!.changeId);
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
+    expect(checkpoint!.savedWip).toEqual([
+      { commitId: before!.commitId, changeId: before!.changeId },
+    ]);
+    expect(checkpoint!.operations[0]!.affectedHeads).toContainEqual({
+      commitId: before!.commitId,
+      changeId: before!.changeId,
+    });
+  });
+  it("requires shared-head approval even without descendants and preserves both workspace change IDs", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const head = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const secondary = join(fixture.dir, "shared-workspace");
+    expect(fixture.jj(["workspace", "add", secondary, "--name", "shared", "-r", "@-"]).status).toBe(
+      0,
+    );
+    expect(fixture.jj(["edit", head.commitId], secondary).status).toBe(0);
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "shared native description" }, context),
+    ).rejects.toThrow("shared workspaces");
+    await jjDescribe(
+      fixture.repoDir,
+      { message: "shared native description", acknowledgeRewrites: true },
+      context,
+    );
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(head.changeId);
+    expect(fixture.jj(["workspace", "update-stale"], secondary).status).toBe(0);
+    const shared = (await getJjChangeMeta(secondary, "@"))!;
+    expect(shared.changeId).toBe(head.changeId);
+    expect(shared.description.trim()).toBe("shared native description");
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const operation = (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.operations[0]!;
+    expect(operation.target!.changeId).toBe(head.changeId);
+    expect(operation.impact).toEqual({ otherWorkspaces: 1, published: false });
+  });
+
+  it("honors native immutable protection and keeps the refusal journal/pins", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    expect(
+      fixture.jj(["config", "set", "--repo", 'revset-aliases."immutable_heads()"', "main"]).status,
+    ).toBe(0);
+    const selected = (await getJjChangeMeta(fixture.repoDir, "main"))!;
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const context = { paseoHome: join(fixture.dir, "home") };
+    await expect(
+      jjEdit(fixture.repoDir, { changeId: selected.changeId, acknowledgeRewrites: true }, context),
+    ).rejects.toThrow(/immutable/);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(before.changeId);
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const checkpoint = (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!;
+    expect(checkpoint.operations[0]!.status).toBe("refused");
+    expect(checkpoint.recoveryPins).toHaveLength(3);
+  });
+
+  it("reports Finish's partial Describe→New failure and blocks publication without undo", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const { runJjCommand } = await import("./run-jj-command.js");
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const context = {
+      paseoHome: join(fixture.dir, "home"),
+      runJjCommand: async (args: string[], options: Parameters<typeof runJjCommand>[1]) => {
+        if (args[0] === "new")
+          return {
+            stdout: "",
+            stderr: "controlled New failure",
+            exitCode: 1,
+            signal: null,
+            truncated: false,
+          };
+        return runJjCommand(args, options);
+      },
+    };
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await expect(
+      jjCommit(fixture.repoDir, { message: "retained partial description" }, context),
+    ).rejects.toThrow("controlled New failure");
+    const after = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(after.changeId).toBe(before.changeId);
+    expect(after.description.trim()).toBe("retained partial description");
+    const checkpoint = (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!;
+    expect(checkpoint.operations[0]!.status).toBe("reconciliation_required");
+    expect(checkpoint.operations[0]!.after!.changeId).toBe(before.changeId);
+    await expect(jjPush(fixture.repoDir, context)).rejects.toThrow("Publication is blocked");
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "cannot erase partial result" }, context),
+    ).rejects.toThrow("previous jj operation requires reconciliation");
+  });
+
+  it("requires reconciliation if checkpoint state disappears or live ownership changes", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    await jjDescribe(fixture.repoDir, { message: "saved" }, context);
+    const { jjCheckpointPath } = await import("./jj-checkpoint.js");
+    rmSync(jjCheckpointPath(fixture.repoDir, context.paseoHome));
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "must not adopt" }, context),
+    ).rejects.toThrow("saved jj checkpoint");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.description.trim()).toBe("saved");
+  });
+
+  it("refuses to recreate lost checkpoint-directory state while its live reference survives", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    await jjDescribe(fixture.repoDir, { message: "saved before storage loss" }, context);
+    rmSync(join(context.paseoHome, "projects", "jj-checkpoints"), { recursive: true });
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "must not recreate" }, context),
+    ).rejects.toThrow("saved jj checkpoint is missing");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.description.trim()).toBe(
+      "saved before storage loss",
+    );
+  });
+  it("refuses checkpoint adoption by a replacement native store at the same external path", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    await jjDescribe(fixture.repoDir, { message: "old repository state" }, context);
+    rmSync(join(fixture.repoDir, ".jj"), { recursive: true });
+    expect(fixture.jj(["git", "init"]).status).toBe(0);
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "must not adopt" }, context),
+    ).rejects.toThrow("unavailable in this jj store");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.description.trim()).toBe("");
   });
 });

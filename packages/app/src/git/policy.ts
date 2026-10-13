@@ -70,6 +70,7 @@ export interface BuildGitActionsInput {
   isPaseoOwnedWorktree: boolean;
   isOnBaseBranch: boolean;
   hasUncommittedChanges: boolean;
+  hasDescribedJjChange?: boolean;
   baseRefAvailable: boolean;
   baseRefLabel: string;
   aheadCount: number;
@@ -200,9 +201,21 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
 
   allActions.set("commit", {
     id: "commit",
-    label: i18n.t("workspace.git.actions.commit.label"),
-    pendingLabel: i18n.t("workspace.git.actions.commit.pending"),
-    successLabel: i18n.t("workspace.git.actions.commit.success"),
+    label: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.label"
+        : "workspace.git.actions.commit.label",
+    ),
+    pendingLabel: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.pending"
+        : "workspace.git.actions.commit.pending",
+    ),
+    successLabel: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.success"
+        : "workspace.git.actions.commit.success",
+    ),
     disabled: input.runtime.commit.disabled,
     status: input.runtime.commit.status,
     icon: input.runtime.commit.icon,
@@ -350,11 +363,15 @@ export function actionsWithoutPrimary(gitActions: GitActions): GitAction[] {
   );
 }
 
+function canFinishChange(input: BuildGitActionsInput): boolean {
+  return input.hasUncommittedChanges || Boolean(input.isJj && input.hasDescribedJjChange);
+}
+
 function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shouldPromoteArchive) {
     return "archive-workspace";
   }
-  if (input.hasUncommittedChanges) {
+  if (canFinishChange(input)) {
     return "commit";
   }
   if (!input.isJj && canPull(input)) {

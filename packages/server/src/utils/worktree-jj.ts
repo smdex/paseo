@@ -1,5 +1,10 @@
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import type { Logger } from "pino";
+import {
+  importJjCheckpoint,
+  writeJjCheckpoint,
+  writeJjArchiveCheckpoint,
+} from "./jj-checkpoint.js";
 import { withWorkspaceLifecycle } from "./workspace-lifecycle.js";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
@@ -530,6 +535,32 @@ async function deleteJjWorkspaceUnderLifecycle(
     if (pinnedAt !== headCommitId) {
       throw new Error(`Recovery pin ${pin} did not land on the workspace head; aborting deletion`);
     }
+
+    const change = await runJjWorkspaceSafe(
+      ["log", "--no-graph", "-r", "@", "-T", 'change_id ++ "\\n"'],
+      { cwd: resolvedWorktree },
+    );
+    const changeId = change.stdout.trim();
+    if (!/^[k-z]{32}$/.test(changeId)) throw new Error("Cannot retain archive selection identity");
+    const checkpoint = await importJjCheckpoint({
+      backingRoot: resolvedWorktree,
+      head: { commitId: headCommitId, changeId },
+      paseoHome: options.paseoHome,
+    });
+    const archivedCheckpoint = await writeJjCheckpoint(
+      {
+        ...checkpoint,
+        metadata: readPaseoWorktreeMetadata(resolvedWorktree),
+        selection: { commitId: headCommitId, changeId },
+        savedWip:
+          checkpoint.selection.changeId === changeId
+            ? checkpoint.savedWip
+            : [...checkpoint.savedWip, checkpoint.selection],
+        recoveryPins: [...checkpoint.recoveryPins, pin],
+      },
+      options.paseoHome,
+    );
+    await writeJjArchiveCheckpoint(archivedCheckpoint, pin, options.paseoHome);
 
     // 2. Durable persistence BEFORE forgetting. An empty workspace's change
     //    becomes unreachable after forget, so the pin bookmark is the only

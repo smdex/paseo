@@ -2280,6 +2280,8 @@ export const CheckoutCommitRequestSchema = z.object({
   cwd: z.string(),
   message: z.string().optional(),
   addAll: z.boolean().optional(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -2369,6 +2371,7 @@ const CheckoutCommitFileSchema = z.object({
 
 const CheckoutCommitSchema = z.object({
   sha: z.string(),
+  changeId: z.string().optional(),
   shortSha: z.string(),
   subject: z.string(),
   authorName: z.string(),
@@ -2469,6 +2472,8 @@ export const CheckoutNewChangeRequestSchema = z.object({
   cwd: z.string(),
   /** Optional description for the new working-copy change. */
   message: z.string().optional(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -2477,6 +2482,17 @@ export const CheckoutDescribeChangeRequestSchema = z.object({
   cwd: z.string(),
   /** Replacement description for the current working-copy change. */
   message: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutEditChangeRequestSchema = z.object({
+  type: z.literal("checkout.edit_change.request"),
+  cwd: z.string(),
+  changeId: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -3426,6 +3442,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutRenameBranchRequestSchema,
   CheckoutNewChangeRequestSchema,
   CheckoutDescribeChangeRequestSchema,
+  CheckoutEditChangeRequestSchema,
   StashSaveRequestSchema,
   StashPopRequestSchema,
   StashListRequestSchema,
@@ -3781,6 +3798,7 @@ export const ServerInfoStatusPayloadSchema = z
         // the daemon's jj runtime probe passes and dispatch is enabled. Remove the
         // gate once the client floor ships jj-aware UI.
         checkoutJj: z.boolean().optional(),
+        checkoutJjCheckpoint: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
         workspaceMultiplicity: z.boolean().optional(),
         // COMPAT(projectRemove): added in v0.1.97, drop the gate when floor >= v0.1.97.
@@ -5394,6 +5412,8 @@ const CheckoutStatusCommonSchema = z.object({
   vcs: z.enum(["git", "jj"]).optional(),
   // jj change id of the working-copy commit (jj only; null when unknown).
   changeId: z.string().nullable().optional(),
+  jjDescription: z.string().optional(),
+  jjSnapshotRefusedPaths: z.array(z.string()).optional(),
   defaultWorkspaceBase: z.object({ refName: z.string(), displayName: z.string() }).optional(),
 });
 
@@ -6020,6 +6040,19 @@ export const CheckoutNewChangeResponseSchema = z.object({
 
 export const CheckoutDescribeChangeResponseSchema = z.object({
   type: z.literal("checkout.describe_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutEditChangeResponseSchema = z.object({
+  type: z.literal("checkout.edit_change.response"),
   payload: z.object({
     requestId: z.string(),
     success: z.boolean(),
@@ -7229,6 +7262,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutRenameBranchResponseSchema,
   CheckoutNewChangeResponseSchema,
   CheckoutDescribeChangeResponseSchema,
+  CheckoutEditChangeResponseSchema,
   StashSaveResponseSchema,
   StashPopResponseSchema,
   StashListResponseSchema,

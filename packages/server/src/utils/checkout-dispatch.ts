@@ -57,6 +57,8 @@ import {
   jjCommit,
   jjCreateBookmark,
   jjDescribe,
+  jjEdit,
+  type JjChangeIntent,
   jjDiscard,
   jjFactsToCheckoutSnapshotFacts,
   jjNew,
@@ -250,14 +252,14 @@ const READ_ONLY_ENV = { GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" };
 
 export async function dispatchCommitChanges(
   cwd: string,
-  options: { message: string; addAll?: boolean },
+  options: { message: string; addAll?: boolean } & JjChangeIntent,
   context?: CheckoutContext,
 ): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return commitChanges(cwd, options);
   }
   // addAll is meaningless for jj: the working copy is always snapshotted in full.
-  await jjCommit(cwd, { message: options.message }, toJjContext(context));
+  await jjCommit(cwd, options, toJjContext(context));
 }
 
 export async function dispatchDiscardChanges(cwd: string, paths: string[]): Promise<void> {
@@ -274,7 +276,7 @@ export async function dispatchDiscardChanges(cwd: string, paths: string[]): Prom
  */
 export async function dispatchNewChange(
   cwd: string,
-  options?: { message?: string },
+  options?: { message?: string } & JjChangeIntent,
   context?: CheckoutContext,
 ): Promise<JjMutationResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
@@ -286,7 +288,7 @@ export async function dispatchNewChange(
 /** Describe (retitle) the current working-copy change. jj-only surface. */
 export async function dispatchDescribeChange(
   cwd: string,
-  options: { message: string },
+  options: { message: string } & JjChangeIntent,
   context?: CheckoutContext,
 ): Promise<JjMutationResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
@@ -295,6 +297,16 @@ export async function dispatchDescribeChange(
     );
   }
   return jjDescribe(cwd, options, toJjContext(context));
+}
+
+export async function dispatchEditChange(
+  cwd: string,
+  options: { changeId: string } & JjChangeIntent,
+  context?: CheckoutContext,
+): Promise<JjMutationResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj")
+    throw new NotSupportedOnJjError("Edit change (jj-only operation) requested on a Git checkout");
+  return jjEdit(cwd, options, toJjContext(context));
 }
 
 /**

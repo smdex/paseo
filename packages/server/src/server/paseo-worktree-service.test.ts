@@ -34,6 +34,7 @@ import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
 import {
   readPaseoWorktreeMetadata,
   readJjWorkspaceIncarnation,
+  writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
 } from "../utils/worktree-metadata.js";
 import { createWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import { isPlatform } from "../test-utils/platform.js";
@@ -41,6 +42,7 @@ import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../utils/pat
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
 import {
   getJjPaseoWorktreesRoot,
+  createJjWorktree,
   listJjWorkspaces,
   jjRevisionResolves,
 } from "../utils/worktree-jj.js";
@@ -1788,6 +1790,136 @@ test.skipIf(!isJjAvailable() || isPlatform("win32"))(
       expect(existsSync(gitCalls)).toBe(false);
     } finally {
       process.env.PATH = oldPath;
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "native first-agent auto-name uses owned bookmark/checkpoint under enclosing Git with custom secondary placement",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "sub/file.txt": "base\n" } });
+    cleanupPaths.push(fixture.dir);
+    execFileSync("git", ["init", "-q", fixture.dir]);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = path.join(fixture.dir, "custom");
+    const paseoHome = path.join(fixture.dir, "home");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "placeholder",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "placeholder" },
+    });
+    writePaseoWorktreeFirstAgentBranchAutoNameMetadata(created.worktreePath, {
+      placeholderBranchName: "placeholder",
+    });
+    const { getJjChangeMeta } = await import("../utils/checkout-jj.js");
+    const { importJjCheckpoint, readJjCheckpoint, writeJjCheckpoint } =
+      await import("../utils/jj-checkpoint.js");
+    const head = (await getJjChangeMeta(created.worktreePath, "@"))!;
+    const checkpoint = await importJjCheckpoint({
+      backingRoot: created.worktreePath,
+      head,
+      paseoHome,
+    });
+    const publication = {
+      remoteName: "fork",
+      remoteUrl: "https://host.invalid/fork/project",
+      localBookmark: "placeholder",
+      remoteBookmark: "original-remote-name",
+      sourceRepository: "fork/project",
+      targetRepository: "upstream/project",
+    };
+    await writeJjCheckpoint({ ...checkpoint, publication }, paseoHome);
+    let gitCalls = 0;
+    const forbiddenGit = async () => {
+      gitCalls++;
+      throw new Error("Unexpected enclosing Git access");
+    };
+    await expect(
+      attemptFirstAgentBranchAutoName({
+        cwd: path.join(created.worktreePath, "sub"),
+        paseoHome,
+        worktreesRoot,
+        expectedJjWorkspaceId: "00000000-0000-4000-8000-000000000001",
+        firstAgentContext: { prompt: "Old workspace request" },
+        generateBranchNameFromContext: async () => {
+          throw new Error("Generation must not run for a replacement");
+        },
+        getCurrentBranch: forbiddenGit,
+        localBranchExists: forbiddenGit,
+        renameCurrentBranch: forbiddenGit,
+      }),
+    ).rejects.toThrow("incarnation changed before auto-name");
+    const result = await attemptFirstAgentBranchAutoName({
+      cwd: path.join(created.worktreePath, "sub"),
+      paseoHome,
+      worktreesRoot,
+      expectedJjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+      firstAgentContext: { prompt: "Name this native project" },
+      generateBranchNameFromContext: async () => "native-generated",
+      getCurrentBranch: forbiddenGit,
+      localBranchExists: forbiddenGit,
+      renameCurrentBranch: forbiddenGit,
+    });
+    expect(result).toEqual({ attempted: true, renamed: true, branchName: "native-generated" });
+    expect(gitCalls).toBe(0);
+    const saved = (await readJjCheckpoint(created.worktreePath, paseoHome))!;
+    expect(saved.publication).toEqual({ ...publication, localBookmark: "native-generated" });
+    expect(saved.metadata).toMatchObject({
+      jjBookmark: "native-generated",
+      firstAgentBranchAutoName: { status: "attempted" },
+    });
+    expect((await getJjChangeMeta(created.worktreePath, "@"))!.changeId).toBe(head.changeId);
+    expect(await jjRevisionResolves(fixture.repoDir, "main")).toBe(true);
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "native auto-name rechecks dispatch after asynchronous generation without Git fallback",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "readme.txt": "base\n" } });
+    cleanupPaths.push(fixture.dir);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = path.join(fixture.dir, "custom");
+    const paseoHome = path.join(fixture.dir, "home");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "pending-name",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "pending-name" },
+    });
+    writePaseoWorktreeFirstAgentBranchAutoNameMetadata(created.worktreePath, {
+      placeholderBranchName: "pending-name",
+    });
+    const previous = process.env.PASEO_JJ_DISPATCH;
+    let gitCalls = 0;
+    const forbiddenGit = async () => {
+      gitCalls++;
+      throw new Error("Unexpected Git fallback");
+    };
+    try {
+      process.env.PASEO_JJ_DISPATCH = "1";
+      await expect(
+        attemptFirstAgentBranchAutoName({
+          cwd: created.worktreePath,
+          paseoHome,
+          worktreesRoot,
+          firstAgentContext: { prompt: "Name this project" },
+          generateBranchNameFromContext: async () => {
+            process.env.PASEO_JJ_DISPATCH = "0";
+            return "must-not-rename";
+          },
+          getCurrentBranch: forbiddenGit,
+          localBranchExists: forbiddenGit,
+          renameCurrentBranch: forbiddenGit,
+        }),
+      ).rejects.toThrow(/disabled/);
+      expect(gitCalls).toBe(0);
+      expect(await jjRevisionResolves(fixture.repoDir, "pending-name")).toBe(true);
+      expect(await jjRevisionResolves(fixture.repoDir, "must-not-rename")).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_JJ_DISPATCH;
+      else process.env.PASEO_JJ_DISPATCH = previous;
     }
   },
 );

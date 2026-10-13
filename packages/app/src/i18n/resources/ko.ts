@@ -849,6 +849,10 @@ export const ko: TranslationResources = {
           pending: "보관하는 중...",
           success: "보관됨",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "새 체인지",
           pending: "새 체인지 시작 중...",

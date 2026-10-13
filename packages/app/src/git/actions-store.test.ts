@@ -1,3 +1,4 @@
+import { openJjChangeForm, type JjChangeFormPorts } from "./jj-change-form-model";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient as appQueryClient } from "@/data/query-client";
@@ -302,5 +303,86 @@ describe("checkout-git-actions-store", () => {
         .getState()
         .getStatus({ serverId, cwd, actionId: "enable-pr-auto-merge-merge" }),
     ).toBe("idle");
+  });
+});
+
+describe("native change form", () => {
+  it("keeps draft and captured cwd/change on refusal, blocks duplicates and refreshes success", async () => {
+    const input = {
+      serverId: "host",
+      cwd: "/native/sub",
+      changeId: "captured",
+      description: "Full\n\ndescription",
+      mode: "describe" as const,
+    };
+    const pending = createDeferred<void>();
+    const calls: Parameters<JjChangeFormPorts["describe"]>[0][] = [];
+    let refreshed = 0;
+    const model = openJjChangeForm(input, {
+      describe: async (request) => {
+        calls.push(request);
+        await pending.promise;
+      },
+      edit: async () => {
+        throw new Error("Unexpected Edit");
+      },
+      refresh: async () => {
+        refreshed++;
+      },
+    });
+    model.setDraft("My draft");
+    const submitting = model.submit();
+    await model.submit();
+    expect(model.getState().status).toBe("pending");
+    expect(calls).toEqual([
+      {
+        cwd: "/native/sub",
+        message: "My draft",
+        expectedChangeId: "captured",
+        acknowledgeRewrites: true,
+      },
+    ]);
+    pending.reject(new Error("Current change moved; reopen"));
+    await submitting;
+    expect(model.getState()).toEqual({
+      ...input,
+      draft: "My draft",
+      targetChangeId: null,
+      status: "error",
+      error: "Current change moved; reopen",
+      canSubmit: true,
+    });
+    expect(refreshed).toBe(0);
+    model.close();
+  });
+
+  it("requires an explicit stable history selection and reports success", async () => {
+    const calls: Parameters<JjChangeFormPorts["edit"]>[0][] = [];
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "edit" },
+      {
+        describe: async () => {
+          throw new Error("Unexpected Describe");
+        },
+        edit: async (request) => {
+          calls.push(request);
+        },
+        refresh: async () => {},
+      },
+    );
+    expect(model.getState().canSubmit).toBe(false);
+    model.selectChange("stable selected change");
+    await model.submit();
+    expect(calls).toEqual([
+      {
+        cwd: "/native",
+        changeId: "stable selected change",
+        expectedChangeId: "current",
+        acknowledgeRewrites: true,
+      },
+    ]);
+    expect(model.getState().status).toBe("success");
+    expect(model.getState().canSubmit).toBe(false);
+    model.close();
   });
 });

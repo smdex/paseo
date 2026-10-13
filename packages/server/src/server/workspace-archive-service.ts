@@ -1,3 +1,4 @@
+import { readJjArchiveCheckpoint, jjArchiveCheckpointPath } from "../utils/jj-checkpoint.js";
 import { setWorkspaceRecoveryReference } from "./workspace-registry.js";
 import {
   type JjWorkspaceAuthority,
@@ -684,7 +685,22 @@ async function deleteBackingWorktreeForBackend(
       const targets = [...pinTargets.values()];
       persistRecoveryPin = async (pin) => {
         for (const record of targets) {
-          await dependencies.setWorkspaceRecoveryPin!(record.workspaceId, pin, record);
+          const checkpoint = await readJjArchiveCheckpoint(
+            backing.path,
+            pin,
+            dependencies.paseoHome,
+          );
+          if (!checkpoint)
+            throw new Error(
+              "Archive checkpoint disappeared before sibling persistence; directory retained",
+            );
+          await dependencies.setWorkspaceRecoveryPin!(record.workspaceId, pin, {
+            ...record,
+            jjCheckpointRef: {
+              path: jjArchiveCheckpointPath(backing.path, pin, dependencies.paseoHome),
+              generation: checkpoint.generation,
+            },
+          });
         }
       };
     }

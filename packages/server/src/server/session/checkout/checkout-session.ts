@@ -48,6 +48,7 @@ import {
 import {
   dispatchCommitChanges,
   dispatchDescribeChange,
+  dispatchEditChange,
   dispatchGetCommitFileDiff,
   dispatchDiscardChanges,
   dispatchMergeFromBase,
@@ -61,6 +62,7 @@ import {
   NotSupportedOnJjError,
   resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
+import { getJjSnapshotFacts } from "../../../utils/checkout-jj.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
 
@@ -750,9 +752,14 @@ export class CheckoutSession {
 
     try {
       let message = msg.message?.trim() ?? "";
-      if (!message) {
-        message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
+      if (!message && (await resolveEffectiveBackend(cwd)) === "jj") {
+        const facts = await getJjSnapshotFacts(cwd, {
+          paseoHome: this.paseoHome,
+          worktreesRoot: this.worktreesRoot,
+        });
+        if (facts.isJj) message = facts.workingCopy.meta.description;
       }
+      if (!message) message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
       if (!message) {
         throw new Error("Commit message is required");
       }
@@ -762,6 +769,8 @@ export class CheckoutSession {
         {
           message,
           addAll: msg.addAll ?? true,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
         },
         { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
       );
@@ -797,7 +806,11 @@ export class CheckoutSession {
     try {
       const result = await dispatchNewChange(
         cwd,
-        { message: msg.message },
+        {
+          message: msg.message,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
         { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
       );
       await this.gitMutation.notifyGitMutation(cwd, "new-change");
@@ -833,7 +846,11 @@ export class CheckoutSession {
       }
       const result = await dispatchDescribeChange(
         cwd,
-        { message },
+        {
+          message,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
         { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
       );
       await this.gitMutation.notifyGitMutation(cwd, "describe-change");
@@ -845,6 +862,42 @@ export class CheckoutSession {
     } catch (error) {
       this.host.emit({
         type: "checkout.describe_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutEditChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.edit_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchEditChange(
+        cwd,
+        {
+          changeId: msg.changeId,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "new-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.edit_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.edit_change.response",
         payload: {
           cwd,
           success: false,

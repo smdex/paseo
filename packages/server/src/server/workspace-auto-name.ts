@@ -25,6 +25,8 @@ type CurrentSelection = GenerateBranchNameFromFirstAgentContextOptions["currentS
 interface WorkspaceAutoNameOptions {
   agentManager: AgentManager;
   workspaceRegistry: Pick<WorkspaceRegistry, "update">;
+  paseoHome?: string;
+  worktreesRoot?: string;
   workspaceGitService: WorkspaceGitService;
   providerSnapshotManager: ProviderSnapshotManager;
   readDaemonConfig: () => StructuredGenerationDaemonConfig;
@@ -40,6 +42,8 @@ interface ScheduleContext {
 }
 
 export class WorkspaceAutoName {
+  private readonly paseoHome: string | undefined;
+  private readonly worktreesRoot: string | undefined;
   private readonly agentManager: AgentManager;
   private readonly workspaceRegistry: Pick<WorkspaceRegistry, "update">;
   private readonly workspaceGitService: WorkspaceGitService;
@@ -52,6 +56,8 @@ export class WorkspaceAutoName {
   private readonly generateWorkspaceName: WorkspaceNameGenerator;
 
   constructor(options: WorkspaceAutoNameOptions) {
+    this.paseoHome = options.paseoHome;
+    this.worktreesRoot = options.worktreesRoot;
     this.agentManager = options.agentManager;
     this.workspaceRegistry = options.workspaceRegistry;
     this.workspaceGitService = options.workspaceGitService;
@@ -112,6 +118,9 @@ export class WorkspaceAutoName {
     let generated: GeneratedWorkspaceName | null = null;
     const result: AttemptFirstAgentBranchAutoNameResult = await attemptFirstAgentBranchAutoName({
       cwd: worktreeRoot,
+      paseoHome: this.paseoHome,
+      worktreesRoot: this.worktreesRoot,
+      expectedJjWorkspaceId: input.workspace.jjWorkspaceId ?? undefined,
       firstAgentContext: input.firstAgentContext,
       generateBranchNameFromContext: ({ firstAgentContext }) => {
         return this.generateFromContext({

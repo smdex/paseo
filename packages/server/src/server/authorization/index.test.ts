@@ -126,6 +126,15 @@ describe("SessionAuthorization", () => {
     expect(authorization.allowsOutbound(outboundMessage("agent_update"))).toBe(false);
   });
 
+  test("native Edit requires workspace write authority in both directions", () => {
+    const reader = new SessionAuthorization(["workspace.read"]);
+    const writer = new SessionAuthorization(["workspace.write"]);
+    expect(reader.allowsInbound(inboundMessage("checkout.edit_change.request"))).toBe(false);
+    expect(reader.allowsOutbound(outboundMessage("checkout.edit_change.response"))).toBe(false);
+    expect(writer.allowsInbound(inboundMessage("checkout.edit_change.request"))).toBe(true);
+    expect(writer.allowsOutbound(outboundMessage("checkout.edit_change.response"))).toBe(true);
+  });
+
   test("correlated authorization errors can always be emitted", () => {
     const authorization = new SessionAuthorization([]);
 

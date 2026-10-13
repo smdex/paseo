@@ -72,6 +72,8 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       requestId,
       vcs: snapshot.git.vcs,
       changeId: snapshot.git.changeId ?? null,
+      jjDescription: snapshot.git.jjDescription,
+      jjSnapshotRefusedPaths: snapshot.git.jjSnapshotRefusedPaths,
       defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
     };
   }
@@ -95,6 +97,8 @@ export function buildCheckoutStatusPayloadFromSnapshot({
     requestId,
     vcs: snapshot.git.vcs,
     changeId: snapshot.git.changeId ?? null,
+    jjDescription: snapshot.git.jjDescription,
+    jjSnapshotRefusedPaths: snapshot.git.jjSnapshotRefusedPaths,
     defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
   };
 }
