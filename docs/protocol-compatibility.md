@@ -26,6 +26,14 @@ Two questions to ask before you commit a schema change:
 
 If you can't answer both with yes, the change isn't done.
 
+Checkout discovery keeps `defaultWorkspaceBase` and bookmark `localRef`, `remoteRef`, and
+`remoteName` optional. Git hosts can keep sending named refs; opt-in jj hosts send exact commit
+IDs because a Git-shaped ref is not a native jj revision. Older clients accept the added fields,
+and newer clients accept their omission. Native picker rows without exact refs are unavailable,
+not reinterpreted as Git branches. This does not enable jj by default or establish full jj parity.
+The old/new field combinations and generated inbound validation are covered in
+`packages/protocol/src/messages.wire-compat.test.ts`.
+
 Schemas live in `packages/protocol/src/messages.ts`. New RPC names follow [rpc-namespacing.md](rpc-namespacing.md).
 
 ## The feature contract: per feature, gated once

@@ -95,13 +95,16 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       hasOriginRemote?: ReturnType<typeof vi.fn>;
       runGitFetch?: ReturnType<typeof vi.fn>;
       gitCommandCalls?: string[][];
+      runJjFetch?: typeof import("../utils/checkout-jj.js").jjPull;
+      logger?: pino.Logger;
     },
   ) {
     return new WorkspaceGitServiceImpl({
-      logger: createLogger(),
+      logger: overrides?.logger ?? createLogger(),
       paseoHome: "/tmp/paseo-jj-home",
       deps: {
         subscribe: watcher.subscribe,
+        ...(overrides?.runJjFetch ? { runJjFetch: overrides.runJjFetch } : {}),
         getCheckoutStatus: async (cwd: string, context?: unknown) => {
           overrides?.statusCalls?.push(cwd);
           return dispatchGetCheckoutStatus(
@@ -403,6 +406,106 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       expect(snapshot.git.hasRemote).toBe(true);
       expect(hasOriginRemote).not.toHaveBeenCalled();
       expect(runGitFetch).not.toHaveBeenCalled();
+    } finally {
+      subscription.unsubscribe();
+      await service.dispose();
+    }
+  });
+
+  test("shares one jj fetch cadence/in-flight guard, survives one workspace closing, and stops on disposal", async () => {
+    const repo = fixture({ colocate: false, files: { "README.md": "base\n" } });
+    execSync("git init --bare upstream.git", { cwd: repo.dir });
+    expect(
+      repo.jj(["git", "remote", "add", "upstream", join(repo.dir, "upstream.git")]).status,
+    ).toBe(0);
+    const secondary = join(repo.dir, "secondary");
+    expect(repo.jj(["workspace", "add", "--name", "secondary", secondary]).status).toBe(0);
+    const calls: string[] = [];
+    let finishFetch = () => {};
+    const pending = new Promise<void>((resolve) => {
+      finishFetch = resolve;
+    });
+    const logger = createLogger();
+    const service = createJjService(createWatcherHarness(), {
+      logger,
+      runJjFetch: async (cwd) => {
+        calls.push(cwd);
+        if (calls.length === 1) await pending;
+        else throw new Error("offline jj remote");
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const first = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    const second = service.registerWorkspace({ cwd: secondary }, () => {});
+    try {
+      await waitForSnapshot(service, repo.repoDir);
+      await waitForSnapshot(service, secondary);
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(calls).toHaveLength(1);
+      first.unsubscribe();
+      finishFetch();
+      await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
+      await vi.advanceTimersByTimeAsync(180_000);
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[1]).toBe(secondary);
+      await vi.waitFor(() =>
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ cwd: secondary }),
+          "Background jj fetch failed; local observation remains active",
+        ),
+      );
+      second.unsubscribe();
+      await service.dispose();
+      await vi.advanceTimersByTimeAsync(360_000);
+      expect(calls).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      finishFetch();
+      first.unsubscribe();
+      second.unsubscribe();
+      await service.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("disposal aborts and awaits the owned in-flight jj fetch", async () => {
+    const repo = fixture({ colocate: false, files: { "README.md": "base\n" } });
+    execSync("git init --bare upstream.git", { cwd: repo.dir });
+    expect(
+      repo.jj(["git", "remote", "add", "upstream", join(repo.dir, "upstream.git")]).status,
+    ).toBe(0);
+    let aborted = false;
+    let exited = false;
+    let started = () => {};
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const service = createJjService(createWatcherHarness(), {
+      runJjFetch: async (_cwd, context) => {
+        const signal = context?.signal;
+        if (!signal) throw new Error("fetch lifetime signal missing");
+        started();
+        await new Promise<void>((resolve) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        exited = true;
+      },
+    });
+    const subscription = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    try {
+      await didStart;
+      await service.dispose();
+      expect(aborted).toBe(true);
+      expect(exited).toBe(true);
+      expect(service.getMetrics().repositoryTargetCount).toBe(0);
     } finally {
       subscription.unsubscribe();
       await service.dispose();

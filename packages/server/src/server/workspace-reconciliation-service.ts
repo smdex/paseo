@@ -452,7 +452,7 @@ export class WorkspaceReconciliationService {
           project.rootPath,
           { recursive: false },
           (_event, filename) => {
-            if (filename === null || filename.toString() === ".git") {
+            if (filename === null || [".git", ".jj"].includes(filename.toString())) {
               this.scheduleObservedReconciliation();
             }
           },

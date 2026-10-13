@@ -798,6 +798,11 @@ export const fr: TranslationResources = {
           pending: "Commit en cours…",
           success: "Commité",
         },
+        fetch: {
+          label: "Récupérer",
+          pending: "Récupération...",
+          success: "Récupéré",
+        },
         pull: {
           label: "Pull",
           pending: "Pull en cours…",
@@ -1381,6 +1386,7 @@ export const fr: TranslationResources = {
       launch: "Choisir quoi lancer",
     },
     refPicker: {
+      currentChange: "Changement actuel",
       startingRef: "Réf. de départ",
       intoBase: "vers {{baseRef}}",
       searching: "Recherche…",

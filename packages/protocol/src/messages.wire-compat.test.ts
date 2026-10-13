@@ -1,6 +1,9 @@
+import { validateWSOutboundMessage } from "./validation/ws-outbound.js";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
+  BranchSuggestionsResponseSchema,
+  CheckoutStatusResponseSchema,
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
   ServerInfoStatusPayloadSchema,
@@ -435,4 +438,83 @@ test("usage login errors are additive and older reports still parse", () => {
   expect(SessionOutboundMessageSchema.parse(oldMessage)).toEqual(oldMessage);
   expect(SessionOutboundMessageSchema.parse(newMessage)).toEqual(newMessage);
   expect(legacy.parse(newMessage)).toEqual(oldMessage);
+});
+
+test("exact workspace refs and default bases remain optional across checkout wire versions", () => {
+  const oldStatus = {
+    type: "checkout_status_response",
+    payload: {
+      cwd: "/repo",
+      isGit: true,
+      isPaseoOwnedWorktree: false,
+      repoRoot: "/repo",
+      mainRepoRoot: null,
+      currentBranch: null,
+      isDirty: false,
+      baseRef: null,
+      aheadBehind: null,
+      aheadOfOrigin: null,
+      behindOfOrigin: null,
+      hasRemote: false,
+      remoteUrl: null,
+      error: null,
+      requestId: "status",
+    },
+  };
+  const newStatus = {
+    ...oldStatus,
+    payload: {
+      ...oldStatus.payload,
+      defaultWorkspaceBase: { refName: "@", displayName: "Current change" },
+    },
+  };
+  const [notGit, local, managed] = CheckoutStatusResponseSchema.shape.payload.options;
+  const legacyStatus = CheckoutStatusResponseSchema.extend({
+    payload: z.union([
+      notGit.omit({ defaultWorkspaceBase: true }),
+      local.omit({ defaultWorkspaceBase: true }),
+      managed.omit({ defaultWorkspaceBase: true }),
+    ]),
+  });
+  expect(CheckoutStatusResponseSchema.parse(oldStatus)).toEqual(oldStatus);
+  expect(CheckoutStatusResponseSchema.parse(newStatus)).toEqual(newStatus);
+  expect(legacyStatus.parse(newStatus)).toEqual(oldStatus);
+  const oldBranches = {
+    type: "branch_suggestions_response",
+    payload: {
+      branches: ["main"],
+      branchDetails: [{ name: "main", committerDate: 1, hasLocal: true, hasRemote: true }],
+      error: null,
+      requestId: "branches",
+    },
+  };
+  const newBranches = {
+    ...oldBranches,
+    payload: {
+      ...oldBranches.payload,
+      branchDetails: [
+        {
+          ...oldBranches.payload.branchDetails[0],
+          localRef: "a".repeat(40),
+          remoteRef: "b".repeat(40),
+          remoteName: "upstream",
+        },
+      ],
+    },
+  };
+  const legacyDetail = BranchSuggestionsResponseSchema.shape.payload.shape.branchDetails
+    .unwrap()
+    .element.omit({ localRef: true, remoteRef: true, remoteName: true });
+  const legacyBranches = BranchSuggestionsResponseSchema.extend({
+    payload: BranchSuggestionsResponseSchema.shape.payload.extend({
+      branchDetails: z.array(legacyDetail).optional(),
+    }),
+  });
+  expect(BranchSuggestionsResponseSchema.parse(oldBranches)).toEqual(oldBranches);
+  expect(BranchSuggestionsResponseSchema.parse(newBranches)).toEqual(newBranches);
+  expect(legacyBranches.parse(newBranches)).toEqual(oldBranches);
+  for (const message of [oldStatus, newStatus, oldBranches, newBranches]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
 });

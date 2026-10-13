@@ -85,9 +85,8 @@ export function resetJjRuntimeCache(): void {
 }
 
 /**
- * The dispatch activation switch: PASEO_JJ_DISPATCH=0 turns jj routing off for
- * the whole daemon, restoring pre-jj behavior exactly (git implementations
- * with their own repo detection). Default: on.
+ * Opt-in activation switch. Detected jj repositories refuse VCS operations
+ * when disabled; they never fall back to Git discovery.
  */
 export function isJjDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   // Opt-in until the Phase F activation flips the default: every jj path

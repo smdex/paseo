@@ -17,6 +17,7 @@ import type { ForgeService } from "../../services/forge-service.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
 import type { WorkspaceArchiveContext } from "../workspace-registry.js";
+import { detectVcsBackend } from "../../utils/vcs-backend.js";
 
 export interface AutoArchiveArchiveOptions extends WorkspaceArchiveAuthorityPorts {
   paseoHome: string;
@@ -59,6 +60,9 @@ export async function archiveIfSafe(input: {
   const deps = input.deps ?? defaultDependencies;
   const cwd = snapshot.cwd;
   const pullRequest = snapshot.forge.pullRequest;
+
+  // Native merge/source proof and durable WIP accounting land with jj auto-archive parity.
+  if (snapshot.git.vcs === "jj" || detectVcsBackend(cwd) === "jj") return;
 
   if (!pullRequest?.isMerged) {
     return;

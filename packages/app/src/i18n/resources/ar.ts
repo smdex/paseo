@@ -791,6 +791,11 @@ export const ar: TranslationResources = {
           pending: "ارتكاب...",
           success: "ملتزم",
         },
+        fetch: {
+          label: "جلب",
+          pending: "جارٍ الجلب...",
+          success: "تم الجلب",
+        },
         pull: {
           label: "يحذب",
           pending: "سحب...",
@@ -1353,6 +1358,7 @@ export const ar: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "التغيير الحالي",
       startingRef: "بدء المرجع",
       intoBase: "إلى {{baseRef}}",
       searching: "جارٍ البحث...",

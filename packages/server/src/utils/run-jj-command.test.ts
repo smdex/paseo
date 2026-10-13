@@ -355,3 +355,54 @@ describe("jj deletion barrier", () => {
     await other;
   });
 });
+
+describe("jj command cancellation", () => {
+  it("refuses an already aborted command before spawning", async () => {
+    const controller = new AbortController();
+    const reason = new Error("closed observation");
+    controller.abort(reason);
+    const fake = fakeSpawn({ neverExit: true });
+    const run = createRunJjCommand("cancelled-fetch", { spawn: fake.spawn });
+    await expect(run(["git", "fetch"], { cwd: "/tmp", signal: controller.signal })).rejects.toBe(
+      reason,
+    );
+    expect(fake.processes).toEqual([]);
+  });
+
+  it("kills a cancelled child and retains the deletion barrier until actual exit", async () => {
+    class DelayedCancelledProcess extends FakeJjProcess {
+      public emitKill(): void {}
+    }
+    const child = new DelayedCancelledProcess();
+    let didSpawn = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      didSpawn = resolve;
+    });
+    const run = createRunJjCommand("cancelled-running-fetch", {
+      spawn: () => {
+        didSpawn();
+        return child;
+      },
+    });
+    const controller = new AbortController();
+    const reason = new Error("observation closed");
+    const pending = run(["git", "fetch"], {
+      cwd: "/tmp/cancelled-jj-workspace",
+      signal: controller.signal,
+    });
+    const rejected = expect(pending).rejects.toBe(reason);
+    await spawned;
+    controller.abort(reason);
+    expect(child.killed).toBe(true);
+    let enteredDeletion = false;
+    const deletion = withJjDeletionTransaction("/tmp/cancelled-jj-workspace", async () => {
+      enteredDeletion = true;
+    });
+    await Promise.resolve();
+    expect(enteredDeletion).toBe(false);
+    child.emitExit(0);
+    await rejected;
+    await deletion;
+    expect(enteredDeletion).toBe(true);
+  });
+});

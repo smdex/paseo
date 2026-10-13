@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1677,3 +1678,116 @@ for (const failProvisioning of [false, true]) {
     },
   );
 }
+
+test.skipIf(!isJjAvailable() || isPlatform("win32"))(
+  "native root/subproject/secondary creation skips forge for workspace and initial-agent intent",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    execFileSync("git", ["init", "-q", h.fixture.dir]);
+    mkdirSync(path.join(h.fixture.repoDir, "sub"));
+    writeFileSync(path.join(h.fixture.repoDir, "sub", "keep.txt"), "keep\n");
+    h.fixture.jj(["commit", "-m", "subproject"]);
+    h.fixture.jj(["bookmark", "move", "main", "--to", "@-"]);
+    const secondary = path.join(h.fixture.dir, "secondary");
+    expect(
+      h.fixture.jj(["workspace", "add", "--name", "secondary", "-r", "main", secondary]).status,
+    ).toBe(0);
+    h.deps.workspaceGitService.resolveForge = async () => {
+      throw new Error("forge resolution must not run");
+    };
+    h.deps.github.invalidate = () => {
+      throw new Error("forge invalidation must not run");
+    };
+    const { resolveJjRepoIdentity } = await import("../utils/vcs-backend.js");
+    h.deps.workspaceGitService.resolveRepoRoot = async (cwd) => {
+      const identity = resolveJjRepoIdentity(cwd);
+      if (!identity) throw new Error("not jj");
+      return identity.workspaceRoot;
+    };
+    h.deps.workspaceGitService.getCheckout = async (cwd) => ({
+      cwd,
+      isGit: true,
+      currentBranch: "main",
+      remoteUrl: null,
+      worktreeRoot: resolveJjRepoIdentity(cwd)?.workspaceRoot ?? cwd,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+    });
+    const cwds = [
+      h.fixture.repoDir,
+      path.join(h.fixture.repoDir, "sub"),
+      secondary,
+      path.join(secondary, "sub"),
+    ];
+    const gitCalls = path.join(h.fixture.dir, "git-calls.log");
+    const bin = path.join(h.fixture.dir, "guard-bin");
+    mkdirSync(bin);
+    const guardGit = path.join(bin, "git");
+    writeFileSync(
+      guardGit,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${gitCalls}'\nexit 122\n`,
+    );
+    chmodSync(guardGit, 0o755);
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
+    try {
+      for (const [index, cwd] of cwds.entries()) {
+        const result = await createPaseoWorktree(
+          {
+            cwd,
+            branchName: `created-${index}`,
+            worktreeSlug: `created-${index}`,
+            runSetup: false,
+            worktreesRoot: h.worktreesRoot,
+            firstAgentContext: { prompt: "Initial agent", attachments: [] },
+          },
+          h.deps,
+        );
+        expect(
+          readFileSync(
+            path.join(result.workspace.cwd, cwd.endsWith("sub") ? "keep.txt" : "sub/keep.txt"),
+            "utf8",
+          ),
+        ).toBe("keep\n");
+        expect(result.workspace.kind).toBe("worktree");
+        await expect(
+          createPaseoWorktree(
+            {
+              cwd,
+              checkoutSource: { kind: "change_request", forge: "github", number: 1 },
+              runSetup: false,
+            },
+            h.deps,
+          ),
+        ).rejects.toThrow("not supported on jj");
+        await expect(
+          createPaseoWorktree({ cwd, githubPrNumber: 1, runSetup: false }, h.deps),
+        ).rejects.toThrow("not supported on jj");
+      }
+      writeFileSync(path.join(secondary, "only-secondary.txt"), "selected workspace\n");
+      expect(h.fixture.jj(["describe", "-m", "secondary selection"], secondary).status).toBe(0);
+      const selectedId = h.fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], secondary)
+        .stdout.trim();
+      const selected = await createPaseoWorktree(
+        {
+          cwd: path.join(secondary, "sub"),
+          refName: "@",
+          branchName: "selected-secondary",
+          worktreeSlug: "selected-secondary",
+          runSetup: false,
+          worktreesRoot: h.worktreesRoot,
+        },
+        h.deps,
+      );
+      expect(selected.worktree.comparisonBaseRef).toBe(selectedId);
+      expect(selected.workspace.mainRepoRoot).toBe(h.fixture.repoDir);
+      expect(
+        readFileSync(path.join(selected.worktree.worktreePath, "only-secondary.txt"), "utf8"),
+      ).toBe("selected workspace\n");
+      expect(existsSync(gitCalls)).toBe(false);
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  },
+);
