@@ -4,6 +4,11 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { expandUserPath, resolvePathFromBase } from "../path-utils.js";
 import { runGitCommand } from "../../utils/run-git-command.js";
+import {
+  detectVcsBackend,
+  isJjDispatchEnabled,
+  resolveJjRuntime,
+} from "../../utils/vcs-backend.js";
 
 export type ExplorerEntryKind = "file" | "directory";
 export type ExplorerFileKind = "text" | "image" | "binary";
@@ -719,10 +724,17 @@ export async function renameExplorerEntry({
     if (sourcePath === renamedPath) {
       return { status: "ok", path: renamedPath };
     }
-    const repository = await runGitCommand(["rev-parse", "--is-inside-work-tree"], {
-      cwd: realRoot,
-      acceptExitCodes: [0, 128],
-    });
+    // jj workspaces snapshot renames automatically on the next command, so a
+    // plain filesystem rename is the correct (and only needed) move there —
+    // `git mv` would shell git against a jj checkout (review fix 11).
+    const isJjCheckout =
+      detectVcsBackend(realRoot) === "jj" && (await resolveJjRuntime()).ok && isJjDispatchEnabled();
+    const repository = isJjCheckout
+      ? { exitCode: 128 }
+      : await runGitCommand(["rev-parse", "--is-inside-work-tree"], {
+          cwd: realRoot,
+          acceptExitCodes: [0, 128],
+        });
     const tracked =
       repository.exitCode === 0
         ? await runGitCommand(["ls-files", "-z", "--", `:(literal)${sourcePath}`], {

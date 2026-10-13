@@ -406,7 +406,7 @@ async function maybeRemoveDirectory(
   }
 
   try {
-    await deleteBackingWorktreeForBackend(dependencies, backing);
+    await deleteBackingWorktreeForBackend(dependencies, backing, archivedWorkspaceIds);
     dependencies.workspaceGitService.invalidateWorktrees();
     dependencies.github.invalidate({ cwd: backing.path });
     return true;
@@ -427,13 +427,27 @@ async function maybeRemoveDirectory(
 async function deleteBackingWorktreeForBackend(
   dependencies: ArchiveDependencies,
   backing: BackingDirectory,
+  archivedWorkspaceIds: string[],
 ): Promise<void> {
   const sourceRepoRoot = backing.mainRepoRoot;
   if (sourceRepoRoot && (await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+    // Persist the pin for EVERY registry record whose backing checkout is
+    // being removed: exact subproject records have cwd below this root, and
+    // same-backing records all need recovery authority (review fix 4). A
+    // stable pin key (workspaceId) keeps pins unique per record.
     let persistRecoveryPin: ((pin: string) => Promise<void>) | undefined;
-    const workspaceId = await dependencies.findWorkspaceIdForCwd(backing.path);
-    if (workspaceId && dependencies.setWorkspaceRecoveryPin) {
-      persistRecoveryPin = (pin) => dependencies.setWorkspaceRecoveryPin!(workspaceId, pin);
+    const pinTargets = new Set(archivedWorkspaceIds);
+    const byPath = await dependencies.findWorkspaceIdForCwd(backing.path);
+    if (byPath) {
+      pinTargets.add(byPath);
+    }
+    if (pinTargets.size > 0 && dependencies.setWorkspaceRecoveryPin) {
+      const targets = [...pinTargets];
+      persistRecoveryPin = async (pin) => {
+        for (const workspaceId of targets) {
+          await dependencies.setWorkspaceRecoveryPin!(workspaceId, pin);
+        }
+      };
     }
     await deleteJjPaseoWorktree({
       cwd: sourceRepoRoot,
@@ -443,6 +457,7 @@ async function deleteBackingWorktreeForBackend(
       paseoHome: dependencies.paseoHome,
       worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
       persistRecoveryPin,
+      pinKey: pinTargets.size === 1 ? [...pinTargets][0] : (byPath ?? undefined),
     });
     return;
   }

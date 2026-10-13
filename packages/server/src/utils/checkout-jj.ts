@@ -7,6 +7,7 @@ import { detectVcsBackend, resolveJjRepoIdentity, type JjRepoIdentity } from "./
 import {
   jjFilesetArg,
   runJjCommand,
+  runJjCommandStaleSafe,
   type JjCommandResult,
   type RunJjCommand,
 } from "./run-jj-command.js";
@@ -80,11 +81,18 @@ async function runJj(
   options: JjCommandRunOptions,
   context?: JjCheckoutContext,
 ): Promise<JjCommandResult> {
-  return getRunJjCommand(context)(args, {
-    cwd: options.cwd,
-    maxOutputBytes: options.maxOutputBytes,
-    acceptExitCodes: options.acceptExitCodes,
-  });
+  const runner = getRunJjCommand(context);
+  // Every checkout-jj command runs with cwd = a workspace directory, so a
+  // stale working copy (rewritten from another workspace) is recovered here
+  // once instead of failing the read/mutation (review fix 15).
+  const staleSafe = await runJjCommandStaleSafe(args, options, runner);
+  return {
+    stdout: staleSafe.stdout,
+    stderr: staleSafe.stderr,
+    truncated: staleSafe.truncated,
+    exitCode: staleSafe.exitCode,
+    signal: null,
+  };
 }
 
 // ---------------------------------------------------------------- templates
@@ -144,6 +152,8 @@ export type JjSnapshotFacts =
       workingCopy: JjWorkingCopyState;
       /** Unique nearest ancestor bookmark of @; null when ambiguous or absent. */
       derivedBookmark: string | null;
+      /** Workspace-OWNED bookmark recorded in Paseo worktree metadata (managed workspaces). */
+      managedBookmark: string | null;
       remotes: JjRemoteInfo[];
       storedBaseRef: string | null;
       resolvedBaseRef: string | null;
@@ -359,7 +369,12 @@ async function deriveNearestAncestorBookmark(
   if (lines.length !== 1) {
     return null;
   }
-  const names = (lines[0] ?? "").split("\t").filter((name) => name.length > 0);
+  // Recovery pins can share a commit with real bookmarks (and ride ancestors
+  // after restores), so they are excluded BY NAME here — a revset-level
+  // complement would drop the shared commit entirely (verified on 0.45.1).
+  const names = (lines[0] ?? "")
+    .split("\t")
+    .filter((name) => name.length > 0 && !name.startsWith("paseo/recovery/"));
   return names.length === 1 ? names[0] : null;
 }
 
@@ -503,6 +518,7 @@ export async function getJjSnapshotFacts(
     ? readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot)
     : null;
   const storedBaseRef = storedBaseRefFromMetadata(metadata?.baseRefName, metadata?.baseRef);
+  const managedBookmark = metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
   const resolvedBaseRef = storedBaseRef ?? (await resolveDefaultBookmark(cwd, context));
   const derivedBookmark = await deriveNearestAncestorBookmark(cwd, context);
 
@@ -511,6 +527,7 @@ export async function getJjSnapshotFacts(
     identity,
     workingCopy,
     derivedBookmark,
+    managedBookmark,
     remotes,
     storedBaseRef,
     resolvedBaseRef,
@@ -795,15 +812,30 @@ function toCheckoutCommit(
   workspaceCommitIds: Set<string>,
 ): CheckoutCommit {
   const { meta } = record;
-  const files: CheckoutCommitFile[] = record.files.map((file) => {
-    const fileCounts = counts.get(file.path);
-    return {
-      path: file.path,
-      additions: fileCounts?.additions ?? 0,
-      deletions: fileCounts?.deletions ?? 0,
-      status: file.status,
-    };
-  });
+  // Files/statuses come from the SAME first-parent diff that produced the
+  // counts (review fix 13): the log record's combined-parent file list is
+  // empty for clean merges and would hide second-parent files. Status chars
+  // are kept when the path matches the record; parseDiff flags map otherwise.
+  const recordStatusByPath = new Map(record.files.map((file) => [file.path, file.status]));
+  const files: CheckoutCommitFile[] =
+    counts.size > 0
+      ? [...counts.entries()].map(([path, fileCounts]) => {
+          const status = recordStatusByPath.get(path);
+          return {
+            path,
+            additions: fileCounts.additions,
+            deletions: fileCounts.deletions,
+            status: status ?? "modified",
+          };
+        })
+      : // Oversized change (counts truncated): keep the record's file list
+        // with unknown counts rather than showing no files at all.
+        record.files.map((file) => ({
+          path: file.path,
+          additions: 0,
+          deletions: 0,
+          status: file.status,
+        }));
   return {
     sha: meta.commitId,
     shortSha: meta.commitId.slice(0, 12),
@@ -848,7 +880,7 @@ export async function listJjCommits({
         "-n",
         String(CHECKOUT_BASE_COMMIT_LIMIT),
         "-r",
-        baseRef,
+        `::${baseRef}`,
         "-T",
         LOG_RECORD_TEMPLATE,
       ],
@@ -1151,10 +1183,26 @@ export async function getJjWorkspaceBookmark(
   context?: JjCheckoutContext,
 ): Promise<string | null> {
   const facts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
-  return facts.isJj ? facts.derivedBookmark : null;
+  if (!facts.isJj) {
+    return null;
+  }
+  // A managed Paseo workspace owns exactly one feature bookmark recorded in
+  // its metadata; derivation (with all its ambiguity rules) is only for
+  // unmanaged checkouts. Adding an alias bookmark therefore cannot null out a
+  // managed workspace's line of work (review fix 7).
+  if (facts.paseoOwnedWorktree && facts.managedBookmark) {
+    return facts.managedBookmark;
+  }
+  return facts.derivedBookmark;
 }
 
-function advanceBookmarkArgs(bookmark: string): string[] {
+function advanceBookmarkArgs(bookmark: string | null): string[] {
+  // Null ownership pins the EMPTY allow-list: user config could otherwise
+  // advance unrelated bookmarks (e.g. the base) during our mutations
+  // (review fix 7). Verified on 0.45.1: an empty list disables advancement.
+  if (!bookmark) {
+    return ["--config", "experimental-advance-branches.enabled-branches=[]"];
+  }
   assertSafeJjRef(bookmark, "bookmark");
   // Scoped to exactly this bookmark (glob with no wildcards), so the base
   // bookmark and unrelated bookmarks never advance. Verified on 0.45.1: jj
@@ -1206,11 +1254,7 @@ export async function jjCommit(
     throw new Error("Commit message is required");
   }
   const bookmark = await getJjWorkspaceBookmark(cwd, context);
-  await runJj(
-    ["commit", "-m", message, ...(bookmark ? advanceBookmarkArgs(bookmark) : [])],
-    { cwd },
-    context,
-  );
+  await runJj(["commit", "-m", message, ...advanceBookmarkArgs(bookmark)], { cwd }, context);
   return finishMutation(cwd, bookmark, context);
 }
 
@@ -1223,11 +1267,7 @@ export async function jjNew(
   const bookmark = await getJjWorkspaceBookmark(cwd, context);
   const message = options?.message?.trim();
   await runJj(
-    [
-      "new",
-      ...(message ? ["-m", message] : []),
-      ...(bookmark ? advanceBookmarkArgs(bookmark) : []),
-    ],
+    ["new", ...(message ? ["-m", message] : []), ...advanceBookmarkArgs(bookmark)],
     { cwd },
     context,
   );

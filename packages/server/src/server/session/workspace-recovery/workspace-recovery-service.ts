@@ -8,9 +8,11 @@ import { runGitCommand } from "../../../utils/run-git-command.js";
 import {
   deleteJjBookmark,
   jjRevisionResolves,
+  resolveJjPinnedRevision,
   restoreJjWorkspace,
   rollbackJjWorkspace,
 } from "../../../utils/worktree-jj.js";
+import { writePaseoWorktreeMetadata } from "../../../utils/worktree-metadata.js";
 import {
   createWorktree,
   isPaseoOwnedWorktreeCwd,
@@ -111,6 +113,19 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     if (await deps.isDirectory(workspace.cwd)) {
+      // A jj workspace whose directory survived a partial deletion (forget
+      // succeeded, removal failed) still needs recreation: jj reports "No
+      // working copy" there (review fix 6). Only records WITHOUT a recovery
+      // pin can plain-unarchive.
+      if (workspace.recoveryBookmark && workspace.kind === "worktree") {
+        const sourceRepoRoot = workspace.mainRepoRoot ?? project.rootPath;
+        if (
+          (await resolveEffectiveBackend(sourceRepoRoot)) === "jj" &&
+          !(await jjRevisionResolves(sourceRepoRoot, `${basename(workspace.cwd)}@`))
+        ) {
+          return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+        }
+      }
       return createRecoveryPlan({ action: "unarchive", workspace });
     }
 
@@ -257,6 +272,15 @@ export function createWorkspaceRecoveryService(deps: {
     sourceRepoRoot: string,
   ): Promise<void> {
     const pin = workspace.recoveryBookmark;
+    if (pin !== null && !pin.startsWith("paseo/recovery/")) {
+      // Trust boundary (review fix 5): a stored value outside the private pin
+      // namespace is not a recovery handle — refuse instead of resolving or
+      // deleting an arbitrary bookmark.
+      throw new WorktreeRequestError({
+        code: "unknown",
+        message: `The stored recovery reference ${pin} is not a Paseo recovery pin; refusing to restore or delete it.`,
+      });
+    }
     if (!pin) {
       throw new WorktreeRequestError({
         code: "unknown",
@@ -295,6 +319,23 @@ export function createWorkspaceRecoveryService(deps: {
       });
     } catch (error) {
       throw toWorktreeRequestError(error);
+    }
+
+    // Reconstruct the workspace's pinned-base metadata (review fix 6): the
+    // recorded baseBranch is the durable source; without one, no metadata is
+    // better than wrong metadata.
+    if (workspace.baseBranch) {
+      try {
+        const pinnedBase = await resolveJjPinnedRevision(sourceRepoRoot, workspace.baseBranch);
+        writePaseoWorktreeMetadata(worktreePath, {
+          baseRefName: workspace.baseBranch,
+          baseRef: pinnedBase,
+          ...(workspace.branch ? { jjBookmark: workspace.branch } : {}),
+        });
+      } catch {
+        // Base unresolvable (removed upstream): restore continues without
+        // base metadata rather than failing an otherwise-good recovery.
+      }
     }
 
     try {

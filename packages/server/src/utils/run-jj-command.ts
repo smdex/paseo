@@ -432,3 +432,60 @@ export function jjFilesetArg(paths: string[]): string[] | null {
   }
   return ["--", literalJjFileset(paths)];
 }
+
+const STALE_WORKING_COPY_PATTERN = /working copy is stale/i;
+
+export interface StaleSafeJjRunResult {
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  exitCode: number | null;
+}
+
+/**
+ * Run a jj command in a workspace directory, recovering once from a stale
+ * working copy (the checked-out commit was rewritten from another workspace;
+ * verified on 0.45.1: the failing command prints "Error: The working copy is
+ * stale (not updated since operation …)" and `jj workspace update-stale`
+ * resolves it). Exit-code semantics otherwise match the base executor:
+ * accepted codes return, anything else throws with the original stderr.
+ */
+export async function runJjCommandStaleSafe(
+  args: string[],
+  options: { cwd: string; acceptExitCodes?: number[]; maxOutputBytes?: number },
+  run: RunJjCommand = runJjCommand,
+): Promise<StaleSafeJjRunResult> {
+  const accepted = options.acceptExitCodes ?? [];
+  const first = await run(args, {
+    cwd: options.cwd,
+    acceptExitCodes: [...new Set([0, ...accepted, 1, 2])],
+    maxOutputBytes: options.maxOutputBytes,
+  });
+  if (first.exitCode === 0 || first.truncated) {
+    // Truncated runs resolve like the base executor (output-cap kills); the
+    // caller inspects `truncated`.
+    return first;
+  }
+  if (STALE_WORKING_COPY_PATTERN.test(first.stderr)) {
+    await run(["workspace", "update-stale"], { cwd: options.cwd });
+    const second = await run(args, {
+      cwd: options.cwd,
+      // undefined lets the base executor apply its [0] default; an explicit
+      // caller list is passed through verbatim.
+      ...(accepted.length > 0 ? { acceptExitCodes: accepted } : {}),
+      maxOutputBytes: options.maxOutputBytes,
+    });
+    return {
+      stdout: second.stdout,
+      stderr: second.stderr,
+      truncated: second.truncated,
+      exitCode: second.exitCode,
+    };
+  }
+  if (accepted.includes(first.exitCode ?? -1)) {
+    return first;
+  }
+  throw new Error(
+    `jj command failed: ${args.join(" ")} (exit ${first.exitCode}): ${first.stderr.trim()}`,
+  );
+}
