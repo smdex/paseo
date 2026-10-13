@@ -746,6 +746,119 @@ describeIfJj("checkout-jj remote ops", () => {
     expect(remoteRefs.stdout).toContain("refs/heads/feature");
   });
 
+  it.each(["push-first", "mutation-first"])(
+    "coordinates checkpoint admission and native push with Finish (%s)",
+    async (order) => {
+      const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+      mkdirSync(join(fixture.repoDir, "sub"));
+      writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
+      const { runJjCommand } = await import("./run-jj-command.js");
+      const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+      const { withWorkspaceLifecycle } = await import("./workspace-lifecycle.js");
+      const context = { paseoHome: join(fixture.dir, "home") };
+      await jjDescribe(fixture.repoDir, { message: "ready feature" }, context);
+      expect(fixture.jj(["bookmark", "create", "feature", "-r", "@"]).status).toBe(0);
+      const origin = scratchBareGitOrigin();
+      expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let nativePushes = 0;
+      let mutationAdmitted = false;
+      const pushContext = {
+        ...context,
+        runJjCommand: async (args: string[], options: Parameters<typeof runJjCommand>[1]) => {
+          if (args[0] === "git" && args[1] === "push") {
+            nativePushes++;
+            if (order === "push-first") {
+              entered.resolve();
+              await release.promise;
+            }
+            expect(
+              (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.operations.at(-1)!
+                .status,
+            ).toBe("completed");
+          }
+          return runJjCommand(args, options);
+        },
+      };
+      const finishContext = {
+        ...context,
+        runJjCommand: async (args: string[], options: Parameters<typeof runJjCommand>[1]) => {
+          if (args[0] === "new") {
+            if (order === "mutation-first") {
+              entered.resolve();
+              await release.promise;
+            }
+            return {
+              stdout: "",
+              stderr: "controlled New failure",
+              exitCode: 1,
+              signal: null,
+              truncated: false,
+            };
+          }
+          return runJjCommand(args, options);
+        },
+      };
+      let pushing: Promise<unknown> | undefined;
+      let finishing: Promise<unknown> | undefined;
+      try {
+        if (order === "push-first") {
+          pushing = jjPush(join(fixture.repoDir, "sub"), pushContext);
+          await entered.promise;
+          // A synchronous attempt at the existing canonical owner gives a
+          // deterministic admission observation, without timing a filesystem read.
+          finishing = withWorkspaceLifecycle(fixture.repoDir, async () => {
+            mutationAdmitted = true;
+            return jjCommit(
+              fixture.repoDir,
+              { message: "partially finished", acknowledgeRewrites: true },
+              finishContext,
+            );
+          }).catch((error: unknown) => error);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(mutationAdmitted).toBe(false);
+          release.resolve();
+          await pushing;
+          expect(String(await finishing)).toContain("controlled New failure");
+          expect(mutationAdmitted).toBe(true);
+          expect(nativePushes).toBe(1);
+          const remote = spawnSync(
+            "git",
+            ["--git-dir", origin, "log", "-1", "--format=%B", "refs/heads/feature"],
+            { encoding: "utf8" },
+          );
+          expect(remote.status).toBe(0);
+          expect(remote.stdout.trim()).toBe("ready feature");
+        } else {
+          finishing = jjCommit(
+            fixture.repoDir,
+            { message: "partially finished" },
+            finishContext,
+          ).catch((error: unknown) => error);
+          await entered.promise;
+          expect(
+            (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.operations.at(-1)!.status,
+          ).toBe("pending");
+          pushing = jjPush(join(fixture.repoDir, "sub"), pushContext).catch(
+            (error: unknown) => error,
+          );
+          release.resolve();
+          expect(String(await finishing)).toContain("controlled New failure");
+          expect(String(await pushing)).toContain("Publication is blocked");
+          expect(nativePushes).toBe(0);
+          expect(spawnSync("git", ["ls-remote", origin], { encoding: "utf8" }).stdout).toBe("");
+        }
+        expect(
+          (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.operations.at(-1)!.status,
+        ).toBe("reconciliation_required");
+      } finally {
+        release.resolve();
+        await Promise.allSettled([pushing, finishing].filter((promise) => promise !== undefined));
+      }
+    },
+  );
+
   it("jjPull fetches tracked bookmarks from the remote", async () => {
     const fixture = scratch({ files: { "a.txt": "a\n" } });
     const origin = scratchBareGitOrigin();
