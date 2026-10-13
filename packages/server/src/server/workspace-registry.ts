@@ -90,6 +90,9 @@ const PersistedWorkspaceRecordSchema = z.object({
   jjWorkspaceId: z.string().min(1).optional(),
   // Absent is unknown legacy provenance, never inferred external ownership.
   jjWorkspaceManagement: z.enum(["managed", "external"]).optional(),
+  jjCheckpointRef: z
+    .object({ path: z.string(), generation: z.number().int().positive() })
+    .optional(),
   // jj only: private recovery bookmark pinned before the workspace was forgotten.
   // Null on git workspaces and on jj workspaces that were never archived.
   recoveryBookmark: z
@@ -220,7 +223,12 @@ export async function setWorkspaceRecoveryReference(
   const updated = await registry.update(workspaceId, (record) => {
     if (!sameJjWorkspaceAuthority(expected, record) || jjWorkspaceAuthority(record) !== "managed")
       throw new Error("Workspace managed incarnation changed before recovery pin persistence");
-    return { ...record, jjWorkspaceManagement: "managed", recoveryBookmark: pin };
+    return {
+      ...record,
+      jjWorkspaceManagement: "managed",
+      recoveryBookmark: pin,
+      ...(expected.jjCheckpointRef ? { jjCheckpointRef: expected.jjCheckpointRef } : {}),
+    };
   });
   if (!updated)
     throw new Error(`Workspace disappeared before recovery pin persistence: ${workspaceId}`);
@@ -736,6 +744,7 @@ export function createPersistedWorkspaceRecord(input: {
   recoveryBookmark?: string | null;
   jjWorkspaceId?: string;
   jjWorkspaceManagement?: "managed" | "external";
+  jjCheckpointRef?: PersistedWorkspaceRecord["jjCheckpointRef"];
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;

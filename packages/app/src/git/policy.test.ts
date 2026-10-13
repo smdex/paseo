@@ -185,6 +185,19 @@ describe("git-actions-policy", () => {
     ]);
   });
 
+  it("offers Finish for a described empty native change without treating Git descriptions as dirty", () => {
+    expect(
+      buildGitActions(
+        createInput({ isJj: true, hasDescribedJjChange: true, hasUncommittedChanges: false }),
+      ).primary,
+    ).toMatchObject({ id: "commit", label: "Finish change" });
+    expect(
+      buildGitActions(
+        createInput({ isJj: false, hasDescribedJjChange: true, hasUncommittedChanges: false }),
+      ).primary,
+    ).toBeNull();
+  });
+
   it("adds the new-change action on jj checkouts only", () => {
     const gitActions = buildGitActions(createInput({ hasRemote: true }));
     const jjActions = buildGitActions(createInput({ hasRemote: true, isJj: true }));

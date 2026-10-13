@@ -7649,3 +7649,70 @@ test("measures an outbound message in UTF-8 bytes against the daemon's message l
   expect(mock.sent).toHaveLength(1);
   expect(client.getConnectionState().status).toBe("connected");
 });
+
+test("checkpointed jj actions refuse unsupported hosts before sending intent", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-compat",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen();
+  await connecting;
+  await expect(
+    client.describeChange({ cwd: "/native", message: "draft", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host");
+  await expect(client.newChange({ cwd: "/native", acknowledgeRewrites: true })).rejects.toThrow(
+    "Update the host",
+  );
+  await expect(client.checkoutCommit("/native", { expectedChangeId: "captured" })).rejects.toThrow(
+    "Update the host",
+  );
+  await expect(client.editChange({ cwd: "/native", changeId: "selected" })).rejects.toThrow(
+    "Update the host",
+  );
+  expect(mock.sent).toEqual([]);
+});
+
+test("checkpointed jj Edit sends captured stable IDs and handles a visible refusal", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-edit",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true, checkoutJjCheckpoint: true } });
+  await connecting;
+  const result = client.editChange({
+    cwd: "/native/sub",
+    changeId: "selected",
+    expectedChangeId: "captured",
+    acknowledgeRewrites: true,
+    requestId: "native-edit",
+  });
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout.edit_change.request",
+    cwd: "/native/sub",
+    changeId: "selected",
+    expectedChangeId: "captured",
+    acknowledgeRewrites: true,
+    requestId: "native-edit",
+  });
+  const payload = {
+    cwd: "/native/sub",
+    success: false,
+    changeId: null,
+    commitId: null,
+    bookmark: null,
+    error: { code: "UNKNOWN", message: "Immutable change" },
+    requestId: "native-edit",
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "checkout.edit_change.response", payload }));
+  expect(await result).toEqual(payload);
+});

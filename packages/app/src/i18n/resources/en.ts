@@ -831,6 +831,22 @@ export const en = {
           pending: "Archiving...",
           success: "Archived",
         },
+        finishChange: {
+          label: "Finish change",
+          pending: "Finishing...",
+          success: "Change finished",
+        },
+        describeChange: { label: "Describe change" },
+        editChange: { label: "Edit change" },
+        jj: {
+          rewriteWarning:
+            "Native jj rewrites keep the change ID. Describe/Edit and later snapshots can rebase descendants, including shared or published work and changes added externally. Captured heads and operation history are retained; this is not a cross-process lock. Continue?",
+          snapshotRefused: "jj could not snapshot these files",
+          description: "Description",
+          loadingHistory: "Loading history...",
+          saved: "Change saved",
+          saving: "Saving...",
+        },
         newChange: {
           label: "New change",
           pending: "Starting new change...",

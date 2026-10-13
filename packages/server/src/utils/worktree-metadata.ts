@@ -45,10 +45,10 @@ const PaseoWorktreeMetadataV2Schema = z.object({
   // jj only: the workspace-OWNED feature bookmark this Paseo worktree manages.
   // Owned bookmarks are advanced by Paseo mutations and never deleted by
   // recovery flows; derivation never substitutes for a recorded owner.
-  jjBookmark: z.string().min(1).optional(),
+  jjBookmark: z.string().min(1).nullable().optional(),
 });
 
-const PaseoWorktreeMetadataSchema = z.union([
+export const PaseoWorktreeMetadataSchema = z.union([
   PaseoWorktreeMetadataV1Schema,
   PaseoWorktreeMetadataV2Schema,
 ]);
@@ -282,7 +282,7 @@ export function writePaseoWorktreeMetadata(
     baseRefName: string;
     baseRef?: string;
     changeRequestLookupTarget?: PaseoWorktreeChangeRequestHint;
-    jjBookmark?: string;
+    jjBookmark?: string | null;
   },
 ): void {
   const baseRefName = normalizeBaseRefName(options.baseRefName);
@@ -295,13 +295,13 @@ export function writePaseoWorktreeMetadata(
   // jjBookmark only parses on the V2 shape, so its presence upgrades the
   // record version; plain writes keep the V1 layout unchanged.
   const metadata: PaseoWorktreeMetadata = {
-    version: options.jjBookmark ? 2 : 1,
+    version: options.jjBookmark !== undefined ? 2 : 1,
     baseRefName,
     ...(baseRef ? { baseRef } : {}),
     ...(options.changeRequestLookupTarget
       ? { changeRequestLookupTarget: options.changeRequestLookupTarget }
       : {}),
-    ...(options.jjBookmark ? { jjBookmark: options.jjBookmark } : {}),
+    ...(options.jjBookmark !== undefined ? { jjBookmark: options.jjBookmark } : {}),
   };
   writePaseoWorktreeMetadataFile(worktreeRoot, metadata);
 }
@@ -420,7 +420,7 @@ export function readPaseoWorktreeRuntimePort(worktreeRoot: string): number | nul
   return null;
 }
 
-function writePaseoWorktreeMetadataFile(
+export function writePaseoWorktreeMetadataFile(
   worktreeRoot: string,
   metadata: PaseoWorktreeMetadata,
 ): void {

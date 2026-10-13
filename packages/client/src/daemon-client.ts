@@ -911,11 +911,15 @@ export interface RenameBranchInput {
   requestId?: string;
 }
 export interface NewChangeInput {
+  expectedChangeId?: string;
+  acknowledgeRewrites?: boolean;
   cwd: string;
   message?: string;
   requestId?: string;
 }
 export interface DescribeChangeInput {
+  expectedChangeId?: string;
+  acknowledgeRewrites?: boolean;
   cwd: string;
   message: string;
   requestId?: string;
@@ -4211,9 +4215,16 @@ export class DaemonClient {
 
   async checkoutCommit(
     cwd: string,
-    input: { message?: string; addAll?: boolean },
+    input: {
+      message?: string;
+      addAll?: boolean;
+      expectedChangeId?: string;
+      acknowledgeRewrites?: boolean;
+    },
     requestId?: string,
   ): Promise<CheckoutCommitPayload> {
+    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
@@ -4221,6 +4232,8 @@ export class DaemonClient {
         cwd,
         message: input.message,
         addAll: input.addAll,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout_commit_response",
     });
@@ -4512,27 +4525,61 @@ export class DaemonClient {
     });
   }
 
+  private requireJjCheckpointCapability(): void {
+    if (this.lastServerInfoMessage?.features?.checkoutJjCheckpoint !== true)
+      throw new Error("Update the host to use checkpointed jj change actions.");
+  }
+
   async newChange(input: NewChangeInput): Promise<NewChangeResult> {
+    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
     return this.sendCorrelatedSessionRequest({
       requestId: input.requestId,
       message: {
         type: "checkout.new_change.request",
         cwd: input.cwd,
         message: input.message,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout.new_change.response",
     });
   }
 
   async describeChange(input: DescribeChangeInput): Promise<DescribeChangeResult> {
+    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
     return this.sendCorrelatedSessionRequest({
       requestId: input.requestId,
       message: {
         type: "checkout.describe_change.request",
         cwd: input.cwd,
         message: input.message,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout.describe_change.response",
+    });
+  }
+
+  async editChange(input: {
+    cwd: string;
+    changeId: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<DescribeChangeResult> {
+    this.requireJjCheckpointCapability();
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.edit_change.request",
+        cwd: input.cwd,
+        changeId: input.changeId,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.edit_change.response",
     });
   }
 

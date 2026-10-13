@@ -1952,6 +1952,7 @@ export class VoiceAssistantWebSocketServer {
         // (jj runtime probe + dispatch enablement) so routing and capability can
         // never disagree. Warm-up runs at server construction.
         checkoutJj: isJjFeatureAvailable(),
+        checkoutJjCheckpoint: isJjFeatureAvailable(),
         // COMPAT(agentProfiles): added in v0.3.2, remove gate after 2027-02-11.
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.

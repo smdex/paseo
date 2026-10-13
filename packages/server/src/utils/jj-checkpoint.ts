@@ -1,0 +1,312 @@
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import { join, resolve } from "node:path";
+import { z } from "zod";
+import { writeJsonFileAtomic } from "../server/atomic-file.js";
+import { resolvePaseoHome } from "../server/paseo-home.js";
+import { workspaceLifecycleKey } from "./workspace-lifecycle.js";
+import { resolveJjRepoIdentity } from "./vcs-backend.js";
+import {
+  PaseoWorktreeMetadataSchema,
+  readJjWorkspaceIncarnation,
+  readPaseoWorktreeMetadata,
+  writePaseoWorktreeMetadataFile,
+} from "./worktree-metadata.js";
+
+const HeadSchema = z.object({
+  commitId: z.string().regex(/^[0-9a-f]{40,64}$/),
+  changeId: z.string().regex(/^[k-z]{32}$/),
+});
+const OperationSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["describe", "finish", "new", "edit", "rename", "restore"]),
+  before: HeadSchema,
+  target: HeadSchema.optional(),
+  impact: z
+    .object({ otherWorkspaces: z.number().int().nonnegative(), published: z.boolean() })
+    .optional(),
+  beforeOperation: z.string(),
+  // Native bookmarks follow rewrites; resolve this pin at beforeOperation
+  // for the captured head. The live name alone is not an immutable reference.
+  recoveryPin: z.string(),
+  affectedHeads: z.array(HeadSchema),
+  status: z.enum(["pending", "completed", "reconciliation_required", "refused"]),
+  after: HeadSchema.nullable(),
+  afterOperation: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export const JjCheckpointSchema = z.object({
+  version: z.literal(1),
+  backingRoot: z.string(),
+  sharedStore: z.string(),
+  incarnation: z.string().nullable(),
+  generation: z.number().int().nonnegative(),
+  metadata: PaseoWorktreeMetadataSchema.nullable(),
+  selection: HeadSchema,
+  completedChanges: z.array(HeadSchema),
+  savedWip: z.array(HeadSchema),
+  comparison: z.object({ pinnedCommitId: z.string().nullable(), liveBase: z.string().nullable() }),
+  publication: z
+    .object({
+      remoteName: z.string(),
+      remoteUrl: z.string(),
+      localBookmark: z.string(),
+      remoteBookmark: z.string(),
+      sourceRepository: z.string().nullable(),
+      targetRepository: z.string().nullable(),
+    })
+    .nullable(),
+  recoveryPins: z.array(z.string()),
+  operations: z.array(OperationSchema),
+});
+export type JjCheckpoint = z.infer<typeof JjCheckpointSchema>;
+export type JjCheckpointOperation = z.infer<typeof OperationSchema>;
+export type JjCheckpointHead = z.infer<typeof HeadSchema>;
+
+export class JjCheckpointError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JjCheckpointError";
+  }
+}
+
+export function jjCheckpointPath(
+  backingRoot: string,
+  paseoHome?: string,
+  incarnation = readJjWorkspaceIncarnation(backingRoot),
+): string {
+  const key = createHash("sha256")
+    .update(JSON.stringify([workspaceLifecycleKey(backingRoot), incarnation]))
+    .digest("hex");
+  return join(
+    paseoHome ? resolve(paseoHome) : resolvePaseoHome(),
+    "projects",
+    "jj-checkpoints",
+    `${key}.json`,
+  );
+}
+
+function liveCheckpointReference(backingRoot: string): string {
+  return join(backingRoot, ".jj", "paseo-checkpoint-reference.json");
+}
+
+async function checkpointReferenceExists(
+  backingRoot: string,
+  paseoHome?: string,
+): Promise<boolean> {
+  for (const reference of [
+    `${jjCheckpointPath(backingRoot, paseoHome)}.reference`,
+    liveCheckpointReference(backingRoot),
+  ]) {
+    try {
+      await fs.access(reference);
+      return true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  }
+  return false;
+}
+
+export async function readJjCheckpoint(
+  backingRoot: string,
+  paseoHome?: string,
+): Promise<JjCheckpoint | null> {
+  try {
+    return JjCheckpointSchema.parse(
+      JSON.parse(await fs.readFile(jjCheckpointPath(backingRoot, paseoHome), "utf8")),
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      if (!(await checkpointReferenceExists(backingRoot, paseoHome))) return null;
+      throw new JjCheckpointError(
+        "The saved jj checkpoint is missing; its durable reference remains. Reconcile it before mutation.",
+      );
+    }
+    throw new JjCheckpointError(
+      "The saved jj checkpoint cannot be read. Reconcile it on the host before changing this workspace.",
+    );
+  }
+}
+
+// Callers hold the existing backing-root lifecycle owner. Atomic rename is a
+// daemon-local commit boundary, not a lock against another daemon or jj CLI.
+export async function writeJjCheckpoint(
+  checkpoint: JjCheckpoint,
+  paseoHome?: string,
+): Promise<JjCheckpoint> {
+  const next = JjCheckpointSchema.parse({ ...checkpoint, generation: checkpoint.generation + 1 });
+  const path = jjCheckpointPath(next.backingRoot, paseoHome, next.incarnation);
+  await writeJsonFileAtomic(path, next);
+  const reference = {
+    backingRoot: next.backingRoot,
+    sharedStore: next.sharedStore,
+    incarnation: next.incarnation,
+  };
+  await writeJsonFileAtomic(`${path}.reference`, reference);
+  if (
+    readJjWorkspaceIncarnation(next.backingRoot) !== next.incarnation ||
+    !resolveJjRepoIdentity(next.backingRoot)
+  )
+    throw new JjCheckpointError(
+      "The live checkout changed while saving its checkpoint; retained state requires reconciliation.",
+    );
+  // This materialized reference survives loss of the checkpoint directory. It
+  // is not another owner, and archives retain their registry reference after .jj disposal.
+  await writeJsonFileAtomic(liveCheckpointReference(next.backingRoot), reference);
+  return next;
+}
+
+function ownership(metadata: JjCheckpoint["metadata"]): string | null {
+  return metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
+}
+
+export function validateJjCheckpoint(checkpoint: JjCheckpoint, backingRoot: string): void {
+  const identity = resolveJjRepoIdentity(backingRoot);
+  const incarnation = readJjWorkspaceIncarnation(backingRoot);
+  if (
+    !identity ||
+    checkpoint.backingRoot !== workspaceLifecycleKey(backingRoot) ||
+    checkpoint.sharedStore !== workspaceLifecycleKey(identity.sharedStorePath) ||
+    checkpoint.incarnation !== incarnation
+  ) {
+    throw new JjCheckpointError(
+      "The jj checkpoint belongs to a different backing checkout. Live files and retained heads were not changed.",
+    );
+  }
+  const live = readPaseoWorktreeMetadata(backingRoot);
+  if (metadataAuthority(live) !== metadataAuthority(checkpoint.metadata)) {
+    throw new JjCheckpointError(
+      "The live jj metadata does not match its saved checkpoint. Reconcile ownership and comparison state before changing this workspace.",
+    );
+  }
+}
+
+function metadataAuthority(metadata: JjCheckpoint["metadata"]): string {
+  return JSON.stringify({
+    owner: ownership(metadata),
+    base: metadata?.baseRef ?? null,
+    baseName: metadata?.baseRefName ?? null,
+    publicationHint: metadata?.changeRequestLookupTarget ?? null,
+  });
+}
+
+export function jjArchiveCheckpointPath(
+  backingRoot: string,
+  pin: string,
+  paseoHome?: string,
+): string {
+  const key = createHash("sha256").update(pin).digest("hex");
+  const rootKey = createHash("sha256").update(workspaceLifecycleKey(backingRoot)).digest("hex");
+  const home = paseoHome ? resolve(paseoHome) : resolvePaseoHome();
+  return join(home, "projects", "jj-checkpoints", "archives", rootKey, `${key}.json`);
+}
+
+export async function writeJjArchiveCheckpoint(
+  checkpoint: JjCheckpoint,
+  pin: string,
+  paseoHome?: string,
+): Promise<void> {
+  await writeJsonFileAtomic(
+    jjArchiveCheckpointPath(checkpoint.backingRoot, pin, paseoHome),
+    checkpoint,
+  );
+}
+
+export async function readJjArchiveCheckpoint(
+  backingRoot: string,
+  pin: string,
+  paseoHome?: string,
+): Promise<JjCheckpoint | null> {
+  try {
+    return JjCheckpointSchema.parse(
+      JSON.parse(await fs.readFile(jjArchiveCheckpointPath(backingRoot, pin, paseoHome), "utf8")),
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw new JjCheckpointError(
+      "The retained archive checkpoint cannot be read. No recovery effects were started.",
+    );
+  }
+}
+
+export async function importJjCheckpoint(input: {
+  backingRoot: string;
+  head: JjCheckpointHead;
+  paseoHome?: string;
+}): Promise<JjCheckpoint> {
+  const existing = await readJjCheckpoint(input.backingRoot, input.paseoHome);
+  if (existing) {
+    validateJjCheckpoint(existing, input.backingRoot);
+    return existing;
+  }
+  const identity = resolveJjRepoIdentity(input.backingRoot);
+  if (!identity) throw new JjCheckpointError("The jj backing checkout is unavailable.");
+  const metadata = readPaseoWorktreeMetadata(input.backingRoot);
+  if (metadata && (!metadata.baseRef || !/^[0-9a-f]{40,64}$/.test(metadata.baseRef)))
+    throw new JjCheckpointError(
+      "Legacy jj comparison metadata has no exact base pin. Reconcile it before importing a checkpoint.",
+    );
+  const baseName = metadata?.baseRefName ?? null;
+  const liveBase =
+    baseName && baseName !== "@" && !/^[0-9a-f]{40,64}$/.test(baseName) ? baseName : null;
+  return writeJjCheckpoint(
+    {
+      version: 1,
+      backingRoot: workspaceLifecycleKey(input.backingRoot),
+      sharedStore: workspaceLifecycleKey(identity.sharedStorePath),
+      incarnation: readJjWorkspaceIncarnation(input.backingRoot),
+      generation: 0,
+      metadata,
+      selection: input.head,
+      completedChanges: [],
+      savedWip: [],
+      comparison: { pinnedCommitId: metadata?.baseRef ?? null, liveBase },
+      publication: null,
+      recoveryPins: [],
+      operations: [],
+    },
+    input.paseoHome,
+  );
+}
+
+export async function restoreJjCheckpoint(input: {
+  backingRoot: string;
+  sharedStore: string;
+  incarnation: string;
+  paseoHome?: string;
+  recoveryPin: string;
+}): Promise<JjCheckpoint | null> {
+  const checkpoint = await readJjArchiveCheckpoint(
+    input.backingRoot,
+    input.recoveryPin,
+    input.paseoHome,
+  );
+  // Legacy restoration retains its exact-pin contract. Once a checkpoint
+  // exists, its identity and pin must agree; never reconstruct from a live base.
+  if (!checkpoint) return null;
+  if (
+    checkpoint.incarnation !== input.incarnation ||
+    checkpoint.sharedStore !== workspaceLifecycleKey(input.sharedStore) ||
+    !checkpoint.recoveryPins.includes(input.recoveryPin)
+  ) {
+    throw new JjCheckpointError(
+      "The retained checkpoint does not authorize this recovery pin or backing checkout.",
+    );
+  }
+  if (checkpoint.metadata) writePaseoWorktreeMetadataFile(input.backingRoot, checkpoint.metadata);
+  const current = await readJjCheckpoint(input.backingRoot, input.paseoHome);
+  const generation = Math.max(checkpoint.generation, current?.generation ?? 0);
+  const operations = new Map(
+    [...checkpoint.operations, ...(current?.operations ?? [])].map((operation) => [
+      operation.id,
+      operation,
+    ]),
+  );
+  const pins = new Set([...checkpoint.recoveryPins, ...(current?.recoveryPins ?? [])]);
+  await writeJjCheckpoint(
+    { ...checkpoint, generation, operations: [...operations.values()], recoveryPins: [...pins] },
+    input.paseoHome,
+  );
+  return checkpoint;
+}

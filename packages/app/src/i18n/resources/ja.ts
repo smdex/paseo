@@ -839,6 +839,10 @@ export const ja: TranslationResources = {
           pending: "アーカイブ中...",
           success: "アーカイブしました",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "新しいチェンジ",
           pending: "新しいチェンジを開始中...",

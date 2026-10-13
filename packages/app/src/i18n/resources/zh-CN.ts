@@ -831,6 +831,10 @@ export const zhCN: TranslationResources = {
           pending: "正在归档...",
           success: "已归档",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "新变更",
           pending: "正在开始新变更...",
