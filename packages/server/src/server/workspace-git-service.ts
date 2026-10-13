@@ -1407,6 +1407,25 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
     await this.promoteWorkingTreeWatchTarget(workingTreeTarget, facts.worktreeRoot);
+    await this.bindWorkspaceRepoTarget(target, facts);
+    if (this.isActiveObservedWorkspaceTarget(target)) {
+      target.observationSetupComplete = true;
+    }
+  }
+
+  private async bindWorkspaceRepoTarget(
+    target: WorkspaceGitTarget,
+    facts: CheckoutSnapshotFacts,
+  ): Promise<void> {
+    if (!this.isActiveObservedWorkspaceTarget(target)) return;
+    const backend = await resolveEffectiveBackend(target.cwd);
+    if (!facts.isGit || !facts.absoluteGitDir) {
+      this.removeWorkspaceRepoLink(target);
+      return;
+    }
+    if ((backend === "jj") !== (this.deps.resolveJjRepoIdentity(target.cwd) !== null)) {
+      throw new Error("Repository backend changed while binding observation");
+    }
     const gitDir = facts.absoluteGitDir;
     const gitDirPaths = target.gitDirPaths?.matches(gitDir)
       ? target.gitDirPaths
@@ -1421,22 +1440,32 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     // additionally keep the `.git` dir under observation (see
     // startColocatedGitMetadataObservation).
     const jjIdentity = this.deps.resolveJjRepoIdentity(target.cwd);
+    const vcs = jjIdentity ? "jj" : "git";
     if (jjIdentity) {
-      target.vcs = "jj";
       repoGitRoot = jjIdentity.sharedStorePath;
       colocatedGitDir = jjIdentity.colocated ? (facts.gitCommonDir ?? null) : null;
-    } else {
-      target.vcs = "git";
     }
     if (!this.isActiveObservedWorkspaceTarget(target)) {
       return;
     }
+    const oldRepoTarget = target.repoGitRoot ? this.repoTargets.get(target.repoGitRoot) : undefined;
+    if (target.repoGitRoot !== repoGitRoot || oldRepoTarget?.vcs !== vcs) {
+      const siblings = [...(oldRepoTarget?.workspaceKeys ?? [])];
+      this.removeWorkspaceRepoLink(target);
+      for (const cwd of siblings) {
+        if (cwd !== target.cwd) {
+          this.scheduleWorkspaceRefresh(cwd, {
+            force: true,
+            scope: "structure",
+            reason: "repo-binding-change",
+          });
+        }
+      }
+    }
+    target.vcs = vcs;
     target.repoGitRoot = repoGitRoot;
     target.colocatedJjGitDir = colocatedGitDir;
     await this.ensureRepoTarget(target);
-    if (this.isActiveObservedWorkspaceTarget(target)) {
-      target.observationSetupComplete = true;
-    }
   }
 
   private async getFactsForObservation(target: WorkspaceGitTarget): Promise<CheckoutSnapshotFacts> {
@@ -3707,6 +3736,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       runGitCommand: runRefreshGitCommand,
     };
     const facts = await this.loadCheckoutFacts(target, baseContext);
+    await this.bindWorkspaceRepoTarget(target, facts);
     const context: CheckoutContext = { ...baseContext, facts };
     const checkoutStatus = await this.deps.getCheckoutStatus(cwd, context);
     if (!checkoutStatus.isGit) {
@@ -3908,79 +3938,111 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     ) {
       return;
     }
-    if (target.vcs === "jj") {
-      const workspace = [...target.workspaceKeys]
-        .map((cwd) => this.workspaceTargets.get(cwd))
-        .find((candidate) => candidate && this.isActiveObservedWorkspaceTarget(candidate));
-      if (!workspace || !workspace.latestFacts?.isGit) return;
-      const hasRemote = workspace.latestGit
-        ? workspace.latestGit.hasRemote
-        : workspace.latestFacts.remoteUrl !== null;
-      if (!hasRemote) return;
-      target.cwd = workspace.cwd;
-      target.fetchInFlight = true;
-      const controller = new AbortController();
-      const fetchCwd = target.cwd;
-      target.jjFetchController = controller;
-      const fetchPromise = runWithJjCommandPriority("normal", async () => {
-        await resolveEffectiveBackend(fetchCwd);
-        await this.deps.runJjFetch(fetchCwd, { signal: controller.signal });
-      })
-        .catch((error) => {
-          if (!controller.signal.aborted) {
-            this.logger.warn(
-              { err: error, cwd: fetchCwd, sharedStorePath: target.repoGitRoot },
-              "Background jj fetch failed; local observation remains active",
-            );
-          }
-        })
-        .finally(async () => {
-          target.fetchInFlight = false;
-          target.jjFetchController = null;
-          try {
-            await this.scheduleJjStoreMetadataRefresh(target);
-          } finally {
-            this.pendingJjFetches.delete(fetchPromise);
-          }
-        });
-      // Last-subscriber release removes the repo target before the child exits.
-      // Keep its completion owned by the service so disposal still waits for it.
-      this.pendingJjFetches.add(fetchPromise);
-      await fetchPromise;
-      return;
-    }
-
     target.fetchInFlight = true;
-    this.logger.debug(
-      { repoGitRoot: target.repoGitRoot, cwd: target.cwd },
-      "Running background git fetch",
+    const fetchCwd = target.cwd;
+    try {
+      if (!(await this.isRepoFetchBindingCurrent(target, fetchCwd))) {
+        this.scheduleRepoMetadataRefresh(target, "repo-binding-change", true);
+        return;
+      }
+      if (target.vcs === "jj") await this.runRepoJjFetch(target);
+      else await this.runRepoGitFetch(target, fetchCwd);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, cwd: target.cwd },
+        "Background fetch refused; repository binding unavailable",
+      );
+    } finally {
+      target.fetchInFlight = false;
+    }
+  }
+
+  private async isRepoFetchBindingCurrent(target: RepoGitTarget, cwd: string): Promise<boolean> {
+    const backend = await resolveEffectiveBackend(cwd);
+    let currentRoot: string | null;
+    if (backend === "jj") {
+      if (target.vcs !== "jj") return false;
+      currentRoot = this.deps.resolveJjRepoIdentity(cwd)?.sharedStorePath ?? null;
+    } else {
+      if (target.vcs !== "git") return false;
+      const gitDir = await this.deps.resolveAbsoluteGitDir(cwd);
+      currentRoot = gitDir ? await this.resolveWorkspaceGitRefsRoot(gitDir) : null;
+    }
+    return (
+      !this.disposed &&
+      !target.closed &&
+      this.repoTargets.get(target.repoGitRoot) === target &&
+      target.workspaceKeys.has(cwd) &&
+      currentRoot === target.repoGitRoot &&
+      (detectVcsBackend(cwd) === "jj") === (target.vcs === "jj")
     );
+  }
+
+  private async runRepoJjFetch(target: RepoGitTarget): Promise<void> {
+    const workspace = [...target.workspaceKeys]
+      .map((cwd) => this.workspaceTargets.get(cwd))
+      .find((candidate) => candidate && this.isActiveObservedWorkspaceTarget(candidate));
+    if (!workspace || !workspace.latestFacts?.isGit) return;
+    const hasRemote = workspace.latestGit
+      ? workspace.latestGit.hasRemote
+      : workspace.latestFacts.remoteUrl !== null;
+    if (!hasRemote) return;
+    target.cwd = workspace.cwd;
+    const controller = new AbortController();
+    const fetchCwd = target.cwd;
+    target.jjFetchController = controller;
+    const fetchPromise = runWithJjCommandPriority("normal", async () => {
+      if (!(await this.isRepoFetchBindingCurrent(target, fetchCwd))) return;
+      await this.deps.runJjFetch(fetchCwd, { signal: controller.signal });
+    })
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          this.logger.warn(
+            { err: error, cwd: fetchCwd, sharedStorePath: target.repoGitRoot },
+            "Background jj fetch failed; local observation remains active",
+          );
+        }
+      })
+      .finally(async () => {
+        target.jjFetchController = null;
+        try {
+          await this.scheduleJjStoreMetadataRefresh(target);
+        } finally {
+          this.pendingJjFetches.delete(fetchPromise);
+        }
+      });
+    // Last-subscriber release removes the repo target before the child exits.
+    // Keep its completion owned by the service so disposal still waits for it.
+    this.pendingJjFetches.add(fetchPromise);
+    await fetchPromise;
+  }
+
+  private async runRepoGitFetch(target: RepoGitTarget, cwd: string): Promise<void> {
+    this.logger.debug({ repoGitRoot: target.repoGitRoot, cwd }, "Running background git fetch");
 
     let result: WorkspaceGitFetchResult | null = null;
     const eventsBeforeFetchSnapshot: FileChange[] = [];
     try {
-      try {
-        result = await this.deps.runGitFetch(
-          target.cwd,
-          {
-            onRefSnapshot: (phase) => {
-              const events = target.bufferedFetchMetadataEvents.splice(0);
-              if (phase === "before") {
-                eventsBeforeFetchSnapshot.push(...events);
-              }
-            },
+      result = await this.deps.runGitFetch(
+        cwd,
+        {
+          onRefSnapshot: (phase) => {
+            const events = target.bufferedFetchMetadataEvents.splice(0);
+            if (phase === "before") {
+              eventsBeforeFetchSnapshot.push(...events);
+            }
           },
-          createRunGitCommand("background-fetch"),
-        );
-      } catch (error) {
-        this.logger.warn(
-          { err: error, repoGitRoot: target.repoGitRoot, cwd: target.cwd },
-          "Background git fetch failed",
-        );
-      }
+        },
+        createRunGitCommand("background-fetch"),
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, repoGitRoot: target.repoGitRoot, cwd },
+        "Background git fetch failed",
+      );
+    }
+    if (await this.isRepoFetchBindingCurrent(target, cwd)) {
       this.applyRepoFetchResult(target, result, eventsBeforeFetchSnapshot);
-    } finally {
-      target.fetchInFlight = false;
     }
   }
 
@@ -4072,7 +4134,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.removeWorkspaceTarget(target);
   }
 
-  private removeWorkspaceTarget(target: WorkspaceGitTarget): void {
+  private removeWorkspaceRepoLink(target: WorkspaceGitTarget): void {
     if (target.repoGitRoot) {
       const repoTarget = this.repoTargets.get(target.repoGitRoot);
       repoTarget?.workspaceKeys.delete(target.cwd);
@@ -4084,6 +4146,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       }
     }
 
+    target.repoGitRoot = null;
+  }
+
+  private removeWorkspaceTarget(target: WorkspaceGitTarget): void {
+    this.removeWorkspaceRepoLink(target);
     this.closeWorkspaceTarget(target);
     this.workspaceTargets.delete(target.cwd);
   }

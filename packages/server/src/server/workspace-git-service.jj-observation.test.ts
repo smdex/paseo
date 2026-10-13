@@ -1,11 +1,13 @@
+import { EventEmitter } from "node:events";
+import { createRunJjCommand, withJjDeletionTransaction } from "../utils/run-jj-command.js";
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type pino from "pino";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { dispatchGetCheckoutStatus } from "../utils/checkout-dispatch.js";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
-import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
+import { resetJjRuntimeCache, resolveJjRepoIdentity } from "../utils/vcs-backend.js";
 import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 
 interface WatchEvent {
@@ -66,6 +68,26 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
     const created = createScratchJjRepo(options);
     fixtures.push(created);
     return created;
+  }
+
+  function gitFixture() {
+    const repo = fixture({ files: { "README.md": "base\n" } });
+    rmSync(join(repo.repoDir, ".jj"), { recursive: true, force: true });
+    writeFileSync(join(repo.repoDir, "README.md"), "ordinary Git baseline\n");
+    execSync(
+      "git add README.md && git -c user.name=Test -c user.email=test@example.invalid commit -q -m base",
+      { cwd: repo.repoDir },
+    );
+    execSync("git init --bare upstream.git", { cwd: repo.dir });
+    execSync(`git remote add origin ${join(repo.dir, "upstream.git")}`, { cwd: repo.repoDir });
+    return repo;
+  }
+
+  function fetchCadence(spy: ReturnType<typeof vi.spyOn<typeof globalThis, "setInterval">>) {
+    const index = spy.mock.calls.findIndex((args) => args[1] === 180_000);
+    const callback = spy.mock.calls[index]?.[0];
+    if (typeof callback !== "function") throw new Error("fetch cadence not installed");
+    return { callback, id: spy.mock.results[index]!.value };
   }
 
   beforeAll(() => {
@@ -562,4 +584,252 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       await service.dispose();
     }
   });
+
+  test("rebinds converted Git siblings to one native cadence and retires the Git fetch arm", async () => {
+    const repo = gitFixture();
+    const sibling = join(repo.repoDir, "subproject");
+    mkdirSync(sibling);
+    const watcher = createWatcherHarness();
+    const gitFetch = vi.fn(async () => ({ changes: [], error: null }));
+    const jjFetch = vi.fn(async (_cwd: string) => {});
+    const service = createJjService(watcher, { runGitFetch: gitFetch, runJjFetch: jjFetch });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const intervals = vi.spyOn(globalThis, "setInterval");
+    const cleared = vi.spyOn(globalThis, "clearInterval");
+    const first = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    const second = service.registerWorkspace({ cwd: sibling }, () => {});
+    try {
+      await waitForSnapshot(service, repo.repoDir);
+      await waitForSnapshot(service, sibling);
+      await vi.waitFor(() => {
+        expect(gitFetch).toHaveBeenCalledTimes(1);
+        expect(service.getMetrics().fetchInFlightCount).toBe(0);
+      });
+      const retired = fetchCadence(intervals);
+      expect(repo.jj(["git", "init", "--colocate"]).status).toBe(0);
+      expect(
+        (
+          await service.getSnapshot(repo.repoDir, {
+            force: true,
+            includeForge: false,
+            reason: "manual-refresh",
+          })
+        ).git.vcs,
+      ).toBe("jj");
+      await vi.waitFor(() => expect(service.peekSnapshot(sibling)?.git.vcs).toBe("jj"), {
+        timeout: 5_000,
+        interval: 25,
+      });
+      await vi.waitFor(() => {
+        expect(service.getMetrics().repositoryTargetCount).toBe(1);
+        expect(jjFetch).toHaveBeenCalledTimes(1);
+        expect(service.getMetrics().fetchInFlightCount).toBe(0);
+      });
+      expect(cleared).toHaveBeenCalledWith(retired.id);
+      expect(intervals.mock.calls.filter((args) => args[1] === 180_000)).toHaveLength(2);
+      retired.callback();
+      await vi.advanceTimersByTimeAsync(180_000);
+      await vi.waitFor(() => expect(jjFetch).toHaveBeenCalledTimes(2));
+      expect(gitFetch).toHaveBeenCalledTimes(1);
+      const identity = resolveJjRepoIdentity(repo.repoDir)!;
+      expect(recordsFor(watcher, identity.sharedStorePath)).toHaveLength(1);
+      first.unsubscribe();
+      await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
+      await vi.advanceTimersByTimeAsync(180_000);
+      await vi.waitFor(() => expect(jjFetch).toHaveBeenCalledTimes(3));
+      expect(jjFetch.mock.calls[2]![0]).toBe(sibling);
+      expect(gitFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      first.unsubscribe();
+      second.unsubscribe();
+      await service.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test.each(["dispatch-off", "missing-runtime"])(
+    "retained Git cadence refuses converted jj with %s without either writer",
+    async (mode) => {
+      const repo = gitFixture();
+      const gitFetch = vi.fn(async () => ({ changes: [], error: null }));
+      const jjFetch = vi.fn(async (_cwd: string) => {});
+      const logger = createLogger();
+      const service = createJjService(createWatcherHarness(), {
+        runGitFetch: gitFetch,
+        runJjFetch: jjFetch,
+        logger,
+      });
+      const oldPath = process.env.PATH;
+      const oldGate = process.env.PASEO_JJ_DISPATCH;
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const intervals = vi.spyOn(globalThis, "setInterval");
+      const sub = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+      try {
+        await waitForSnapshot(service, repo.repoDir);
+        await vi.waitFor(() => {
+          expect(gitFetch).toHaveBeenCalledTimes(1);
+          expect(service.getMetrics().fetchInFlightCount).toBe(0);
+        });
+        const retained = fetchCadence(intervals);
+        expect(repo.jj(["git", "init", "--colocate"]).status).toBe(0);
+        if (mode === "dispatch-off") process.env.PASEO_JJ_DISPATCH = "0";
+        else {
+          process.env.PATH = "";
+          resetJjRuntimeCache();
+        }
+        retained.callback();
+        await vi.waitFor(() =>
+          expect(logger.warn).toHaveBeenCalledWith(
+            expect.anything(),
+            "Background fetch refused; repository binding unavailable",
+          ),
+        );
+        await expect(
+          service.getSnapshot(repo.repoDir, {
+            force: true,
+            includeForge: false,
+            reason: "manual-refresh",
+          }),
+        ).rejects.toMatchObject({ name: "JjUnavailableError" });
+        expect(gitFetch).toHaveBeenCalledTimes(1);
+        expect(jjFetch).not.toHaveBeenCalled();
+      } finally {
+        if (oldPath === undefined) delete process.env.PATH;
+        else process.env.PATH = oldPath;
+        if (oldGate === undefined) delete process.env.PASEO_JJ_DISPATCH;
+        else process.env.PASEO_JJ_DISPATCH = oldGate;
+        resetJjRuntimeCache();
+        sub.unsubscribe();
+        await service.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test("signal-owned Fetch timeout retains disposal and deletion ownership until child close", async () => {
+    const repo = fixture({ colocate: false, files: { "README.md": "base\n" } });
+    execSync("git init --bare upstream.git", { cwd: repo.dir });
+    expect(
+      repo.jj(["git", "remote", "add", "upstream", join(repo.dir, "upstream.git")]).status,
+    ).toBe(0);
+    let killed = () => {};
+    const didKill = new Promise<void>((resolve) => {
+      killed = resolve;
+    });
+    class DelayedProcess extends EventEmitter {
+      stdout = new EventEmitter();
+      stderr = new EventEmitter();
+      stdin = new EventEmitter();
+      pid = 4242;
+      kill() {
+        killed();
+        return true;
+      }
+    }
+    const child = new DelayedProcess();
+    const run = createRunJjCommand("owned-fetch-timeout", { spawn: () => child });
+    let completed = false;
+    const errors: unknown[] = [];
+    const service = createJjService(createWatcherHarness(), {
+      runJjFetch: async (cwd, context) => {
+        try {
+          await run(["git", "fetch"], { cwd, signal: context?.signal, timeout: 5 });
+        } catch (error) {
+          errors.push(error);
+          throw error;
+        } finally {
+          completed = true;
+        }
+      },
+    });
+    const sub = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    const exit = () => {
+      child.emit("exit", null, "SIGKILL");
+      child.emit("close", null, "SIGKILL");
+    };
+    try {
+      await didKill;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).toBe(false);
+      expect(service.getMetrics().fetchInFlightCount).toBe(1);
+      sub.unsubscribe();
+      let disposed = false;
+      const disposing = service.dispose().then(() => {
+        disposed = true;
+        return undefined;
+      });
+      let deletionEntered = false;
+      const deleting = withJjDeletionTransaction(repo.repoDir, async () => {
+        deletionEntered = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(disposed).toBe(false);
+      expect(deletionEntered).toBe(false);
+      exit();
+      await disposing;
+      await deleting;
+      expect(completed).toBe(true);
+      expect(disposed).toBe(true);
+      expect(deletionEntered).toBe(true);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ message: expect.stringContaining("timed out after 5ms") });
+    } finally {
+      exit();
+      sub.unsubscribe();
+      await service.dispose();
+    }
+  });
+
+  test.each(["git", "other-jj-store"])(
+    "native cadence refuses a stale binding after replacement by %s",
+    async (replacement) => {
+      const repo = fixture({ files: { "README.md": "base\n" } });
+      const other = fixture({ colocate: false });
+      execSync("git init --bare upstream.git", { cwd: repo.dir });
+      expect(
+        repo.jj(["git", "remote", "add", "origin", join(repo.dir, "upstream.git")]).status,
+      ).toBe(0);
+      const gitFetch = vi.fn(async () => ({ changes: [], error: null }));
+      const jjFetch = vi.fn(async (_cwd: string) => {});
+      const service = createJjService(createWatcherHarness(), {
+        runGitFetch: gitFetch,
+        runJjFetch: jjFetch,
+      });
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const intervals = vi.spyOn(globalThis, "setInterval");
+      const sub = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+      const marker = join(repo.repoDir, ".jj");
+      const saved = join(repo.dir, "saved-jj");
+      let moved = false;
+      try {
+        await waitForSnapshot(service, repo.repoDir);
+        await vi.waitFor(() => {
+          expect(jjFetch).toHaveBeenCalledTimes(1);
+          expect(service.getMetrics().fetchInFlightCount).toBe(0);
+        });
+        const retained = fetchCadence(intervals);
+        renameSync(marker, saved);
+        moved = true;
+        if (replacement === "other-jj-store") {
+          mkdirSync(marker);
+          writeFileSync(
+            join(marker, "repo"),
+            resolveJjRepoIdentity(other.repoDir)!.sharedStorePath,
+          );
+        }
+        retained.callback();
+        await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
+        expect(jjFetch).toHaveBeenCalledTimes(1);
+        expect(gitFetch).not.toHaveBeenCalled();
+      } finally {
+        if (moved) {
+          rmSync(marker, { recursive: true, force: true });
+          renameSync(saved, marker);
+        }
+        sub.unsubscribe();
+        await service.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
 });
