@@ -511,4 +511,55 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       await service.dispose();
     }
   });
+
+  test("disposal awaits an exiting jj fetch after the last subscriber removed its repo target", async () => {
+    const repo = fixture({ colocate: false, files: { "README.md": "base\n" } });
+    execSync("git init --bare upstream.git", { cwd: repo.dir });
+    expect(
+      repo.jj(["git", "remote", "add", "upstream", join(repo.dir, "upstream.git")]).status,
+    ).toBe(0);
+    let started = () => {};
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let exited = () => {};
+    const didExit = new Promise<void>((resolve) => {
+      exited = resolve;
+    });
+    let aborted = false;
+    const service = createJjService(createWatcherHarness(), {
+      runJjFetch: async (_cwd, context) => {
+        context?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+          },
+          { once: true },
+        );
+        started();
+        await didExit;
+      },
+    });
+    const subscription = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    try {
+      await didStart;
+      subscription.unsubscribe();
+      expect(aborted).toBe(true);
+      expect(service.getMetrics().repositoryTargetCount).toBe(0);
+      let disposed = false;
+      const disposing = service.dispose().then(() => {
+        disposed = true;
+        return undefined;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(disposed).toBe(false);
+      exited();
+      await disposing;
+      expect(disposed).toBe(true);
+    } finally {
+      exited();
+      subscription.unsubscribe();
+      await service.dispose();
+    }
+  });
 });
