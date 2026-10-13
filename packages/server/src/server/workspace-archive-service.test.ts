@@ -1,6 +1,14 @@
 import { createWorkspaceArchiveAuthorityPorts } from "./workspace-archive-service.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino, { type Logger } from "pino";
@@ -172,6 +180,7 @@ function createArchiveDeps(input: ArchiveDepsInput): ArchiveTestDependencies {
       listByWorkspace: async (): Promise<StoredAgentRecord[]> => [],
     } as Pick<AgentStorage, "listByWorkspace">,
     findWorkspaceIdForCwd: input.findWorkspaceIdForCwd ?? vi.fn(async () => null),
+    findWorkspaceIdsForBackingPath: async () => [],
     listActiveWorkspaces: async () =>
       active.filter((workspace) => !archivedWorkspaceIds.has(workspace.workspaceId)),
     archiveWorkspaceRecord: async (workspaceId: string) => {
@@ -1538,4 +1547,84 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     expect(existsSync(h.created.worktreePath)).toBe(true);
     expect(existsSync(replacement.worktreePath)).toBe(true);
   });
+  test.each([false, true])(
+    "empty-active path archive retains Git replacement behind archived jj authority (subproject=%s)",
+    async (subproject) => {
+      const fixture = createScratchJjRepo({
+        colocate: true,
+        files: { "sub/saved.txt": "old saved work\n" },
+      });
+      cleanupPaths.push(fixture.dir);
+      fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+      const worktreesRoot = path.join(fixture.dir, "worktrees");
+      const created = await createJjWorktree({
+        cwd: fixture.repoDir,
+        worktreesRoot,
+        worktreeSlug: "reused",
+        source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+      });
+      const root = created.worktreePath;
+      const pin = "paseo/recovery/old-path";
+      fixture.jj(["bookmark", "create", pin, "-r", "reused@"]);
+      const registry = new FileBackedWorkspaceRegistry(
+        path.join(fixture.dir, "records.json"),
+        pino({ level: "silent" }),
+      );
+      const saved = createPersistedWorkspaceRecord({
+        workspaceId: "old",
+        projectId: "project",
+        cwd: subproject ? path.join(root, "sub") : root,
+        worktreeRoot: root,
+        mainRepoRoot: fixture.repoDir,
+        kind: "worktree",
+        displayName: "old",
+        jjWorkspaceManagement: "managed",
+        jjWorkspaceId: readJjWorkspaceIncarnation(root)!,
+        recoveryBookmark: pin,
+        isPaseoOwnedWorktree: true,
+        archivedAt: "earlier",
+        createdAt: "earlier",
+        updatedAt: "earlier",
+      });
+      await registry.upsert(saved);
+      fixture.jj(["workspace", "forget", "reused"]);
+      renameSync(root, `${root}.original`);
+      rmSync(path.join(fixture.repoDir, ".jj"), { recursive: true });
+      execFileSync("git", ["worktree", "add", "--detach", root, "main"], {
+        cwd: fixture.repoDir,
+        stdio: "pipe",
+      });
+      writeFileSync(path.join(root, "untracked-user.txt"), "unrelated Git user bytes\n");
+      let effects = 0;
+      const deps = {
+        ...createArchiveDeps({
+          paseoHome: fixture.dir,
+          paseoWorktreesBaseRoot: worktreesRoot,
+          activeWorkspaces: [],
+        }),
+        ...createWorkspaceArchiveAuthorityPorts(registry),
+        stopWorkspaceSetup: async () => {
+          effects++;
+        },
+        archiveWorkspaceRecord: async () => {
+          effects++;
+        },
+        killTerminalsForWorkspace: async () => {
+          effects++;
+        },
+      };
+      await expect(
+        archiveByScope(deps, {
+          scope: { kind: "worktree", targetPath: root },
+          requestId: "retained-history",
+        }),
+      ).rejects.toThrow("retained jj authority");
+      expect(effects).toBe(0);
+      expect(readFileSync(path.join(root, "untracked-user.txt"), "utf8")).toBe(
+        "unrelated Git user bytes\n",
+      );
+      expect(existsSync(path.join(root, ".git"))).toBe(true);
+      expect(await registry.get("old")).toEqual(saved);
+    },
+  );
 });

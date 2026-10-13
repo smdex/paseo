@@ -59,20 +59,27 @@ function hasJjManagementMarker(root: string): boolean {
   );
 }
 
-/** Present checkouts never acquire authority from their current pathname or topology. */
-export async function validatePresentJjWorkspace(
-  workspace: PersistedWorkspaceRecord,
-): Promise<JjWorkspaceAuthority> {
-  const authority = jjWorkspaceAuthority(workspace);
+/** Evidence stays positive when a legacy backing checkout disappears or is replaced by Git. */
+export function hasPositiveJjEvidence(workspace: PersistedWorkspaceRecord): boolean {
   const root = jjWorkspaceBackingRoot(workspace);
-  const liveJj =
+  return (
+    hasJjManagementMarker(root) ||
     detectVcsBackend(root) === "jj" ||
     detectVcsBackend(workspace.cwd) === "jj" ||
     Boolean(
       workspace.kind === "worktree" &&
       workspace.mainRepoRoot &&
       detectVcsBackend(workspace.mainRepoRoot) === "jj",
-    );
+    )
+  );
+}
+
+/** Present checkouts never acquire authority from their current pathname or topology. */
+export async function validatePresentJjWorkspace(
+  workspace: PersistedWorkspaceRecord,
+): Promise<JjWorkspaceAuthority> {
+  const authority = jjWorkspaceAuthority(workspace);
+  const root = jjWorkspaceBackingRoot(workspace);
   if (authority === "external") {
     if (hasJjManagementMarker(root))
       throw new Error(
@@ -83,7 +90,7 @@ export async function validatePresentJjWorkspace(
     return authority;
   }
   if (authority === "unknown") {
-    if (liveJj || hasJjManagementMarker(root)) assertJjWorkspaceIncarnation(root, undefined);
+    if (hasPositiveJjEvidence(workspace)) assertJjWorkspaceIncarnation(root, undefined);
     return authority;
   }
   await validateManagedJjWorkspace(workspace, root);

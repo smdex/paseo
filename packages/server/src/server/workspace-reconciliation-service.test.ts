@@ -1,11 +1,28 @@
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import { createJjWorktree } from "../utils/worktree-jj.js";
+import { dispatchGetCheckoutStatus } from "../utils/checkout-dispatch.js";
+import { checkoutLiteFromGitSnapshot } from "./workspace-registry-model.js";
+import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
+import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { validatePresentJjWorkspace } from "./workspace-jj-authority.js";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  FileBackedWorkspaceRegistry,
+  FileBackedProjectRegistry,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
 } from "./workspace-registry.js";
@@ -1699,4 +1716,112 @@ describe("WorkspaceReconciliationService", () => {
       mainRepoRoot: "/tmp/main-repo",
     });
   });
+  test.skipIf(!isJjAvailable()).each([
+    [false, "missing"],
+    [true, "missing"],
+    [false, "git"],
+    [true, "git"],
+  ] as const)(
+    "reconciliation preserves positive unknown legacy jj source evidence after backing %s (%s)",
+    async (subproject, replacement) => {
+      const fixture = createScratchJjRepo({
+        colocate: false,
+        files: { "sub/saved.txt": "old work\n" },
+      });
+      tempDirs.push(fixture.dir);
+      fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+      const worktreesRoot = path.join(fixture.dir, "worktrees");
+      const paseoHome = path.join(fixture.dir, "home");
+      const created = await createJjWorktree({
+        cwd: fixture.repoDir,
+        worktreesRoot,
+        worktreeSlug: "legacy",
+        source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+      });
+      const root = created.worktreePath;
+      const cwd = subproject ? path.join(root, "sub") : root;
+      const logger = createTestLogger();
+      const workspaceRegistry = new FileBackedWorkspaceRegistry(
+        path.join(paseoHome, "workspaces.json"),
+        logger,
+      );
+      const projectRegistry = new FileBackedProjectRegistry(
+        path.join(paseoHome, "projects.json"),
+        logger,
+      );
+      await projectRegistry.upsert(
+        createPersistedProjectRecord({
+          projectId: "project",
+          rootPath: fixture.repoDir,
+          kind: "git",
+          displayName: "source",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      const legacy = createPersistedWorkspaceRecord({
+        workspaceId: "legacy",
+        projectId: "project",
+        cwd,
+        worktreeRoot: root,
+        mainRepoRoot: fixture.repoDir,
+        kind: "worktree",
+        isPaseoOwnedWorktree: false,
+        displayName: "legacy",
+        branch: "feature",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      await workspaceRegistry.upsert(legacy);
+      if (replacement === "missing") rmSync(root, { recursive: true });
+      else {
+        rmSync(path.join(root, ".jj"), { recursive: true });
+        execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
+        writeFileSync(path.join(root, "replacement.txt"), "unrelated user bytes\n");
+      }
+      const git = createNoopWorkspaceGitService({
+        getCheckout: async (targetPath) =>
+          checkoutLiteFromGitSnapshot(
+            targetPath,
+            await dispatchGetCheckoutStatus(targetPath, { paseoHome, worktreesRoot }),
+          ),
+      });
+      await expect(validatePresentJjWorkspace(legacy)).rejects.toThrow("incarnation");
+      const reconciliation = new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger,
+        workspaceGitService: git,
+      });
+      try {
+        const result = await reconciliation.reconcileGitMetadata();
+        expect(
+          result.changesApplied.filter((change) => change.kind === "workspace_updated"),
+        ).toEqual([]);
+        const reloaded = new FileBackedWorkspaceRegistry(
+          path.join(paseoHome, "workspaces.json"),
+          logger,
+        );
+        expect(await reloaded.get("legacy")).toEqual(legacy);
+        const provisioning = createWorkspaceProvisioningService({
+          workspaceRegistry: reloaded,
+          projectRegistry,
+          logger,
+          paseoHome,
+          worktreesRoot,
+          workspaceGitService: git,
+          isDirectory: async (targetPath) =>
+            existsSync(targetPath) && statSync(targetPath).isDirectory(),
+        });
+        await expect(provisioning.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "incarnation",
+        );
+        expect(await reloaded.get("legacy")).toEqual(legacy);
+        if (replacement === "git")
+          expect(existsSync(path.join(root, "replacement.txt"))).toBe(true);
+      } finally {
+        reconciliation.dispose();
+      }
+    },
+  );
 });
