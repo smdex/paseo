@@ -9,6 +9,9 @@ import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
+import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
+import { NotSupportedOnJjError } from "../../../utils/checkout-dispatch.js";
+import { toCheckoutError } from "../../checkout-git-utils.js";
 import { createGitMutationService } from "./git-mutation-service.js";
 
 // The production module reads only WorkspaceGitService.{validateBranchRef,getSnapshot,
@@ -282,3 +285,21 @@ describe("notifyGitMutation", () => {
     await expect(service.notifyGitMutation("/tmp/repo", "pull")).resolves.toBeUndefined();
   });
 });
+
+test.skipIf(!isJjAvailable())(
+  "jj switching is deferred before dirty-tree validation and never offers stash",
+  async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    tempRepos.push(fixture.dir);
+    writeFileSync(join(fixture.repoDir, "dirty.txt"), "dirty\n");
+    const { service, snapshotCalls } = buildService({ isDirty: true });
+    const error = await service
+      .checkoutExistingBranch(fixture.repoDir, "main")
+      .catch((caughtError: unknown) => caughtError);
+    expect(error).toBeInstanceOf(NotSupportedOnJjError);
+    expect(snapshotCalls).toEqual([]);
+    expect(toCheckoutError(error)).toMatchObject({ code: "NOT_ALLOWED" });
+    expect(toCheckoutError(error).message.toLowerCase()).not.toContain("uncommitted");
+    expect(toCheckoutError(error).message.toLowerCase()).not.toContain("stash");
+  },
+);

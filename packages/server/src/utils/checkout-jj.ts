@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import { parseAndHighlightDiff, parseDiff } from "../server/utils/diff-highlighter.js";
 import { isPaseoOwnedWorktreeCwd } from "./worktree.js";
-import { readPaseoWorktreeMetadata, writePaseoWorktreeMetadata } from "./worktree-metadata.js";
+import { readPaseoWorktreeMetadata, updatePaseoWorktreeJjBookmark } from "./worktree-metadata.js";
 import { detectVcsBackend, resolveJjRepoIdentity, type JjRepoIdentity } from "./vcs-backend.js";
 import {
   jjFilesetArg,
@@ -408,24 +408,6 @@ async function listRemoteBookmarkCommitIds(
   return new Set(result.stdout.split("\n").filter((line) => line.length > 0));
 }
 
-/** True when a remote-tracking counterpart exists for the bookmark. */
-async function hasTrackedRemoteBookmark(
-  cwd: string,
-  bookmark: string,
-  context?: JjCheckoutContext,
-): Promise<boolean> {
-  const result = await runJj(
-    ["log", "--no-graph", "-r", `remote_bookmarks("${bookmark}")`, "-T", COMMIT_ID_LINES_TEMPLATE],
-    { cwd, acceptExitCodes: [0, 1] },
-    context,
-  );
-  if (result.exitCode !== 0) {
-    // Invalid bookmark pattern (weird characters) — treat as untracked.
-    return false;
-  }
-  return countLines(result.stdout) > 0;
-}
-
 async function resolveDefaultBookmark(
   cwd: string,
   context?: JjCheckoutContext,
@@ -550,7 +532,10 @@ export function jjFactsToCheckoutSnapshotFacts(facts: JjSnapshotFacts): Checkout
   const gitDir = identity.colocated
     ? resolve(identity.primaryRoot, ".git")
     : resolve(identity.sharedStorePath, "store", "git");
-  const currentBranch = facts.derivedBookmark;
+  // One ownership resolver for reads and mutations alike (jjOwnedBookmark):
+  // the recorded owner when Paseo manages this workspace (null included),
+  // otherwise the derived unique nearest ancestor.
+  const currentBranch = jjOwnedBookmark(facts);
   return {
     isGit: true,
     worktreeRoot: identity.workspaceRoot,
@@ -599,17 +584,26 @@ async function getJjUpstreamStatus(
   if (!bookmark || remotes.length === 0) {
     return null;
   }
-  if (!(await hasTrackedRemoteBookmark(cwd, bookmark, context))) {
-    return null;
-  }
-  const remote = selectDefaultRemote(remotes);
-  if (!remote) {
-    return null;
-  }
-  const remoteBookmark = `remote_bookmarks("${bookmark}")`;
+  // Use the same selected remote as push; never compare against every remote
+  // or the colocated "git" export view (neither is the push destination).
+  const remote =
+    remotes.find((candidate) => candidate.name === "origin") ??
+    (remotes.length === 1 ? remotes[0] : null);
+  if (!remote) return null;
+  const remoteRef = `remote_bookmarks(exact:"${bookmark}", exact:"${remote.name}")`;
+  const probe = await runJj(
+    ["log", "--no-graph", "-r", remoteRef, "-T", COMMIT_ID_LINES_TEMPLATE],
+    { cwd, acceptExitCodes: [0, 1] },
+    context,
+  );
+  if (probe.exitCode !== 0 || probe.truncated || countLines(probe.stdout) === 0) return null;
+  // Compare the BOOKMARK TARGET with its remote counterpart — the actual push
+  // target. Counting against @ would include the automatic empty working-copy
+  // change and keep a fully-pushed bookmark reading "ahead".
+  const localRef = `bookmarks(exact:"${bookmark}")`;
   const [ahead, behind] = await Promise.all([
-    countRevset(cwd, `${remoteBookmark}..@`, context),
-    countRevset(cwd, `@..${remoteBookmark}`, context),
+    countRevset(cwd, `${remoteRef}..${localRef}`, context),
+    countRevset(cwd, `${localRef}..${remoteRef}`, context),
   ]);
   return { ref: `${remote.name}/${bookmark}`, aheadBehind: { ahead, behind } };
 }
@@ -624,7 +618,7 @@ export async function getJjStatus(
   }
 
   const { identity, workingCopy } = jjFacts;
-  const currentBranch = jjFacts.derivedBookmark;
+  const currentBranch = jjOwnedBookmark(jjFacts);
   const remoteUrl = selectDefaultRemote(jjFacts.remotes)?.url ?? null;
   const hasRemote = remoteUrl !== null;
   const isDirty = !workingCopy.empty || workingCopy.untrackedPaths.length > 0;
@@ -695,18 +689,23 @@ function buildPlaceholderParsedDiffFile(
   };
 }
 
+/** Split a git-format diff into per-file `diff --git` sections. */
+function splitDiffSections(diffText: string): string[] {
+  return diffText.split(/^(?=diff --git )/m).filter((section) => section.length > 0);
+}
+
 function fileSectionIsBinary(diffText: string, file: ParsedDiffFile, fileCount: number): boolean {
-  const marker = file.isNew ? `--- /dev/null\n+++ b/${file.path}` : `--- a/${file.path}`;
-  const sectionStart = diffText.indexOf(marker);
-  if (sectionStart < 0) {
-    // Diff headers quote paths with special characters, so the exact marker can
-    // be absent. Only fall back to a whole-text match when the diff holds a
-    // single file, where the marker cannot belong to another section.
-    return fileCount === 1 && /Binary files .* differ/.test(diffText);
+  // Binary sections carry no ---/+++ headers, so the file is located by its
+  // `diff --git` section — never by a whole-text match when multiple files
+  // are present (the marker could belong to another file's section).
+  if (fileCount === 1) {
+    return /Binary files .* differ/.test(diffText);
   }
-  const nextFile = diffText.indexOf("diff --git ", sectionStart + marker.length);
-  const section = diffText.slice(sectionStart, nextFile < 0 ? undefined : nextFile);
-  return /Binary files .* differ/.test(section);
+  return splitDiffSections(diffText).some(
+    (section) =>
+      parseDiff(section).some((entry) => entry.path === file.path) &&
+      /Binary files .* differ/.test(section),
+  );
 }
 
 function serializeFileBytes(file: ParsedDiffFile): number {
@@ -756,8 +755,14 @@ export async function getJjDiff(
     diffArgs.push("--ignore-all-space");
   }
 
+  // Diff paths and highlighter content reads are workspace-root-relative.
+  const root = await jjWorkspaceRoot(cwd);
   // One byte over the total cap so truncation is detectable.
-  const result = await runJj(diffArgs, { cwd, maxOutputBytes: TOTAL_DIFF_MAX_BYTES + 1 }, context);
+  const result = await runJj(
+    diffArgs,
+    { cwd: root, maxOutputBytes: TOTAL_DIFF_MAX_BYTES + 1 },
+    context,
+  );
   if (result.truncated) {
     return { diff: "", structured: [], diffTooLarge: true };
   }
@@ -767,7 +772,7 @@ export async function getJjDiff(
     return { diff: diffText };
   }
 
-  const parsed = await parseAndHighlightDiff(diffText, cwd);
+  const parsed = await parseAndHighlightDiff(diffText, root);
   const structured = applyDiffPlaceholders(parsed, diffText);
   return { diff: diffText, structured };
 }
@@ -938,6 +943,11 @@ async function readJjFileContentAt(
       { cwd, maxOutputBytes: PER_FILE_DIFF_MAX_BYTES },
       context,
     );
+    if (result.truncated) {
+      // Truncated content would highlight a PREFIX as the whole file;
+      // treat it as unavailable (no highlight) instead of wrong content.
+      return null;
+    }
     return result.stdout;
   } catch {
     // Absent at the revision (added or deleted file) or binary over the cap.
@@ -970,6 +980,9 @@ export async function getJjCommitFileDiff({
   if (!fileset) {
     return null;
   }
+  // Paths are workspace-root-relative: run from the workspace ROOT so a
+  // subdirectory caller cannot make the fileset select the wrong file.
+  const root = await jjWorkspaceRoot(cwd);
   const diffArgs =
     meta.parents.length === 0
       ? ["diff", "--git", "-r", meta.commitId, ...fileset]
@@ -982,16 +995,33 @@ export async function getJjCommitFileDiff({
           meta.commitId,
           ...fileset,
         ];
-  const result = await runJj(diffArgs, { cwd, maxOutputBytes: PER_FILE_DIFF_MAX_BYTES }, context);
+  const result = await runJj(
+    diffArgs,
+    { cwd: root, maxOutputBytes: PER_FILE_DIFF_MAX_BYTES },
+    context,
+  );
+  if (result.truncated) {
+    // Never parse a truncated patch as a complete diff — surface the
+    // oversized placeholder the git path uses for the same situation.
+    return {
+      path,
+      isNew: false,
+      isDeleted: false,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      status: "too_large",
+    };
+  }
   if (result.stdout.trim().length === 0) {
     return null;
   }
 
   const oldRevision = meta.parents.length > 0 ? (meta.parents[0] ?? meta.commitId) : null;
-  const parsedFiles = await parseAndHighlightDiff(result.stdout, cwd, {
+  const parsedFiles = await parseAndHighlightDiff(result.stdout, root, {
     getOldFileContent: async (file) =>
-      oldRevision ? readJjFileContentAt(cwd, oldRevision, file.path, context) : null,
-    getNewFileContent: (file) => readJjFileContentAt(cwd, meta.commitId, file.path, context),
+      oldRevision ? readJjFileContentAt(root, oldRevision, file.path, context) : null,
+    getNewFileContent: (file) => readJjFileContentAt(root, meta.commitId, file.path, context),
   });
 
   // The fileset scopes the diff to one path, so at most one real entry exists;
@@ -1044,7 +1074,7 @@ export async function getJjRefDerivedState(
   if (!jjFacts.isJj) {
     return { aheadBehind: null, diffStat: null, upstreamStatus: null };
   }
-  const currentBranch = jjFacts.derivedBookmark;
+  const currentBranch = jjOwnedBookmark(jjFacts);
   const baseRef = jjFacts.resolvedBaseRef;
   const factsContext = { ...context, facts: jjFacts };
   const [aheadBehind, diffStat, upstreamStatus] = await Promise.all([
@@ -1184,6 +1214,27 @@ function assertSafeJjRef(name: string, label: string): void {
 }
 
 /**
+ * The workspace root for path-taking operations. jj filesets and `file show`
+ * paths resolve RELATIVE TO CWD, while diff headers and the wire send
+ * workspace-root-relative paths — running from a subdirectory would select
+ * the WRONG file. Every path-scoped command executes from this root.
+ */
+async function jjWorkspaceRoot(cwd: string): Promise<string> {
+  return resolveJjRepoIdentity(cwd)?.workspaceRoot ?? resolve(cwd);
+}
+
+/**
+ * The single ownership resolver (reads AND mutations): a managed Paseo
+ * workspace owns exactly the bookmark recorded in its metadata — including
+ * null (bookmarkless managed workspaces never fall back to ancestor
+ * inference, which could pick the base). Unmanaged checkouts derive the
+ * unique nearest ancestor bookmark.
+ */
+function jjOwnedBookmark(facts: Extract<JjSnapshotFacts, { isJj: true }>): string | null {
+  return facts.paseoOwnedWorktree ? facts.managedBookmark : facts.derivedBookmark;
+}
+
+/**
  * The bookmark that represents this workspace's line of work: the unique
  * nearest-ancestor bookmark of @. Everything the mutation layer advances or
  * moves refers to this bookmark (the stored base ref is never touched).
@@ -1196,14 +1247,7 @@ export async function getJjWorkspaceBookmark(
   if (!facts.isJj) {
     return null;
   }
-  // A managed Paseo workspace owns exactly one feature bookmark recorded in
-  // its metadata; derivation (with all its ambiguity rules) is only for
-  // unmanaged checkouts. Adding an alias bookmark therefore cannot null out a
-  // managed workspace's line of work (review fix 7).
-  if (facts.paseoOwnedWorktree && facts.managedBookmark) {
-    return facts.managedBookmark;
-  }
-  return facts.derivedBookmark;
+  return jjOwnedBookmark(facts);
 }
 
 function advanceBookmarkArgs(bookmark: string | null): string[] {
@@ -1216,8 +1260,8 @@ function advanceBookmarkArgs(bookmark: string | null): string[] {
   assertSafeJjRef(bookmark, "bookmark");
   // Scoped to exactly this bookmark (glob with no wildcards), so the base
   // bookmark and unrelated bookmarks never advance. Verified on 0.45.1: jj
-  // new/jj commit move the bookmark from the parent onto the new working-copy
-  // change, keeping the workspace line git-visible in colocated repos.
+  // new/jj commit move the bookmark onto the finished change, not the empty
+  // working-copy child, keeping the workspace line git-visible.
   return ["--config", `experimental-advance-branches.enabled-branches=["${bookmark}"]`];
 }
 
@@ -1251,7 +1295,7 @@ async function readWorkingCopyIds(
 /**
  * Finish the current change and start a new empty working-copy change.
  * `jj commit` = describe @ + new @; with the advance config the workspace
- * bookmark moves onto the new @, so the finished work lands ON the bookmark
+ * bookmark moves onto the finished change, so the work lands ON the bookmark
  * line (git-visible in colocated repos) exactly like a git branch tip.
  */
 export async function jjCommit(
@@ -1301,13 +1345,16 @@ export async function jjDescribe(
 /**
  * Discard working-copy changes to the given paths (restore them from the
  * parent). Empty path list is a no-op, mirroring git's discardChanges.
+ * Paths are workspace-root-relative, so the restore runs from the workspace
+ * ROOT even when the caller sits in a subdirectory.
  */
 export async function jjDiscard(cwd: string, paths: string[]): Promise<void> {
   const fileset = jjFilesetArg(paths);
   if (!fileset) {
     return;
   }
-  await runJj(["restore", ...fileset], { cwd });
+  const root = await jjWorkspaceRoot(cwd);
+  await runJj(["restore", ...fileset], { cwd: root });
 }
 
 async function finishMutation(
@@ -1317,16 +1364,6 @@ async function finishMutation(
 ): Promise<JjMutationResult> {
   const ids = await readWorkingCopyIds(cwd, context);
   return { ...ids, bookmark };
-}
-
-/**
- * Point the working copy at an existing bookmark's change (`jj edit`). The
- * caller must have validated the bookmark exists and the tree is clean: jj
- * edits are only safe when @ carries no unmerged work.
- */
-export async function jjEditBookmark(cwd: string, bookmark: string): Promise<void> {
-  assertSafeJjRef(bookmark, "bookmark");
-  await runJj(["edit", bookmark], { cwd });
 }
 
 /**
@@ -1464,15 +1501,23 @@ export async function jjRenameBookmark(
     throw new Error(`Bookmark already exists: ${newName}`);
   }
   await runJj(["bookmark", "rename", bookmark, newName], { cwd }, context);
-  // Keep managed ownership metadata current (review ND1): a renamed owner
-  // must stop resolving through the stale recorded name.
+  // Keep managed ownership metadata current: a renamed owner must stop
+  // resolving through the stale recorded name. The metadata lives at the
+  // WORKSPACE ROOT (a subdirectory caller must not be refused), and the
+  // update preserves every other metadata field (runtime port, first-agent
+  // auto-name state) by patching only jjBookmark.
   const identity = resolveJjRepoIdentity(cwd);
-  const owned =
-    identity && (await isPaseoOwnedWorktreeCwd(cwd, { knownGitCommonDir: null })).allowed;
-  if (owned && identity.workspaceRoot === resolve(cwd)) {
-    const metadata = readPaseoWorktreeMetadata(cwd);
-    if (metadata?.version === 2 && metadata.jjBookmark === bookmark) {
-      writePaseoWorktreeMetadata(cwd, { ...metadata, jjBookmark: newName });
+  if (identity) {
+    const owned = await isPaseoOwnedWorktreeCwd(cwd, {
+      knownGitCommonDir: null,
+      paseoHome: context?.paseoHome,
+      worktreesRoot: context?.worktreesRoot,
+    });
+    if (owned.allowed) {
+      updatePaseoWorktreeJjBookmark(identity.workspaceRoot, {
+        from: bookmark,
+        to: newName,
+      });
     }
   }
   return { previousBranch: bookmark, currentBranch: newName };

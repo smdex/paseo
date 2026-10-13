@@ -58,6 +58,8 @@ import {
   dispatchPushCurrentBranch,
   dispatchStashPop,
   dispatchStashSave,
+  NotSupportedOnJjError,
+  resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
@@ -749,10 +751,14 @@ export class CheckoutSession {
         throw new Error("Commit message is required");
       }
 
-      await dispatchCommitChanges(cwd, {
-        message,
-        addAll: msg.addAll ?? true,
-      });
+      await dispatchCommitChanges(
+        cwd,
+        {
+          message,
+          addAll: msg.addAll ?? true,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
       await this.gitMutation.notifyGitMutation(cwd, "commit-changes");
       this.scheduleDiffRefresh(cwd);
 
@@ -783,7 +789,11 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, requestId } = msg;
     try {
-      const result = await dispatchNewChange(cwd, { message: msg.message });
+      const result = await dispatchNewChange(
+        cwd,
+        { message: msg.message },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
       await this.gitMutation.notifyGitMutation(cwd, "new-change");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -815,7 +825,11 @@ export class CheckoutSession {
       if (!message) {
         throw new Error("Description is required");
       }
-      const result = await dispatchDescribeChange(cwd, { message });
+      const result = await dispatchDescribeChange(
+        cwd,
+        { message },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
       await this.gitMutation.notifyGitMutation(cwd, "describe-change");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -951,7 +965,10 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await dispatchPullCurrentBranch(cwd);
+      await dispatchPullCurrentBranch(cwd, undefined, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "pull", { invalidateForge: true });
       this.scheduleDiffRefresh(cwd);
 
@@ -983,7 +1000,10 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await dispatchPushCurrentBranch(cwd);
+      await dispatchPushCurrentBranch(cwd, undefined, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "push", { invalidateForge: true });
       this.host.emit({
         type: "checkout_push_response",
@@ -1013,6 +1033,16 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
+      // jj is rejected BEFORE text generation, forge resolution, or any git
+      // command: the git implementation would discover a git branch and `git
+      // push -u origin <head>` — in a secondary jj workspace inside another
+      // git repo that pushes the WRONG repository, and colocation bypasses
+      // jj's push checks entirely.
+      if ((await resolveEffectiveBackend(cwd)) === "jj") {
+        throw new NotSupportedOnJjError(
+          "Creating pull requests is not supported on jj repositories yet",
+        );
+      }
       let title = msg.title?.trim() ?? "";
       let body = msg.body?.trim() ?? "";
 
@@ -1065,6 +1095,13 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
+      // Same deferral as PR creation (jj plan §7): reject before forge
+      // resolution or any merge-side git plumbing.
+      if ((await resolveEffectiveBackend(cwd)) === "jj") {
+        throw new NotSupportedOnJjError(
+          "Merging pull requests is not supported on jj repositories yet",
+        );
+      }
       const pullRequest = await this.resolveCurrentPullRequest(cwd, "merge", {
         force: true,
         includeForge: true,
@@ -1116,6 +1153,9 @@ export class CheckoutSession {
         : "checkout.github.set_auto_merge.response";
 
     try {
+      if ((await resolveEffectiveBackend(cwd)) === "jj") {
+        throw new NotSupportedOnJjError("Pull request auto-merge");
+      }
       const pullRequest = await this.resolveCurrentPullRequest(cwd, "auto-merge", {
         force: true,
         includeForge: true,

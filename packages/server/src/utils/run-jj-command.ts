@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { resolve as resolvePath, sep } from "node:path";
 import type { Logger } from "pino";
 import type { ProcessEnvRecord } from "../server/paseo-env.js";
 import { spawnProcess } from "./spawn.js";
@@ -108,6 +109,68 @@ const JJ_ENV_OVERLAY: ProcessEnvRecord = {
 let jjProcessScheduler = new GitProcessScheduler(resolveJjProcessPolicy(process.env));
 const jjCommandPriority = new AsyncLocalStorage<GitProcessPriority>();
 
+// jj reads snapshot too. Block all commands for a deleting workspace, and
+// drain commands admitted before the barrier before taking the final snapshot.
+const jjDeletionRoots = new Map<string, symbol>();
+const jjDeletionTransaction = new AsyncLocalStorage<symbol>();
+const jjPendingCommands = new Map<Promise<void>, string>();
+
+export class JjMutationBarrierError extends Error {
+  constructor(readonly root: string) {
+    super(`A workspace deletion is in progress for ${root}; retry once it finishes`);
+    this.name = "JjMutationBarrierError";
+  }
+}
+
+function normalizedCommandCwd(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return resolvePath(cwd);
+  }
+}
+
+function isWithinRoot(cwd: string, root: string): boolean {
+  return cwd === root || cwd.startsWith(`${root}${sep}`);
+}
+
+function assertNoDeletionBarrier(
+  cwd: string,
+  transaction = jjDeletionTransaction.getStore(),
+): void {
+  for (const [root, owner] of jjDeletionRoots) {
+    if (isWithinRoot(normalizedCommandCwd(cwd), root) && transaction !== owner) {
+      throw new JjMutationBarrierError(root);
+    }
+  }
+}
+
+export async function withJjDeletionTransaction<T>(
+  root: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const normalized = normalizedCommandCwd(root);
+  if (
+    [...jjDeletionRoots.keys()].some(
+      (active) => isWithinRoot(normalized, active) || isWithinRoot(active, normalized),
+    )
+  ) {
+    throw new JjMutationBarrierError(normalized);
+  }
+  const owner = Symbol(normalized);
+  jjDeletionRoots.set(normalized, owner);
+  try {
+    await Promise.all(
+      [...jjPendingCommands]
+        .filter(([, cwd]) => isWithinRoot(cwd, normalized))
+        .map(([done]) => done),
+    );
+    return await jjDeletionTransaction.run(owner, operation);
+  } finally {
+    jjDeletionRoots.delete(normalized);
+  }
+}
+
 export function runWithJjCommandPriority<T>(priority: GitProcessPriority, operation: () => T): T {
   return jjCommandPriority.run(priority, operation);
 }
@@ -145,7 +208,23 @@ function executeJjCommand(
   spawn: JjSpawnFn,
   context: JjExecutionContext,
 ): Promise<JjCommandResult> {
+  try {
+    assertNoDeletionBarrier(options.cwd);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  const transaction = jjDeletionTransaction.getStore();
+  let complete!: () => void;
+  const done = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  jjPendingCommands.set(done, normalizedCommandCwd(options.cwd));
+  const finish = () => {
+    jjPendingCommands.delete(done);
+    complete();
+  };
   const startCommand = () => {
+    assertNoDeletionBarrier(options.cwd, transaction);
     let releaseProcessSlot!: () => void;
     const exited = new Promise<void>((resolve) => {
       releaseProcessSlot = resolve;
@@ -352,9 +431,17 @@ function executeJjCommand(
         settle(() => resolve(result));
       });
     });
+    void exited.then(finish);
     return { result: resultPromise, exited };
   };
-  return context.scheduler().run(startCommand, { priority: context.priority() });
+  return context
+    .scheduler()
+    .run(startCommand, { priority: context.priority() })
+    .catch((error) => {
+      // An admitted command refused at spawn has no child exit to release it.
+      if (error instanceof JjMutationBarrierError) finish();
+      throw error;
+    });
 }
 
 function formatJjCommand(args: string[]): string {

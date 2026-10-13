@@ -302,8 +302,15 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
     }
   });
 
-  test("native jj uses the static ignore floor and colocated uses git evaluation", async () => {
-    const nativeRepo = fixture({ colocate: false, files: { "README.md": "hello\n" } });
+  test("jj keeps unknown ignore policy observable and honors explicit directory ignores", async () => {
+    const nativeRepo = fixture({
+      colocate: false,
+      files: {
+        "README.md": "hello\n",
+        // Override host-global ignores so the future file is genuinely unignored.
+        ".gitignore": "!node_modules/\n!node_modules/**\n",
+      },
+    });
     mkdirSync(join(nativeRepo.repoDir, "node_modules", "some-pkg"), { recursive: true });
     const gitCommandCalls: string[][] = [];
     const nativeWatcher = createWatcherHarness();
@@ -315,7 +322,21 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
     try {
       await waitForSnapshot(nativeService, nativeRepo.repoDir);
       const nativeWorkingTree = recordsFor(nativeWatcher, nativeRepo.repoDir)[0]!;
-      expect(nativeWorkingTree.ignore).toContain(join(nativeRepo.repoDir, "node_modules"));
+      expect(nativeWorkingTree.ignore).not.toContain(join(nativeRepo.repoDir, "node_modules"));
+      writeFileSync(
+        join(nativeRepo.repoDir, "node_modules", "some-pkg", "future.txt"),
+        "unignored\n",
+      );
+      nativeWorkingTree.callback(null, [
+        {
+          path: join(nativeRepo.repoDir, "node_modules", "some-pkg", "future.txt"),
+          type: "create",
+        },
+      ]);
+      await vi.waitFor(
+        () => expect(nativeService.peekSnapshot(nativeRepo.repoDir)?.git.isDirty).toBe(true),
+        { timeout: 5000 },
+      );
       // No git ls-files evaluation ran against the native jj checkout.
       expect(gitCommandCalls.filter((args) => args[0] === "ls-files")).toEqual([]);
     } finally {

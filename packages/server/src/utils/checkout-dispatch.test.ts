@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   JjUnavailableError,
   NotSupportedOnJjError,
+  dispatchCommitChanges,
+  dispatchRenameCurrentBranch,
   dispatchDescribeChange,
   dispatchExecuteCreateBranchFromBase,
   dispatchGetCheckoutStatus,
@@ -13,6 +15,7 @@ import {
   dispatchNewChange,
   dispatchRunStashList,
 } from "./checkout-dispatch.js";
+import { writePaseoWorktreeMetadata, readPaseoWorktreeMetadata } from "./worktree-metadata.js";
 import { createJjWorktree } from "./worktree-jj.js";
 import {
   isJjDispatchEnabled,
@@ -313,5 +316,88 @@ describeIfJj("jj branch creation from base", () => {
         newBranchName: "feat/x",
       }),
     ).rejects.toThrow(/base branch not found/i);
+  });
+});
+
+describeIfJj("jj branch switching deferral", () => {
+  it("rejects branch checkout with the typed deferral error before any jj edit", async () => {
+    const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+    disposables.push(fixture.dispose);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+
+    const { dispatchExecuteBranchCheckout } = await import("./checkout-dispatch.js");
+    const before = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    await expect(
+      dispatchExecuteBranchCheckout(fixture.repoDir, { kind: "local", name: "main" }),
+    ).rejects.toBeInstanceOf(NotSupportedOnJjError);
+    // The working copy still points where it did — no jj edit ran.
+    const after = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    expect(after).toBe(before);
+  });
+
+  it("keeps the git path unchanged for git repositories", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paseo-dispatch-git-"));
+    disposables.push(() => rmSync(dir, { recursive: true, force: true }));
+    const init = spawnSync("git", ["init", "-q", "."], { cwd: dir });
+    if (init.status !== 0) {
+      throw new Error(`git init failed: ${init.stderr}`);
+    }
+
+    const { dispatchExecuteBranchCheckout } = await import("./checkout-dispatch.js");
+    // A git repo resolves through the git implementation (not-found branch
+    // yields the git error shape, never the jj deferral).
+    await expect(
+      dispatchExecuteBranchCheckout(dir, { kind: "local", name: "ghost" }),
+    ).rejects.not.toBeInstanceOf(NotSupportedOnJjError);
+  });
+});
+
+describeIfJj("jj dispatch uses daemon placement for ownership", () => {
+  beforeEach(() => enableJjDispatch());
+
+  it("never advances the ancestor base for a managed bookmarkless workspace", async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    disposables.push(fixture.dispose);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = join(fixture.dir, "custom-worktrees");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "bookmarkless",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+    });
+    fixture.jj(["bookmark", "delete", "feature"]);
+    writePaseoWorktreeMetadata(created.worktreePath, { baseRefName: "main" });
+    const cwd = join(created.worktreePath, "subproject");
+    mkdirSync(cwd);
+    const context = { worktreesRoot };
+    const before = fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout;
+    await expect(dispatchGetCheckoutStatus(cwd, context)).resolves.toMatchObject({
+      currentBranch: null,
+    });
+    writeFileSync(join(cwd, "work.txt"), "work\n");
+    await dispatchCommitChanges(cwd, { message: "finish work" }, context);
+    await dispatchNewChange(cwd, undefined, context);
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout).toBe(before);
+  });
+
+  it("renames recorded ownership at the workspace root from a subproject", async () => {
+    const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+    disposables.push(fixture.dispose);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = join(fixture.dir, "custom-worktrees");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "renamed",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+    });
+    const cwd = join(created.worktreePath, "subproject");
+    mkdirSync(cwd);
+    await dispatchRenameCurrentBranch(cwd, "feature-new", { worktreesRoot });
+    expect(readPaseoWorktreeMetadata(created.worktreePath)?.version).toBe(2);
+    expect(readPaseoWorktreeMetadata(created.worktreePath)).toMatchObject({
+      jjBookmark: "feature-new",
+    });
   });
 });
