@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { withWorkspaceLifecycle } from "./workspace-lifecycle.js";
 import {
   importJjCheckpoint,
+  assertJjRestorationResolved,
   readJjCheckpoint,
   writeJjCheckpoint,
   validateJjCheckpoint,
@@ -529,6 +530,7 @@ export async function getJjSnapshotFacts(
     return { isJj: false };
   }
 
+  await assertJjRestorationResolved(identity.workspaceRoot, context?.paseoHome);
   const [workingCopy, remotes, ownership] = await Promise.all([
     getJjWorkingCopyState(cwd, context),
     listJjRemotes(cwd, context),
@@ -1879,28 +1881,36 @@ async function selectJjRemote(cwd: string, context?: JjCheckoutContext): Promise
  */
 export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<void> {
   const checkpointRoot = await jjWorkspaceRoot(cwd);
-  const checkpoint = await readJjCheckpoint(checkpointRoot, context?.paseoHome);
-  if (checkpoint) {
-    validateJjCheckpoint(checkpoint, checkpointRoot);
-    await validateJjCheckpointHistory(cwd, checkpoint, context);
-    if (
-      checkpoint.operations.some(
-        (operation) =>
-          operation.status === "pending" || operation.status === "reconciliation_required",
+  return withWorkspaceLifecycle(checkpointRoot, async () => {
+    const freshContext = { ...context, facts: null };
+    await assertJjRestorationResolved(checkpointRoot, freshContext.paseoHome);
+    const checkpoint = await readJjCheckpoint(checkpointRoot, freshContext?.paseoHome);
+    if (checkpoint) {
+      validateJjCheckpoint(checkpoint, checkpointRoot);
+      await validateJjCheckpointHistory(cwd, checkpoint, freshContext);
+      if (
+        checkpoint.operations.some(
+          (operation) =>
+            operation.status === "pending" || operation.status === "reconciliation_required",
+        )
       )
-    )
-      throw new JjCheckpointError(
-        "Publication is blocked until the retained jj operation is reconciled on the host.",
+        throw new JjCheckpointError(
+          "Publication is blocked until the retained jj operation is reconciled on the host.",
+        );
+    }
+    const bookmark = await getJjWorkspaceBookmark(cwd, freshContext);
+    if (!bookmark) {
+      throw new JjPushTargetError(
+        "No bookmark tracks this line of work yet. Describe the change and create a bookmark before pushing.",
       );
-  }
-  const bookmark = await getJjWorkspaceBookmark(cwd, context);
-  if (!bookmark) {
-    throw new JjPushTargetError(
-      "No bookmark tracks this line of work yet. Describe the change and create a bookmark before pushing.",
+    }
+    const remote = await selectJjRemote(cwd, freshContext);
+    await runJj(
+      ["git", "push", "--bookmark", bookmark, "--remote", remote.name],
+      { cwd },
+      freshContext,
     );
-  }
-  const remote = await selectJjRemote(cwd, context);
-  await runJj(["git", "push", "--bookmark", bookmark, "--remote", remote.name], { cwd }, context);
+  });
 }
 
 /**

@@ -1,12 +1,16 @@
 import { getJjChangeMeta, getJjOperationId } from "../../../utils/checkout-jj.js";
 import { runJjCommand } from "../../../utils/run-jj-command.js";
 import {
+  assertJjRestorationResolved,
+  beginJjCheckpointRestoration,
+  completeJjCheckpointRestoration,
   readJjArchiveCheckpoint,
   restoreJjCheckpoint,
   jjArchiveCheckpointPath,
   readJjCheckpoint,
   validateJjCheckpoint,
   writeJjCheckpoint,
+  type JjRestorePhase,
   type JjCheckpoint,
   type JjCheckpointOperation,
   JjCheckpointError,
@@ -251,6 +255,7 @@ export function createWorkspaceRecoveryService(deps: {
   ): Promise<UnavailableRecoveryState | RecoveryPlan> {
     const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
     try {
+      await assertJjRestorationResolved(backingRoot, deps.paseoHome);
       if (jjWorkspaceAuthority(workspace) === "managed") {
         const registered = await validateJjRestoreBacking({
           workspace,
@@ -344,6 +349,7 @@ export function createWorkspaceRecoveryService(deps: {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
     }
     if (jjWorkspaceAuthority(resolved.workspace) === "managed") {
+      await assertJjRestorationResolved(currentRoot, deps.paseoHome);
       const checkpoint = await readJjCheckpoint(currentRoot, deps.paseoHome);
       if (checkpoint) {
         validateJjCheckpoint(checkpoint, currentRoot);
@@ -612,6 +618,28 @@ export function createWorkspaceRecoveryService(deps: {
     }
   }
 
+  async function validateCompletedRestoration(
+    worktreePath: string,
+    phase: JjRestorePhase,
+  ): Promise<void> {
+    const checkpoint = await readJjCheckpoint(worktreePath, deps.paseoHome);
+    const actual = await getJjChangeMeta(worktreePath, "@", {
+      paseoHome: deps.paseoHome,
+      worktreesRoot: deps.worktreesRoot,
+    });
+    if (
+      !checkpoint ||
+      !actual ||
+      actual.commitId !== phase.selection.commitId ||
+      actual.changeId !== phase.selection.changeId
+    )
+      throw new JjCheckpointError(
+        "Restoration did not retain the exact saved native selection; reconciliation is required.",
+      );
+    validateJjCheckpoint(checkpoint, worktreePath);
+    await completeJjCheckpointRestoration(phase, deps.paseoHome);
+  }
+
   async function recreateArchivedJjWorkspace(
     workspace: PersistedWorkspaceRecord,
     sourceRepoRoot: string,
@@ -660,6 +688,10 @@ export function createWorkspaceRecoveryService(deps: {
     // A surviving nonempty directory blocks `jj workspace add`. Move it aside
     // (never delete — it may hold files the pin does not cover); the orphan
     // name records what happened for manual inspection.
+    const archiveCheckpoint = await readJjArchiveCheckpoint(worktreePath, pin, deps.paseoHome);
+    const phase = archiveCheckpoint
+      ? await beginJjCheckpointRestoration(archiveCheckpoint, pin, deps.paseoHome)
+      : null;
     const orphanPath = await quarantineSurvivingDirectory(worktreePath);
     if (orphanPath) deps.reportOrphan?.(orphanPath);
     try {
@@ -676,6 +708,7 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     await reapplyArchivedCheckpoint(workspace, sourceRepoRoot, worktreePath, pin);
+    if (phase) await validateCompletedRestoration(worktreePath, phase);
 
     try {
       const recreatedWorkspacePath = mapWorkspaceCwdToWorktree({

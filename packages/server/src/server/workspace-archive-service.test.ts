@@ -1255,6 +1255,14 @@ describeIfJj("jj durable archive and recovery", () => {
       "recover me\n",
     );
     expect(await jjRevisionResolves(fixture.repoDir, sub!.recoveryBookmark!)).toBe(true);
+    const { getJjChangeMeta } = await import("../utils/checkout-jj.js");
+    expect(
+      fixture.jj(
+        ["new", "-m", "Intentional selection by the restored sibling"],
+        created.worktreePath,
+      ).status,
+    ).toBe(0);
+    const siblingSelection = (await getJjChangeMeta(created.worktreePath, "@"))!;
     await expect(recovery.restore("ws-root")).resolves.toEqual({
       workspaceId: "ws-root",
       action: "unarchive",
@@ -1262,6 +1270,9 @@ describeIfJj("jj durable archive and recovery", () => {
     expect(await jjRevisionResolves(fixture.repoDir, sub!.recoveryBookmark!)).toBe(true);
     expect((await reloaded.get("ws-sub"))?.recoveryBookmark).toBeNull();
     expect((await reloaded.get("ws-root"))?.recoveryBookmark).toBeNull();
+    expect((await getJjChangeMeta(created.worktreePath, "@"))!.commitId).toBe(
+      siblingSelection.commitId,
+    );
   });
 });
 
@@ -1509,6 +1520,8 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       });
       await service.restore("lifecycle-a");
       const restored = (await readJjCheckpoint(root, h.fixture.dir))!;
+      const { readJjRestorePhase } = await import("../utils/jj-checkpoint.js");
+      expect((await readJjRestorePhase(root, h.fixture.dir))!.status).toBe("completed");
       expect(restored.publication).toEqual(publication);
       expect(restored.savedWip).toEqual([wip]);
       expect(restored.completedChanges).toEqual(checkpoint.completedChanges);
@@ -1594,6 +1607,120 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     expect(await h.registry.get("lifecycle-a")).toEqual(archived);
     expect(await jjRevisionResolves(h.fixture.repoDir, archived.recoveryBookmark!)).toBe(true);
   });
+
+  test.each(
+    [false, true].flatMap((subproject) =>
+      ["registered", "uuid", "metadata", "pending-edit"].map((stage) => ({ subproject, stage })),
+    ),
+  )(
+    "interrupted restore refuses a fresh child after registry reload ($stage, subproject=$subproject)",
+    async ({ stage, subproject }) => {
+      const h = await lifecycleHarness();
+      const root = h.created.worktreePath;
+      mkdirSync(path.join(root, "sub"));
+      writeFileSync(path.join(root, "sub", "work.txt"), "retained exact-pin work\n");
+      if (subproject)
+        await h.registry.update("lifecycle-a", (record) => ({
+          ...record,
+          cwd: path.join(root, "sub"),
+        }));
+      const { getJjChangeMeta, getJjOperationId, jjDescribe, jjPush } =
+        await import("../utils/checkout-jj.js");
+      const {
+        readJjArchiveCheckpoint,
+        readJjRestorePhase,
+        beginJjCheckpointRestoration,
+        restoreJjCheckpoint,
+        readJjCheckpoint,
+        writeJjCheckpoint,
+      } = await import("../utils/jj-checkpoint.js");
+      const { restoreJjWorkspace } = await import("../utils/worktree-jj.js");
+      const { writeJjWorkspaceIncarnation, writePaseoWorktreeMetadataFile } =
+        await import("../utils/worktree-metadata.js");
+      const context = { paseoHome: h.fixture.dir, worktreesRoot: h.recoveryDeps.worktreesRoot };
+      await jjDescribe(root, { message: "Saved selected native change" }, context);
+      await h.archive(createWorkspaceArchiveAuthorityPorts(h.registry));
+      const archived = (await h.registry.get("lifecycle-a"))!;
+      const pin = archived.recoveryBookmark!;
+      const checkpoint = (await readJjArchiveCheckpoint(root, pin, h.fixture.dir))!;
+      await beginJjCheckpointRestoration(checkpoint, pin, h.fixture.dir);
+      await restoreJjWorkspace({
+        cwd: h.fixture.repoDir,
+        worktreePath: root,
+        workspaceName: "lifecycle",
+        revision: pin,
+      });
+      if (stage !== "registered") writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
+      if (stage === "metadata") writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
+      if (stage === "pending-edit") {
+        await restoreJjCheckpoint({
+          backingRoot: root,
+          sharedStore: checkpoint.sharedStore,
+          incarnation: archived.jjWorkspaceId!,
+          paseoHome: h.fixture.dir,
+          recoveryPin: pin,
+        });
+        const current = (await readJjCheckpoint(root, h.fixture.dir))!;
+        const before = (await getJjChangeMeta(root, "@", context))!;
+        await writeJjCheckpoint(
+          {
+            ...current,
+            operations: [
+              ...current.operations,
+              {
+                id: "interrupted-edit",
+                kind: "restore",
+                before,
+                target: checkpoint.selection,
+                beforeOperation: await getJjOperationId(root, context),
+                recoveryPin: pin,
+                affectedHeads: [],
+                status: "pending",
+                after: null,
+                afterOperation: null,
+                error: null,
+              },
+            ],
+          },
+          h.fixture.dir,
+        );
+      }
+      const child = (await getJjChangeMeta(root, "@"))!;
+      expect(child.changeId).not.toBe(checkpoint.selection.changeId);
+      const reloaded = new FileBackedWorkspaceRegistry(
+        path.join(h.fixture.dir, "registry.json"),
+        pino({ level: "silent" }),
+      );
+      await reloaded.initialize();
+      const service = createWorkspaceRecoveryService({
+        ...h.recoveryDeps,
+        getWorkspace: (id) => reloaded.get(id),
+        unarchiveWorkspace: async (record) => {
+          await reloaded.update(record.workspaceId, (current) => ({
+            ...current,
+            archivedAt: null,
+          }));
+        },
+      });
+      expect(await service.inspect("lifecycle-a")).toMatchObject({ kind: "unavailable" });
+      await expect(service.restore("lifecycle-a")).rejects.toThrow(
+        "restoration requires reconciliation",
+      );
+      await expect(
+        jjDescribe(archived.cwd, { message: "Must not edit the fresh child" }, context),
+      ).rejects.toThrow("restoration requires reconciliation");
+      await expect(jjPush(archived.cwd, context)).rejects.toThrow(
+        "restoration requires reconciliation",
+      );
+      expect((await getJjChangeMeta(root, "@"))!.commitId).toBe(child.commitId);
+      expect(await reloaded.get("lifecycle-a")).toEqual(archived);
+      expect((await readJjRestorePhase(root, h.fixture.dir))!.status).toBe("pending");
+      expect(readFileSync(path.join(root, "sub", "work.txt"), "utf8")).toBe(
+        "retained exact-pin work\n",
+      );
+      expect(await jjRevisionResolves(h.fixture.repoDir, pin)).toBe(true);
+    },
+  );
 
   test("a restore waits for in-flight archive pin persistence before resolving its plan", async () => {
     const h = await lifecycleHarness();
