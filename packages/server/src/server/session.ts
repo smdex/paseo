@@ -930,6 +930,12 @@ export class Session {
       unarchiveWorkspace: async (workspace) => {
         await this.workspaceProvisioning.ensureWorkspaceRecordUnarchived(workspace);
       },
+      clearRecoveryPin: async (workspaceId) => {
+        await this.workspaceRegistry.update(workspaceId, (record) => ({
+          ...record,
+          recoveryBookmark: null,
+        }));
+      },
     });
     this.checkoutSession = new CheckoutSession({
       host: {
@@ -5258,6 +5264,12 @@ export class Session {
         findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
         listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
         archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
+        setWorkspaceRecoveryPin: async (workspaceId, pin) => {
+          await this.workspaceRegistry.update(workspaceId, (record) => ({
+            ...record,
+            recoveryBookmark: pin,
+          }));
+        },
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
           this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
@@ -7511,6 +7523,12 @@ export class Session {
           getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
           listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
           archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
+          setWorkspaceRecoveryPin: async (workspaceId, pin) => {
+            await this.workspaceRegistry.update(workspaceId, (record) => ({
+              ...record,
+              recoveryBookmark: pin,
+            }));
+          },
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
             this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>

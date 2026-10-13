@@ -48,6 +48,7 @@ import { expandTilde, getRealpathAwareRelativePath, isPathInsideRoot } from "./p
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
+export { writePaseoWorktreeMetadata } from "./worktree-metadata.js";
 
 const execFileAsync = promisify(execFile);
 const READ_ONLY_GIT_ENV = {
@@ -838,7 +839,7 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
 
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
-function deriveShortAlphanumericHash(value: string): string {
+export function deriveShortAlphanumericHash(value: string): string {
   const digest = createHash("sha256").update(value).digest();
   let hashValue = 0n;
   for (let index = 0; index < 8; index += 1) {
@@ -923,7 +924,7 @@ export function mapWorkspaceRelativeCwdToWorktree(input: {
   return mappedCwd;
 }
 
-function normalizePathForOwnership(input: string): string {
+export function normalizePathForOwnership(input: string): string {
   try {
     return realpathSync(input);
   } catch {
@@ -1031,7 +1032,7 @@ function parseWorktreeList(output: string): ParsedPaseoWorktreeInfo[] {
   return entries;
 }
 
-function resolveWorktreeCreatedAtIso(worktreePath: string): string {
+export function resolveWorktreeCreatedAtIso(worktreePath: string): string {
   try {
     const stats = statSync(worktreePath);
     const birthtimeMs = stats.birthtimeMs;
@@ -1185,7 +1186,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeDirectoryWithRetries(path: string): Promise<void> {
+export async function removeDirectoryWithRetries(path: string): Promise<void> {
   if (!(await pathExists(path))) {
     return;
   }
