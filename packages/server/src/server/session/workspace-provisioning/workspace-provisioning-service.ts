@@ -161,7 +161,8 @@ function assertWorkspaceAuthority(
 async function validateJjWorkspaceIncarnation(workspace: PersistedWorkspaceRecord): Promise<void> {
   const backingRoot = workspaceBackingRoot(workspace);
   const expected = workspace.jjWorkspaceId ?? workspace.recoveryBookmark;
-  if (!expected && (workspace.kind !== "worktree" || !workspace.isPaseoOwnedWorktree)) return;
+  // Legacy worktree ownership defaults to false; it is not incarnation authority.
+  if (!expected && workspace.kind !== "worktree") return;
   const sourceRoot = workspace.mainRepoRoot ?? backingRoot;
   const sourceBackend = await resolveEffectiveBackend(sourceRoot);
   const backingBackend = await resolveEffectiveBackend(backingRoot);
