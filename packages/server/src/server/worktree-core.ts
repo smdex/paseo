@@ -1,3 +1,4 @@
+import type { Logger } from "pino";
 import { createNameId } from "mnemonic-id";
 
 import type { ForgeService } from "../services/forge-service.js";
@@ -34,6 +35,7 @@ export interface CreateWorktreeCoreInput {
 }
 
 export interface CreateWorktreeCoreDeps {
+  logger?: Pick<Logger, "warn">;
   github: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
@@ -138,6 +140,7 @@ async function createWorktreeCoreWithPriority(
       runSetup: input.runSetup ?? true,
       paseoHome: input.paseoHome,
       worktreesRoot: input.worktreesRoot,
+      logger: deps.logger,
     }),
     intent,
     repoRoot,
@@ -155,6 +158,7 @@ async function createWorktreeForBackend(input: {
   worktreeSlug: string;
   source: Parameters<typeof createWorktree>[0]["source"];
   runSetup: boolean;
+  logger?: Pick<Logger, "warn">;
   paseoHome?: string;
   worktreesRoot?: string;
 }): Promise<CreatedWorktree> {

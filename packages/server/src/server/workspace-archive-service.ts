@@ -21,6 +21,7 @@ import type {
 import { createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { withWorkspaceLifecycle, workspaceLifecycleKey } from "../utils/workspace-lifecycle.js";
 import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
 import { deleteJjPaseoWorktree } from "../utils/worktree-jj.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
@@ -135,14 +136,44 @@ export async function archiveByScope(
   dependencies: ArchiveDependencies,
   request: ArchiveByScopeRequest,
 ): Promise<ArchiveResult> {
-  return runWithGitCommandPriority("high", () => archiveByScopeWithPriority(dependencies, request));
+  const scope = request.scope;
+  const record =
+    scope.kind === "workspace"
+      ? ((await dependencies.getWorkspace?.(scope.workspaceId)) ??
+        (await dependencies.listActiveWorkspaces()).find(
+          (candidate) => candidate.workspaceId === scope.workspaceId,
+        ))
+      : null;
+  const path = scope.kind === "worktree" ? scope.targetPath : (record?.worktreeRoot ?? record?.cwd);
+  if (!path) return { archivedAgentIds: [], archivedWorkspaceIds: [], removedDirectory: false };
+  const ownership = await isPaseoOwnedWorktreeCwd(path, {
+    paseoHome: dependencies.paseoHome,
+    worktreesRoot: dependencies.paseoWorktreesBaseRoot,
+    knownGitCommonDir: null,
+  });
+  const backingRoot =
+    record?.worktreeRoot ?? (ownership.allowed ? ownership.worktreePath : path) ?? path;
+  return withWorkspaceLifecycle(backingRoot, () =>
+    runWithGitCommandPriority("high", () =>
+      archiveByScopeWithPriority(dependencies, request, backingRoot),
+    ),
+  );
 }
 
 async function archiveByScopeWithPriority(
   dependencies: ArchiveDependencies,
   request: ArchiveByScopeRequest,
+  lockedRoot: string,
 ): Promise<ArchiveResult> {
   const target = await resolveArchiveTarget(dependencies, request.scope);
+  if (
+    target.backing &&
+    workspaceLifecycleKey(target.backing.path) !== workspaceLifecycleKey(lockedRoot)
+  ) {
+    throw new Error(
+      "Workspace placement changed during archive; retry before changing its lifecycle",
+    );
+  }
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
@@ -487,6 +518,11 @@ async function deleteBackingWorktreeForBackend(
       paseoHome: dependencies.paseoHome,
       worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
       persistRecoveryPin,
+      reportQuarantine: (quarantinePath) =>
+        dependencies.sessionLogger?.warn(
+          { quarantinePath, backingRoot: backing.path },
+          "Preserved archived jj workspace directory",
+        ),
       pinKey: pinTargets.size === 1 ? [...pinTargets][0] : (byPath ?? undefined),
     });
     return;

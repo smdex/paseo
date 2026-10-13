@@ -1367,12 +1367,18 @@ function createGitHubPrRemoteRepo(): { tempDir: string; repoDir: string } {
 }
 
 test.skipIf(!isJjAvailable())(
-  "jj provisioning failure forgets the created workspace before removing disk and cleans up its bookmark",
+  "jj provisioning failure forgets the created workspace before removing disk and retains its bookmark",
   async () => {
     const fixture = createScratchJjRepo({ files: { "README.md": "hello\n" } });
     cleanupPaths.push(fixture.dir);
     fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
     const deps = createDeps();
+    const retained: string[] = [];
+    deps.logger = {
+      warn: (info: { retainedBookmark: string }) => {
+        retained.push(info.retainedBookmark);
+      },
+    };
     deps.workspaceGitService.resolveRepoRoot = async () => fixture.repoDir;
     deps.workspaceProvisioning = {
       createWorkspaceForWorktree: async () => {
@@ -1395,7 +1401,8 @@ test.skipIf(!isJjAvailable())(
     expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name)).toEqual([
       "default",
     ]);
-    expect(await jjRevisionResolves(fixture.repoDir, "feature-failed")).toBe(false);
+    expect(await jjRevisionResolves(fixture.repoDir, "feature-failed")).toBe(true);
+    expect(retained).toEqual(["feature-failed"]);
     expect(
       existsSync(
         path.join(

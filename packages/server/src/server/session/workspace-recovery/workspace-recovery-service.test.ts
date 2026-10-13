@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -23,6 +24,7 @@ import {
 } from "../../../utils/worktree-metadata.js";
 import { createWorktree, deletePaseoWorktree } from "../../../utils/worktree.js";
 import {
+  clearWorkspaceRecoveryReference,
   FileBackedWorkspaceRegistry,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
@@ -30,7 +32,11 @@ import {
   type PersistedWorkspaceRecord,
 } from "../../workspace-registry.js";
 import { createWorkspaceRecoveryService } from "./workspace-recovery-service.js";
-import { createJjWorktree } from "../../../utils/worktree-jj.js";
+import {
+  createJjWorktree,
+  deleteJjPaseoWorktree,
+  listJjWorkspaces,
+} from "../../../utils/worktree-jj.js";
 import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
 
 const describeIfJj = describe.skipIf(!isJjAvailable());
@@ -490,7 +496,7 @@ describeIfJj("workspace recovery on jj", () => {
   }) {
     const records = new Map(input.records.map((record) => [record.workspaceId, { ...record }]));
     const cleared: string[] = [];
-    const service = createWorkspaceRecoveryService({
+    const deps: Parameters<typeof createWorkspaceRecoveryService>[0] = {
       paseoHome: "/paseo-home",
       getWorkspace: async (workspaceId) => records.get(workspaceId) ?? null,
       getProject: async (projectId) =>
@@ -502,24 +508,24 @@ describeIfJj("workspace recovery on jj", () => {
           records.set(record.workspaceId, { ...current, archivedAt: null });
         }
       },
-      clearRecoveryPin: async (workspaceId) => {
-        const current = records.get(workspaceId);
-        if (!current) {
-          return 0;
-        }
-        const pin = current.recoveryBookmark ?? null;
-        records.set(workspaceId, { ...current, recoveryBookmark: null });
-        cleared.push(workspaceId);
-        let remaining = 0;
-        for (const record of records.values()) {
-          if (record.workspaceId !== workspaceId && record.recoveryBookmark === pin) {
-            remaining += 1;
-          }
-        }
-        return remaining;
-      },
-    });
-    return { service, records, cleared };
+      clearRecoveryPin: (workspaceId, expectedPin) =>
+        clearWorkspaceRecoveryReference(
+          {
+            update: async (id, updater) => {
+              const current = records.get(id);
+              if (!current) return null;
+              const next = updater(current);
+              records.set(id, next);
+              if (next.recoveryBookmark !== current.recoveryBookmark) cleared.push(id);
+              return next;
+            },
+          },
+          workspaceId,
+          expectedPin,
+        ),
+    };
+    const service = createWorkspaceRecoveryService(deps);
+    return { service, records, cleared, deps };
   }
 
   function jjProjectFixture() {
@@ -572,12 +578,14 @@ describeIfJj("workspace recovery on jj", () => {
       worktreesRoot,
     });
     fixture.jj(["describe", "-m", "surviving work"], created.worktreePath);
-    const { deleteJjPaseoWorktree, recoveryPinName } =
-      await import("../../../utils/worktree-jj.js");
+    let recoveryBookmark = "";
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: created.worktreePath,
       worktreesRoot,
+      persistRecoveryPin: async (pin) => {
+        recoveryBookmark = pin;
+      },
     });
     // Simulate the crash window: forget+quarantine happened, but a partial
     // failure left a directory behind at the original path.
@@ -591,7 +599,7 @@ describeIfJj("workspace recovery on jj", () => {
       worktreeRoot: created.worktreePath,
       mainRepoRoot: fixture.repoDir,
       branch: "feat/survivor",
-      recoveryBookmark: recoveryPinName("survivor"),
+      recoveryBookmark,
     });
     const { service } = jjHarness({ records: [record], project });
 
@@ -610,12 +618,14 @@ describeIfJj("workspace recovery on jj", () => {
       worktreesRoot,
     });
     fixture.jj(["describe", "-m", "pinned work"], created.worktreePath);
-    const { deleteJjPaseoWorktree, recoveryPinName } =
-      await import("../../../utils/worktree-jj.js");
+    let recoveryBookmark = "";
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: created.worktreePath,
       worktreesRoot,
+      persistRecoveryPin: async (pin) => {
+        recoveryBookmark = pin;
+      },
     });
     // Surviving directory from a partial deletion (nonempty → blocks add).
     mkdirSync(created.worktreePath, { recursive: true });
@@ -628,7 +638,7 @@ describeIfJj("workspace recovery on jj", () => {
       worktreeRoot: created.worktreePath,
       mainRepoRoot: fixture.repoDir,
       branch: "feat/restorable",
-      recoveryBookmark: recoveryPinName("restorable"),
+      recoveryBookmark,
     });
     const { service } = jjHarness({ records: [record], project });
 
@@ -661,7 +671,6 @@ describeIfJj("workspace recovery on jj", () => {
       worktreesRoot,
     });
     fixture.jj(["bookmark", "create", pinShared, "-r", "shared-a@"]);
-    const { deleteJjPaseoWorktree } = await import("../../../utils/worktree-jj.js");
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: createdA.worktreePath,
@@ -688,7 +697,7 @@ describeIfJj("workspace recovery on jj", () => {
       branch: "feat/shared-a",
       recoveryBookmark: pinShared,
     });
-    const { service } = jjHarness({ records: [recordA, recordB], project });
+    const { service, records } = jjHarness({ records: [recordA, recordB], project });
     const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
 
     // Restoring ONE record must not consume the pin the sibling still needs.
@@ -699,7 +708,8 @@ describeIfJj("workspace recovery on jj", () => {
       workspaceId: "wks_b",
       action: "unarchive",
     });
-    expect(await jjRevisionResolves(fixture.repoDir, pinShared)).toBe(false);
+    expect(await jjRevisionResolves(fixture.repoDir, pinShared)).toBe(true);
+    expect(records.get("wks_b")?.recoveryBookmark).toBeNull();
   });
 
   it("refuses an invalid recovery reference even when plain-unarchiving a surviving root", async () => {
@@ -720,7 +730,7 @@ describeIfJj("workspace recovery on jj", () => {
     expect(await jjRevisionResolves(fixture.repoDir, "main")).toBe(true);
   });
 
-  it("consumes the recovery pin when the last referencing record restores", async () => {
+  it("clears the last registry reference but retains its recovery pin", async () => {
     const { fixture, worktreesRoot, project } = jjProjectFixture();
     const createdA = await createJjWorktree({
       cwd: fixture.repoDir,
@@ -729,12 +739,14 @@ describeIfJj("workspace recovery on jj", () => {
       worktreesRoot,
     });
     fixture.jj(["describe", "-m", "last ref work"], createdA.worktreePath);
-    const { deleteJjPaseoWorktree, recoveryPinName } =
-      await import("../../../utils/worktree-jj.js");
+    let recoveryBookmark = "";
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: createdA.worktreePath,
       worktreesRoot,
+      persistRecoveryPin: async (pin) => {
+        recoveryBookmark = pin;
+      },
     });
 
     const record = createWorkspace({
@@ -744,12 +756,136 @@ describeIfJj("workspace recovery on jj", () => {
       worktreeRoot: createdA.worktreePath,
       mainRepoRoot: fixture.repoDir,
       branch: "feat/last-ref",
-      recoveryBookmark: recoveryPinName("last-ref"),
+      recoveryBookmark,
     });
     const { service } = jjHarness({ records: [record], project });
     const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
 
     await service.restore("wks_last");
-    expect(await jjRevisionResolves(fixture.repoDir, record.recoveryBookmark ?? "")).toBe(false);
+    expect(await jjRevisionResolves(fixture.repoDir, record.recoveryBookmark ?? "")).toBe(true);
+  });
+  it("serializes sibling restores across service instances before resolving a stale plan", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "concurrent",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "concurrent-feature" },
+    });
+    mkdirSync(join(created.worktreePath, "subproject"));
+    writeFileSync(join(created.worktreePath, "subproject", "base.txt"), "base\n");
+    let pin = "";
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      worktreesRoot,
+      persistRecoveryPin: async (value) => {
+        pin = value;
+      },
+    });
+    const common = {
+      projectId: project.projectId,
+      worktreeRoot: created.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      recoveryBookmark: pin,
+      branch: "concurrent-feature",
+      baseBranch: "main",
+    };
+    const harness = jjHarness({
+      project,
+      records: [
+        createWorkspace({ ...common, workspaceId: "restore-a", cwd: created.worktreePath }),
+        createWorkspace({
+          ...common,
+          workspaceId: "restore-b",
+          cwd: join(created.worktreePath, "subproject"),
+        }),
+      ],
+    });
+    const atSourceCheck = Promise.withResolvers<void>();
+    const continueFirst = Promise.withResolvers<void>();
+    const secondPlacementRead = Promise.withResolvers<void>();
+    const secondDirectoryChecks: string[] = [];
+    const orphans: string[] = [];
+    const first = createWorkspaceRecoveryService({
+      ...harness.deps,
+      isDirectory: async (path) => {
+        if (path === fixture.repoDir) {
+          atSourceCheck.resolve();
+          await continueFirst.promise;
+        }
+        return existsSync(path);
+      },
+      unarchiveWorkspace: async (record) => {
+        await harness.deps.unarchiveWorkspace(record);
+        writeFileSync(join(created.worktreePath, "live-after-first.txt"), "keep live\n");
+      },
+      reportOrphan: (path) => orphans.push(path),
+    });
+    const second = createWorkspaceRecoveryService({
+      ...harness.deps,
+      getWorkspace: async (id) => {
+        secondPlacementRead.resolve();
+        return harness.deps.getWorkspace(id);
+      },
+      isDirectory: async (path) => {
+        secondDirectoryChecks.push(path);
+        return existsSync(path);
+      },
+      reportOrphan: (path) => orphans.push(path),
+    });
+    const restoringFirst = first.restore("restore-a");
+    await atSourceCheck.promise;
+    const restoringSecond = second.restore("restore-b");
+    await secondPlacementRead.promise;
+    expect(secondDirectoryChecks).toEqual([]);
+    continueFirst.resolve();
+    await expect(restoringFirst).resolves.toEqual({ workspaceId: "restore-a", action: "restore" });
+    await expect(restoringSecond).resolves.toEqual({
+      workspaceId: "restore-b",
+      action: "unarchive",
+    });
+    expect(orphans).toEqual([]);
+    expect(readFileSync(join(created.worktreePath, "live-after-first.txt"), "utf8")).toBe(
+      "keep live\n",
+    );
+    expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name).sort()).toEqual([
+      "concurrent",
+      "default",
+    ]);
+    expect(harness.records.get("restore-a")?.archivedAt).toBeNull();
+    expect(harness.records.get("restore-b")?.archivedAt).toBeNull();
+  });
+  it("reports retained reference cleanup failure without rejecting an already successful unarchive", async () => {
+    const { fixture, project } = jjProjectFixture();
+    const pin = "paseo/recovery/retained-cleanup";
+    fixture.jj(["bookmark", "create", pin, "--revision", "main"]);
+    const record = createWorkspace({
+      workspaceId: "retained-cleanup",
+      projectId: project.projectId,
+      cwd: fixture.repoDir,
+      worktreeRoot: fixture.repoDir,
+      mainRepoRoot: fixture.repoDir,
+      recoveryBookmark: pin,
+    });
+    const h = jjHarness({ project, records: [record] });
+    const failure = new Error("reference write failed");
+    const warnings: Array<{ pin: string; error: unknown }> = [];
+    const service = createWorkspaceRecoveryService({
+      ...h.deps,
+      clearRecoveryPin: async () => {
+        throw failure;
+      },
+      reportRetainedPin: (retainedPin, error) => warnings.push({ pin: retainedPin, error }),
+    });
+    await expect(service.restore("retained-cleanup")).resolves.toEqual({
+      workspaceId: "retained-cleanup",
+      action: "unarchive",
+    });
+    expect(h.records.get("retained-cleanup")?.archivedAt).toBeNull();
+    expect(h.records.get("retained-cleanup")?.recoveryBookmark).toBe(pin);
+    expect(warnings).toEqual([{ pin, error: failure }]);
+    const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
+    expect(await jjRevisionResolves(fixture.repoDir, pin)).toBe(true);
   });
 });
