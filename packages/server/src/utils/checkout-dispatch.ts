@@ -262,11 +262,15 @@ export async function dispatchCommitChanges(
   await jjCommit(cwd, options, toJjContext(context));
 }
 
-export async function dispatchDiscardChanges(cwd: string, paths: string[]): Promise<void> {
+export async function dispatchDiscardChanges(
+  cwd: string,
+  paths: string[],
+  context?: CheckoutContext,
+): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return discardChanges(cwd, paths);
   }
-  return jjDiscard(cwd, paths);
+  return jjDiscard(cwd, paths, toJjContext(context));
 }
 
 /**
