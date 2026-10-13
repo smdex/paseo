@@ -186,7 +186,8 @@ function assertCheckoutRoot(observation: CheckoutRootObservation): void {
 
 function assertWorkspaceCheckout(observation: WorkspaceCheckoutObservation): void {
   const { workspace, checkout, backingKey } = observation;
-  assertCheckoutRoot({ backingKey, cwd: workspace.cwd, checkout });
+  const hasJjRecoveryAuthority = Boolean(workspace.jjWorkspaceId || workspace.recoveryBookmark);
+  if (hasJjRecoveryAuthority) assertCheckoutRoot({ backingKey, cwd: workspace.cwd, checkout });
   if (
     workspace.jjWorkspaceId &&
     (!checkout.isGit ||
