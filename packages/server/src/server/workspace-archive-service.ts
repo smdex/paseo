@@ -4,6 +4,7 @@ import {
   jjWorkspaceAuthority,
   jjWorkspaceBackingRoot,
   hasDurableJjAuthority,
+  hasPositiveJjEvidence,
   validatePresentJjWorkspace,
 } from "./workspace-jj-authority.js";
 import { detectVcsBackend } from "../utils/vcs-backend.js";
@@ -363,6 +364,7 @@ async function validateJjArchiveIncarnations(
     detectVcsBackend(backing.path) === "jj" ||
     Boolean(readJjWorkspaceIncarnation(backing.path)) ||
     Boolean(backing.mainRepoRoot && detectVcsBackend(backing.mainRepoRoot) === "jj");
+  await validateEmptyPathArchiveAuthority(dependencies, { backing, targetWorkspaceIds: ids });
   if (!dependencies.getWorkspace) {
     const refs = await dependencies.listActiveWorkspaces();
     const protectedRecord = refs.some(
@@ -395,6 +397,30 @@ async function validateJjArchiveIncarnations(
     backing.isPaseoOwnedWorktree = true;
   }
   if (external) backing.isPaseoOwnedWorktree = false;
+}
+
+interface EmptyPathArchiveAuthorityInput {
+  backing: BackingDirectory;
+  targetWorkspaceIds: string[];
+}
+
+async function validateEmptyPathArchiveAuthority(
+  dependencies: ArchiveDependencies,
+  input: EmptyPathArchiveAuthorityInput,
+): Promise<void> {
+  if (input.targetWorkspaceIds.length > 0) return;
+  const { backing } = input;
+  if (!dependencies.findWorkspaceIdsForBackingPath)
+    throw new Error("Cannot inspect retained workspace authority for archive by path");
+  const ids = await dependencies.findWorkspaceIdsForBackingPath(backing.path);
+  for (const id of ids) {
+    const record = await dependencies.getWorkspace?.(id);
+    if (!record) throw new Error("Cannot inspect a retained workspace record for archive by path");
+    if (hasDurableJjAuthority(record) || hasPositiveJjEvidence(record))
+      throw new Error(
+        "No workspace record authorizes archive by path over retained jj authority; directory retained",
+      );
+  }
 }
 
 async function stopWorkspaceSetups(

@@ -11,6 +11,8 @@ import {
   readFileSync,
   realpathSync,
   readFileSync,
+  renameSync,
+
   rmSync,
   statSync,
   writeFileSync,
@@ -999,4 +1001,177 @@ describeIfJj("workspace recovery on jj", () => {
       expect(readFileSync(join(created.worktreePath, "readme.md"), "utf8")).toBe("hello\n");
     },
   );
+  async function missingSelectionFixture(subproject: boolean) {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreesRoot,
+      worktreeSlug: "original",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "original-feature" },
+    });
+    const root = created.worktreePath;
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "sub", "saved.txt"), "approved subproject bytes\n");
+    fixture.jj(["describe", "-m", "old work"], root);
+    const pin = "paseo/recovery/missing-selection";
+    fixture.jj(["bookmark", "create", pin, "-r", "original@"]);
+    const record = createWorkspace({
+      workspaceId: "missing-selection",
+      projectId: project.projectId,
+      cwd: subproject ? join(root, "sub") : root,
+      worktreeRoot: root,
+      mainRepoRoot: fixture.repoDir,
+      jjWorkspaceManagement: "managed",
+      jjWorkspaceId: readJjWorkspaceIncarnation(root)!,
+      recoveryBookmark: pin,
+    });
+    return { fixture, root, record, harness: jjHarness({ records: [record], project }) };
+  }
+
+  test.each([
+    [false, "git"],
+    [true, "git"],
+    [false, "jj"],
+    [true, "jj"],
+  ] as const)(
+    "surviving replacement backing refuses recovery even with missing selected cwd (subproject=%s, backend=%s)",
+    async (subproject, backend) => {
+      const h = await missingSelectionFixture(subproject);
+      h.fixture.jj(["workspace", "forget", "original"]);
+      renameSync(h.root, `${h.root}.original`);
+      if (backend === "git") {
+        mkdirSync(h.root);
+        execFileSync("git", ["init", "-b", "main"], { cwd: h.root, stdio: "pipe" });
+      } else {
+        expect(
+          h.fixture.jj([
+            "workspace",
+            "add",
+            h.root,
+            "--name",
+            "replacement",
+            "--revision",
+            "root()",
+          ]).status,
+        ).toBe(0);
+        writeJjWorkspaceIncarnation(h.root, "replacement-incarnation");
+      }
+      writeFileSync(join(h.root, "user.txt"), "unrelated checkout bytes\n");
+      const orphans: string[] = [];
+      const recovery = createWorkspaceRecoveryService({
+        ...h.harness.deps,
+        reportOrphan: (path) => orphans.push(path),
+      });
+      await expect(recovery.inspect(h.record.workspaceId)).resolves.toMatchObject({
+        kind: "unavailable",
+      });
+      await expect(recovery.restore(h.record.workspaceId)).rejects.toThrow("incarnation");
+      expect(readFileSync(join(h.root, "user.txt"), "utf8")).toBe("unrelated checkout bytes\n");
+      expect(h.harness.records.get(h.record.workspaceId)).toEqual(h.record);
+      expect(h.harness.cleared).toEqual([]);
+      expect(orphans).toEqual([]);
+      expect(
+        h.fixture.jj(["file", "show", "-r", h.record.recoveryBookmark!, "sub/saved.txt"]).stdout,
+      ).toBe("approved subproject bytes\n");
+    },
+  );
+
+  test("registered matching backing with missing subproject is unavailable, not recreated", async () => {
+    const h = await missingSelectionFixture(true);
+    rmSync(h.record.cwd, { recursive: true });
+    const orphans: string[] = [];
+    const recovery = createWorkspaceRecoveryService({
+      ...h.harness.deps,
+      reportOrphan: (path) => orphans.push(path),
+    });
+    await expect(recovery.inspect(h.record.workspaceId)).resolves.toMatchObject({
+      kind: "unavailable",
+      message: expect.stringContaining("selected project directory"),
+    });
+    await expect(recovery.restore(h.record.workspaceId)).rejects.toThrow(
+      "selected project directory",
+    );
+    expect(readJjWorkspaceIncarnation(h.root)).toBe(h.record.jjWorkspaceId);
+    expect(h.harness.records.get(h.record.workspaceId)).toEqual(h.record);
+    expect(h.harness.cleared).toEqual([]);
+    expect(orphans).toEqual([]);
+  });
+
+  test.each(["absent", "plain-partial"] as const)(
+    "missing subproject recovery preserves authorized %s backing restoration",
+    async (mode) => {
+      const h = await missingSelectionFixture(true);
+      h.fixture.jj(["workspace", "forget", "original"]);
+      renameSync(h.root, `${h.root}.original`);
+      if (mode === "plain-partial") {
+        mkdirSync(h.root);
+        writeFileSync(join(h.root, "partial.txt"), "retain partial bytes\n");
+      }
+      const orphans: string[] = [];
+      const recovery = createWorkspaceRecoveryService({
+        ...h.harness.deps,
+        reportOrphan: (path) => orphans.push(path),
+      });
+      await expect(recovery.restore(h.record.workspaceId)).resolves.toMatchObject({
+        action: "restore",
+      });
+      expect(readFileSync(join(h.root, "sub", "saved.txt"), "utf8")).toBe(
+        "approved subproject bytes\n",
+      );
+      expect(h.harness.records.get(h.record.workspaceId)?.archivedAt).toBeNull();
+      if (mode === "plain-partial") {
+        expect(orphans).toHaveLength(1);
+        expect(readFileSync(join(orphans[0]!, "partial.txt"), "utf8")).toBe(
+          "retain partial bytes\n",
+        );
+      } else expect(orphans).toEqual([]);
+    },
+  );
+
+  test.each([false, true])(
+    "immediate pre-rename check refuses checkout materialized after absent-root planning (subproject=%s)",
+    async (subproject) => {
+      const h = await missingSelectionFixture(subproject);
+      h.fixture.jj(["workspace", "forget", "original"]);
+      renameSync(h.root, `${h.root}.original`);
+      let materialized = false;
+      const orphans: string[] = [];
+      const recovery = createWorkspaceRecoveryService({
+        ...h.harness.deps,
+        isDirectory: async (path) => {
+          if (path === h.fixture.repoDir && !materialized) {
+            materialized = true;
+            mkdirSync(h.root);
+            execFileSync("git", ["init", "-b", "main"], { cwd: h.root, stdio: "pipe" });
+            writeFileSync(join(h.root, "user.txt"), "arrived after planning\n");
+          }
+          return existsSync(path) && statSync(path).isDirectory();
+        },
+        reportOrphan: (path) => orphans.push(path),
+      });
+      await expect(recovery.restore(h.record.workspaceId)).rejects.toThrow("incarnation");
+      expect(materialized).toBe(true);
+      expect(readFileSync(join(h.root, "user.txt"), "utf8")).toBe("arrived after planning\n");
+      expect(h.harness.records.get(h.record.workspaceId)).toEqual(h.record);
+      expect(h.harness.cleared).toEqual([]);
+      expect(orphans).toEqual([]);
+    },
+  );
+  test("a surviving backing file cannot be treated as an absent checkout", async () => {
+    const h = await missingSelectionFixture(true);
+    h.fixture.jj(["workspace", "forget", "original"]);
+    renameSync(h.root, `${h.root}.original`);
+    writeFileSync(h.root, "unrelated file at backing pathname\n");
+    const service = createWorkspaceRecoveryService({
+      ...h.harness.deps,
+      isDirectory: async (target) => existsSync(target) && statSync(target).isDirectory(),
+    });
+    await expect(service.inspect(h.record.workspaceId)).resolves.toMatchObject({
+      kind: "unavailable",
+    });
+    await expect(service.restore(h.record.workspaceId)).rejects.toThrow("not a directory");
+    expect(readFileSync(h.root, "utf8")).toBe("unrelated file at backing pathname\n");
+    expect(h.harness.records.get(h.record.workspaceId)).toEqual(h.record);
+    expect(h.harness.cleared).toEqual([]);
+  });
 });
