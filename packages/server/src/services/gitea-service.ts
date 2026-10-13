@@ -1642,25 +1642,39 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     const repository = requireForgeRepositoryContext(input);
     if (repository) {
       if (!repository.headRef || !repository.headSha) return null;
-      const candidates = await runJsonArray(
-        [
-          "api",
-          `repos/${repository.targetRepository}/pulls?state=all&sort=recentupdate&page=1&limit=${CURRENT_PR_LOOKUP_PAGE_SIZE}`,
-        ],
-        input,
-        GiteaCurrentPullRequestApiSchema,
-      );
-      const matches = candidates.filter(
-        (pr) =>
-          pr.head.ref === repository.headRef &&
-          pr.head.sha === repository.headSha &&
-          pr.head.repo?.full_name === repository.sourceRepository &&
-          pr.base.repo?.full_name === repository.targetRepository &&
-          (mapGiteaState(pr.state) === "open" || repository.remoteHeadSha === repository.headSha),
-      );
-      return candidates.length < CURRENT_PR_LOOKUP_PAGE_SIZE && matches.length === 1
-        ? currentPullRequestApiToListItem(matches[0])
-        : null;
+      const matches: GiteaCurrentPullRequestApi[] = [];
+      const seenNumbers = new Set<number>();
+      for (let page = 1; ; page += 1) {
+        const candidates = await runJson(
+          [
+            "api",
+            `repos/${repository.targetRepository}/pulls?state=all&sort=recentupdate&page=${page}&limit=${CURRENT_PR_LOOKUP_PAGE_SIZE}`,
+          ],
+          input,
+          z.array(GiteaCurrentPullRequestApiSchema),
+        );
+        for (const pr of candidates) {
+          // Repeated rows cannot prove complete, stable pagination.
+          if (seenNumbers.has(pr.number)) return null;
+          seenNumbers.add(pr.number);
+        }
+        matches.push(
+          ...candidates.filter(
+            (pr) =>
+              pr.head.ref === repository.headRef &&
+              pr.head.sha === repository.headSha &&
+              pr.head.repo?.full_name === repository.sourceRepository &&
+              pr.base.repo?.full_name === repository.targetRepository &&
+              (mapGiteaState(pr.state) === "open" ||
+                repository.remoteHeadSha === repository.headSha),
+          ),
+        );
+        // A host can cap pages below the requested limit; only an empty JSON
+        // page proves exhaustion. Do not accept a candidate before that evidence.
+        if (candidates.length === 0) {
+          return matches.length === 1 ? currentPullRequestApiToListItem(matches[0]) : null;
+        }
+      }
     }
     const repoIdentity = await resolveCurrentRepoIdentity(input.cwd);
     const expectedHeadOwner = repoIdentity?.owner ?? null;
