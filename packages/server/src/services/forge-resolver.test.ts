@@ -1,4 +1,13 @@
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import { resetJjRuntimeCache } from "../utils/vcs-backend.js";
+import { getJjForgeRepositoryContext } from "../utils/checkout-jj.js";
+import { dispatchGetPullRequestStatus } from "../utils/checkout-dispatch.js";
+import { importJjCheckpoint, writeJjCheckpoint } from "../utils/jj-checkpoint.js";
+import { createGitHubService, type GitHubCommandRunnerOptions } from "./github-service.js";
+import { ForgeRepositoryContextError } from "./forge-service.js";
 
 import { createForgeService } from "./forge-registry.js";
 import { createForgeResolver, forgeForHost, parseRemoteHost } from "./forge-resolver.js";
@@ -12,6 +21,142 @@ function createSshHostnameResolver(hostnameByAlias: Record<string, string | null
 async function resolveSshHostnameAsLiteralHost(host: string): Promise<string | null> {
   return host;
 }
+
+describe.skipIf(!isJjAvailable())("native jj forge read contexts", () => {
+  it("uses native primary, subproject, and custom secondary identity without any Git discovery", async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "sub/a.txt": "hello\n" } });
+    const bin = join(fixture.dir, "bin");
+    const log = join(fixture.dir, "git.log");
+    mkdirSync(bin);
+    writeFileSync(log, "");
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexit 77\n`);
+    chmodSync(join(bin, "git"), 0o755);
+    expect(fixture.jj(["bookmark", "create", "feature", "-r", "@-"]).status).toBe(0);
+    expect(
+      fixture.jj(["git", "remote", "add", "upstream", "https://github.com/acme/repo.git"]).status,
+    ).toBe(0);
+    const secondary = join(fixture.dir, "custom-workspace");
+    expect(
+      fixture.jj(["workspace", "add", secondary, "--name", "custom", "-r", "feature"]).status,
+    ).toBe(0);
+    const resolveRemoteUrl = vi.fn(async () => {
+      throw new Error("Git discovery is forbidden");
+    });
+    const readRunner = vi.fn(async (_args: string[], _options: GitHubCommandRunnerOptions) => ({
+      stdout: "[]",
+      stderr: "",
+    }));
+    const adapter = createGitHubService({
+      resolveGhPath: () => "/fake/gh",
+      resolveRemoteUrl,
+      runner: readRunner,
+    });
+    const resolver = createForgeResolver({ resolveRemoteUrl, createService: () => adapter });
+    vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+    vi.stubEnv("PATH", `${bin}${delimiter}${process.env.PATH}`);
+    resetJjRuntimeCache();
+    try {
+      for (const cwd of [fixture.repoDir, join(fixture.repoDir, "sub"), secondary]) {
+        const resolved = await resolver.resolve(cwd);
+        expect(resolved?.repository).toMatchObject({
+          host: "github.com",
+          sourceRepository: "acme/repo",
+          targetRepository: "acme/repo",
+          headRef: "feature",
+          remoteHeadSha: null,
+        });
+        expect(resolved?.repository?.headSha).toMatch(/^[0-9a-f]{40}$/);
+        await resolved?.service.listPullRequests({ cwd, repository: resolved.repository });
+      }
+      expect(readRunner).toHaveBeenCalledTimes(3);
+      for (const [args, options] of readRunner.mock.calls) {
+        expect(args).toContain("--repo");
+        expect(args).toContain("github.com/acme/repo");
+        expect(options.envOverlay).toMatchObject({ GH_HOST: "github.com" });
+      }
+      expect(resolveRemoteUrl).not.toHaveBeenCalled();
+      expect(readFileSync(log, "utf8")).toBe("");
+      expect(
+        fixture.jj(["git", "remote", "add", "another", "https://github.com/fork/repo.git"]).status,
+      ).toBe(0);
+      await expect(resolver.resolve(fixture.repoDir)).rejects.toBeInstanceOf(
+        ForgeRepositoryContextError,
+      );
+      const headSha = fixture
+        .jj(["log", "--no-graph", "-r", "feature", "-T", "commit_id"])
+        .stdout.trim();
+      const head = {
+        commitId: fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim(),
+        changeId: fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+      };
+      const checkpoint = await importJjCheckpoint({
+        backingRoot: fixture.repoDir,
+        head,
+        paseoHome: fixture.dir,
+      });
+      await writeJjCheckpoint(
+        {
+          ...checkpoint,
+          publication: {
+            localBookmark: "feature",
+            remoteName: "another",
+            remoteUrl: "https://github.com/fork/repo.git",
+            remoteBookmark: "feature",
+            sourceRepository: "fork/repo",
+            targetRepository: "acme/repo",
+          },
+        },
+        fixture.dir,
+      );
+      await expect(
+        getJjForgeRepositoryContext(fixture.repoDir, { paseoHome: fixture.dir }),
+      ).resolves.toMatchObject({
+        sourceRepository: "fork/repo",
+        targetRepository: "acme/repo",
+        headSha,
+      });
+      const mappedResolver = createForgeResolver({
+        paseoHome: fixture.dir,
+        resolveRemoteUrl,
+        createService: () => adapter,
+      });
+      await expect(mappedResolver.resolve(fixture.repoDir)).resolves.toMatchObject({
+        repository: { sourceRepository: "fork/repo", targetRepository: "acme/repo", headSha },
+      });
+      await expect(
+        dispatchGetPullRequestStatus(fixture.repoDir, adapter, undefined, {
+          paseoHome: fixture.dir,
+        }),
+      ).resolves.toMatchObject({
+        status: null,
+        authState: "authenticated",
+        githubFeaturesEnabled: true,
+      });
+      await writeJjCheckpoint(
+        {
+          ...checkpoint,
+          publication: {
+            localBookmark: "different",
+            remoteName: "another",
+            remoteUrl: "https://github.com/fork/repo.git",
+            remoteBookmark: "feature",
+            sourceRepository: "fork/repo",
+            targetRepository: "acme/repo",
+          },
+        },
+        fixture.dir,
+      );
+      await expect(
+        getJjForgeRepositoryContext(fixture.repoDir, { paseoHome: fixture.dir }),
+      ).rejects.toBeInstanceOf(ForgeRepositoryContextError);
+      expect(readFileSync(log, "utf8")).toBe("");
+    } finally {
+      vi.unstubAllEnvs();
+      resetJjRuntimeCache();
+      fixture.dispose();
+    }
+  });
+});
 
 describe("parseRemoteHost", () => {
   it("parses ssh and https remotes", () => {

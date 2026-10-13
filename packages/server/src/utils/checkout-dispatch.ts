@@ -26,6 +26,7 @@ import {
   getCheckoutWorktreeState,
   getCommitFileDiff,
   getPullRequestStatus,
+  forgeAuthStateFromError,
   listBranchSuggestions,
   listCheckoutCommits,
   mergeFromBase,
@@ -51,6 +52,7 @@ import {
   getJjRefDerivedState,
   getJjShortstat,
   getJjSnapshotFacts,
+  getJjForgeRepositoryContext,
   getJjStatus,
   getJjWorktreeState,
   hasJjBookmark,
@@ -556,11 +558,7 @@ export async function dispatchListPaseoWorktrees(options: {
   return listJjPaseoWorktrees(options);
 }
 
-/**
- * Forge PR status needs git plumbing (head sha, ref layout) that the jj path
- * does not provide yet; Phase E decides real forge integration. Meanwhile jj
- * repositories report the unauthenticated no-PR result without spawning git.
- */
+/** Native jj forge reads carry repository and exact bookmark identity, never Git plumbing. */
 export async function dispatchGetPullRequestStatus(
   cwd: string,
   forgeService: Parameters<typeof getPullRequestStatus>[1],
@@ -570,5 +568,26 @@ export async function dispatchGetPullRequestStatus(
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return getPullRequestStatus(cwd, forgeService, options, context);
   }
-  return { status: null, authState: "unauthenticated", githubFeaturesEnabled: false };
+  if (!forgeService) return { status: null, authState: "no_remote", githubFeaturesEnabled: false };
+  const repository = await getJjForgeRepositoryContext(cwd, toJjContext(context));
+  try {
+    const status = repository.headRef
+      ? await forgeService.getCurrentPullRequestStatus({
+          cwd,
+          repository,
+          headRef: repository.headRef,
+          headSha: repository.headSha ?? undefined,
+          ...(options?.force
+            ? { force: true as const, reason: options.reason ?? "" }
+            : { reason: options?.reason }),
+        })
+      : null;
+    return { status, authState: "authenticated", githubFeaturesEnabled: true };
+  } catch (error) {
+    const authState = forgeAuthStateFromError(error);
+    if (authState === "cli_missing" || authState === "unauthenticated") {
+      return { status: null, authState, githubFeaturesEnabled: false };
+    }
+    throw error;
+  }
 }

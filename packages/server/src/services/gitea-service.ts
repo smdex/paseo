@@ -17,11 +17,13 @@ import {
   ForgeCliMissingError,
   CLI_AUTH_PROBE_TIMEOUT_MS,
   defaultResolveRemoteUrl,
+  requireForgeRepositoryContext,
   parseCliJsonOutput,
   ForgeCommandError,
   type ForgeCommandFailureParams,
 } from "./forge-cli-command.js";
 import {
+  ForgeRepositoryContextError,
   computeChecksStatus,
   compareTimelineItems,
   createUnavailableSearchResult,
@@ -35,6 +37,7 @@ import type {
   DisablePullRequestAutoMergeOptions,
   EnablePullRequestAutoMergeOptions,
   ForgeReadOptions,
+  ForgeRepositoryContext,
   ForgeService,
   GetCheckDetailsOptions,
   GetPullRequestOptions,
@@ -121,6 +124,7 @@ export class TeaCommandError extends ForgeCommandError {
 
 export interface TeaCommandRunnerOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   envOverlay?: Record<string, string>;
 }
 
@@ -223,6 +227,7 @@ const GiteaPullRequestViewSchema = z
 const GiteaPullRequestRepoSchema = z
   .object({
     id: z.number().optional(),
+    full_name: z.string().optional(),
     ssh_url: z.string().nullable().optional(),
     html_url: z.string().nullable().optional(),
     owner: z.object({ login: z.string().optional() }).passthrough().nullable().optional(),
@@ -1396,12 +1401,28 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
   const currentPrHeadShaCache = new Map<string, { sha: string; expiresAt: number }>();
 
   async function run(args: string[], runOptions: TeaCommandRunnerOptions): Promise<string> {
+    const repository = requireForgeRepositoryContext(runOptions);
     const teaPath = await resolveTea();
     if (!teaPath) {
       throw new TeaCliMissingError();
     }
     try {
-      const result = await runner(args, runOptions);
+      if (repository && args[0] !== "login") {
+        const logins = await runner(["login", "list", "-o", "json"], { cwd: runOptions.cwd });
+        const login = findTeaLoginNameForHost(logins.stdout, repository.host);
+        if (!login)
+          throw new TeaAuthenticationError({ stderr: `No tea login for ${repository.host}` });
+        args = args.map((arg) =>
+          arg.replace("repos/{owner}/{repo}", `repos/${repository.targetRepository}`),
+        );
+        args = [...args, "--login", login];
+        if (["pr", "issue"].includes(args[0]))
+          args = [...args, "--repo", repository.targetRepository];
+      }
+      const result = await runner(args, {
+        cwd: runOptions.cwd,
+        ...(runOptions.envOverlay ? { envOverlay: runOptions.envOverlay } : {}),
+      });
       return result.stdout.trim();
     } catch (error) {
       throw teaCliRunner.normalizeError(error, { args: redactTeaArgs(args), cwd: runOptions.cwd });
@@ -1459,6 +1480,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
   async function resolveForkCheckoutFacts(
     cwd: string,
     summary: PullRequestSummary,
+    repository?: ForgeRepositoryContext,
   ): Promise<{
     isCrossRepository: boolean;
     headRefKind: "branch" | "pull-ref";
@@ -1482,7 +1504,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         "api",
         `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${summary.number}`,
       ],
-      { cwd },
+      { cwd, repository },
       GiteaPullRequestApiSchema,
     );
     const headRepo = pr.head?.repo ?? null;
@@ -1501,13 +1523,15 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     };
   }
 
-  async function listPullRequestItems(input: {
-    cwd: string;
-    state: "open" | "closed" | "all";
-    query?: string;
-    limit?: number;
-    page?: number;
-  }): Promise<GiteaPrListItem[]> {
+  async function listPullRequestItems(
+    input: ForgeReadOptions & {
+      cwd: string;
+      state: "open" | "closed" | "all";
+      query?: string;
+      limit?: number;
+      page?: number;
+    },
+  ): Promise<GiteaPrListItem[]> {
     const args = ["pr", "list", "--fields", PR_LIST_FIELDS, "--state", input.state, "-o", "json"];
     if (typeof input.limit === "number") {
       args.push("--limit", String(input.limit));
@@ -1515,7 +1539,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (typeof input.page === "number") {
       args.push("--page", String(input.page));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema);
+    const items = await runJsonArray(args, input, GiteaPrListItemSchema);
     const query = input.query?.trim().toLowerCase();
     if (!query) {
       return items;
@@ -1523,16 +1547,18 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     return items.filter((item) => item.title.toLowerCase().includes(query));
   }
 
-  async function runIssueList(input: {
-    cwd: string;
-    query?: string;
-    limit?: number;
-  }): Promise<IssueSummary[]> {
+  async function runIssueList(
+    input: ForgeReadOptions & {
+      cwd: string;
+      query?: string;
+      limit?: number;
+    },
+  ): Promise<IssueSummary[]> {
     const args = ["issue", "list", "--fields", ISSUE_LIST_FIELDS, "--state", "open", "-o", "json"];
     if (typeof input.limit === "number") {
       args.push("--limit", String(input.limit));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaIssueListItemSchema);
+    const items = await runJsonArray(args, input, GiteaIssueListItemSchema);
     const query = input.query?.trim().toLowerCase();
     const filtered = query
       ? items.filter((item) => item.title.toLowerCase().includes(query))
@@ -1540,13 +1566,15 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     return filtered.map(toIssueSummary);
   }
 
-  async function listPullRequestReviewComments(input: {
-    cwd: string;
-    repoOwner: string;
-    repoName: string;
-    prNumber: number;
-    reviewId: number;
-  }): Promise<GiteaTimelineBucket<GiteaReviewComment>> {
+  async function listPullRequestReviewComments(
+    input: ForgeReadOptions & {
+      cwd: string;
+      repoOwner: string;
+      repoName: string;
+      prNumber: number;
+      reviewId: number;
+    },
+  ): Promise<GiteaTimelineBucket<GiteaReviewComment>> {
     return listTimelineBucketPages(
       input,
       `pulls/${input.prNumber}/reviews/${input.reviewId}/comments`,
@@ -1563,7 +1591,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     for (let page = 1; page <= TIMELINE_MAX_PAGES_PER_BUCKET; page += 1) {
       const pageItems = await runJsonArray(
         ["api", timelineApiPath(input, `${suffix}?${timelinePageQuery(page)}`)],
-        { cwd: input.cwd },
+        input,
         itemSchema,
       );
       items.push(...pageItems);
@@ -1574,17 +1602,19 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     return { items, truncated: true };
   }
 
-  async function loadCurrentPullRequestStatus(input: {
-    cwd: string;
-    headRef: string;
-    headSha?: string;
-  }): Promise<CurrentPullRequestStatus | null> {
+  async function loadCurrentPullRequestStatus(
+    input: ForgeReadOptions & {
+      cwd: string;
+      headRef: string;
+      headSha?: string;
+    },
+  ): Promise<CurrentPullRequestStatus | null> {
     const match = await findCurrentPullRequestForHeadRef(input);
     if (!match) {
       return null;
     }
     const status = toCurrentPullRequestStatus(match);
-    return loadCurrentPullRequestChecks(input.cwd, match, status);
+    return loadCurrentPullRequestChecks(input.cwd, match, status, input.repository);
   }
 
   async function resolveCurrentRepoIdentity(
@@ -1602,11 +1632,36 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     return identity ? { owner: identity.owner, name: identity.name } : null;
   }
 
-  async function findCurrentPullRequestForHeadRef(input: {
-    cwd: string;
-    headRef: string;
-    headSha?: string;
-  }): Promise<GiteaPrListItem | null> {
+  async function findCurrentPullRequestForHeadRef(
+    input: ForgeReadOptions & {
+      cwd: string;
+      headRef: string;
+      headSha?: string;
+    },
+  ): Promise<GiteaPrListItem | null> {
+    const repository = requireForgeRepositoryContext(input);
+    if (repository) {
+      if (!repository.headRef || !repository.headSha) return null;
+      const candidates = await runJsonArray(
+        [
+          "api",
+          `repos/${repository.targetRepository}/pulls?state=all&sort=recentupdate&page=1&limit=${CURRENT_PR_LOOKUP_PAGE_SIZE}`,
+        ],
+        input,
+        GiteaCurrentPullRequestApiSchema,
+      );
+      const matches = candidates.filter(
+        (pr) =>
+          pr.head.ref === repository.headRef &&
+          pr.head.sha === repository.headSha &&
+          pr.head.repo?.full_name === repository.sourceRepository &&
+          pr.base.repo?.full_name === repository.targetRepository &&
+          (mapGiteaState(pr.state) === "open" || repository.remoteHeadSha === repository.headSha),
+      );
+      return candidates.length < CURRENT_PR_LOOKUP_PAGE_SIZE && matches.length === 1
+        ? currentPullRequestApiToListItem(matches[0])
+        : null;
+    }
     const repoIdentity = await resolveCurrentRepoIdentity(input.cwd);
     const expectedHeadOwner = repoIdentity?.owner ?? null;
     const openMatch = await findOpenPullRequestForHeadRef(input, expectedHeadOwner);
@@ -1625,7 +1680,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         "api",
         `${repoPath}/pulls?state=all&sort=recentupdate&page=1&limit=${CURRENT_PR_LOOKUP_PAGE_SIZE}`,
       ],
-      { cwd: input.cwd },
+      input,
       GiteaCurrentPullRequestApiSchema,
     );
     const candidates = recentItems.filter((item) => {
@@ -1689,7 +1744,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     cwd: string,
     item: GiteaPrListItem,
     status: CurrentPullRequestStatus,
-  ): Promise<CurrentPullRequestStatus> {
+    repository?: ForgeRepositoryContext,
+  ): Promise<CurrentPullRequestStatus | null> {
     const number = parseGiteaInt(item.index);
     if (number === null || !status.repoOwner || !status.repoName) {
       return status;
@@ -1697,14 +1753,21 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     try {
       const pr = await runJson(
         ["pr", String(number), "-o", "json"],
-        { cwd },
+        { cwd, repository },
         GiteaPullRequestViewSchema,
       );
-      if (!pr.headSha) {
-        return status;
-      }
+      if (
+        repository &&
+        (pr.headSha !== repository.headSha ||
+          pr.head !== repository.headRef ||
+          ((pr.hasMerged || mapGiteaState(pr.state) !== "open") &&
+            repository.remoteHeadSha !== repository.headSha))
+      )
+        return null;
+      if (!pr.headSha) return status;
       const checksInput = {
         cwd,
+        repository,
         repoOwner: status.repoOwner,
         repoName: status.repoName,
         sha: pr.headSha,
@@ -1720,16 +1783,18 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       );
       return applyGiteaChecks(status, combined, actionTasks, actionRequiredRunIds);
     } catch {
-      return status;
+      return repository ? null : status;
     }
   }
 
-  async function loadCombinedCommitStatusBestEffort(input: {
-    cwd: string;
-    repoOwner: string;
-    repoName: string;
-    sha: string;
-  }): Promise<GiteaCombinedCommitStatus> {
+  async function loadCombinedCommitStatusBestEffort(
+    input: ForgeReadOptions & {
+      cwd: string;
+      repoOwner: string;
+      repoName: string;
+      sha: string;
+    },
+  ): Promise<GiteaCombinedCommitStatus> {
     try {
       return await loadCombinedCommitStatus(input);
     } catch (error) {
@@ -1749,7 +1814,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     const sha = encodeURIComponent(input.sha);
     return runJson(
       ["api", `repos/${owner}/${repo}/commits/${sha}/status`],
-      { cwd: input.cwd },
+      input,
       GiteaCombinedCommitStatusSchema,
     );
   }
@@ -1787,12 +1852,14 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     }
   }
 
-  async function loadActionTasksBestEffort(input: {
-    cwd: string;
-    repoOwner: string;
-    repoName: string;
-    sha: string;
-  }): Promise<GiteaActionTask[]> {
+  async function loadActionTasksBestEffort(
+    input: ForgeReadOptions & {
+      cwd: string;
+      repoOwner: string;
+      repoName: string;
+      sha: string;
+    },
+  ): Promise<GiteaActionTask[]> {
     try {
       const tasks = await loadActionTasks(input);
       const matchingTasks = tasks.filter((task) => task.head_sha === input.sha);
@@ -1856,7 +1923,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
           "api",
           `repos/${owner}/${repo}/actions/${endpoint}?${queryPrefix}limit=${GITEA_ACTION_PAGE_LIMIT}&page=${page}`,
         ],
-        { cwd: input.cwd },
+        input,
         GiteaActionsListResponseSchema,
       );
       if (response.workflow_runs.length === 0) break;
@@ -1875,7 +1942,14 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     return parseGiteaActionTasks(await loadGiteaActionPages(input, "tasks"));
   }
 
-  async function resolveCurrentPullRequestHeadSha(cwd: string): Promise<string> {
+  async function resolveCurrentPullRequestHeadSha(
+    cwd: string,
+    repository?: ForgeRepositoryContext,
+  ): Promise<string> {
+    if (repository) {
+      if (!repository.headSha) throw new Error("Gitea check details require an exact forge head");
+      return repository.headSha;
+    }
     const headRef = await resolveCurrentBranch(cwd);
     if (!headRef) {
       throw new Error("Gitea check details require a current branch");
@@ -1910,8 +1984,12 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
   // head can move (a push right after a run was listed), so a user-triggered
   // check-details request for a known PR must resolve against that PR's head,
   // not the branch's, or the requested run no longer maps to the SHA.
-  async function resolvePullRequestHeadShaByNumber(cwd: string, number: number): Promise<string> {
-    const cacheKey = `${cwd}:pr:${number}`;
+  async function resolvePullRequestHeadShaByNumber(
+    cwd: string,
+    number: number,
+    repository?: ForgeRepositoryContext,
+  ): Promise<string> {
+    const cacheKey = `${cwd}:pr:${number}:${JSON.stringify(repository ?? null)}`;
     const cached = currentPrHeadShaCache.get(cacheKey);
     const nowMs = now();
     if (cached && cached.expiresAt > nowMs) {
@@ -1919,11 +1997,11 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     }
     const pr = await runJson(
       ["pr", String(number), "-o", "json"],
-      { cwd },
+      { cwd, repository },
       GiteaPullRequestViewSchema,
     );
-    if (!pr.headSha) {
-      throw new Error(`Gitea pull request #${number} did not include a head SHA`);
+    if (!pr.headSha || (repository && pr.headSha !== repository.headSha)) {
+      throw new Error(`Gitea pull request #${number} did not include the expected head SHA`);
     }
     currentPrHeadShaCache.set(cacheKey, {
       sha: pr.headSha,
@@ -1985,13 +2063,14 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       if (!teaPath) {
         return false;
       }
-      const remoteUrl = await resolveRemoteUrl(input.cwd);
-      const host = remoteUrl ? parseGiteaHostFromRemoteUrl(remoteUrl) : null;
+      const repository = requireForgeRepositoryContext(input);
+      const remoteUrl = repository ? null : await resolveRemoteUrl(input.cwd);
+      const host = repository?.host ?? (remoteUrl ? parseGiteaHostFromRemoteUrl(remoteUrl) : null);
       if (!host) {
         return false;
       }
       try {
-        const stdout = await run(["login", "list", "-o", "json"], { cwd: input.cwd });
+        const stdout = await run(["login", "list", "-o", "json"], input);
         return hostHasLogin(stdout, host);
       } catch {
         return false;
@@ -1999,11 +2078,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     getCurrentPullRequestStatus(input): Promise<CurrentPullRequestStatus | null> {
-      return loadCurrentPullRequestStatus({
-        cwd: input.cwd,
-        headRef: input.headRef,
-        headSha: input.headSha,
-      });
+      return loadCurrentPullRequestStatus(input);
     },
 
     async getPullRequest(input: GetPullRequestOptions): Promise<PullRequestSummary> {
@@ -2012,7 +2087,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       // a not-found rather than silently missing.
       const view = await runJson(
         ["pr", String(input.number), "-o", "json"],
-        { cwd: input.cwd },
+        input,
         GiteaPullRequestViewSchema,
       );
       return viewToPullRequestSummary(view);
@@ -2035,7 +2110,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       input: GetPullRequestOptions,
     ): Promise<PullRequestCheckoutTarget> {
       const summary = await this.getPullRequest(input);
-      const fork = await resolveForkCheckoutFacts(input.cwd, summary);
+      const fork = await resolveForkCheckoutFacts(input.cwd, summary, input.repository);
       const [originPullRef, upstreamPullRef] = buildPullHeadCheckoutRefs(summary.number);
       const checkoutRefs = [originPullRef];
       // for a fork PR a branch with that name on origin belongs to the base repo
@@ -2063,6 +2138,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       return listPullRequestItems({
         cwd: input.cwd,
         state: "open",
+        repository: input.repository,
         query: input.query,
         limit: input.limit,
       }).then((items) => items.map(toPullRequestSummary));
@@ -2085,7 +2161,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         "--base",
         input.base,
       ];
-      const stdout = await run(args, { cwd: input.cwd });
+      const stdout = await run(args, input);
       const url = extractPullRequestUrl(stdout);
       if (!url) {
         throw new TeaCommandError({
@@ -2110,13 +2186,19 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     async mergePullRequest(input: MergePullRequestOptions): Promise<PullRequestMergeResult> {
       assertGiteaDirectMergeReady(input);
       const args = ["pr", "merge", String(input.prNumber), "--style", input.mergeMethod];
-      await run(args, { cwd: input.cwd });
+      await run(args, input);
       return { success: true };
     },
 
     async getPullRequestTimeline(
       input: GetPullRequestTimelineOptions,
     ): Promise<PullRequestTimeline> {
+      const repository = requireForgeRepositoryContext(input);
+      if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
+        throw new ForgeRepositoryContextError(
+          "Timeline repository differs from the explicit target",
+        );
+      }
       const identity = {
         prNumber: input.prNumber,
         repoOwner: input.repoOwner,
@@ -2125,7 +2207,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       try {
         const pr = await runJson(
           ["pr", String(input.prNumber), "-o", "json"],
-          { cwd: input.cwd },
+          input,
           GiteaPullRequestViewSchema,
         );
         const [commentsResult, reviewsResult] = await Promise.allSettled([
@@ -2164,6 +2246,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
                 repoName: input.repoName,
                 prNumber: input.prNumber,
                 reviewId: review.id,
+                repository: input.repository,
               }),
             ),
           ),
@@ -2203,6 +2286,10 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     async getCheckDetails(input: GetCheckDetailsOptions): Promise<CheckDetails> {
+      const repository = requireForgeRepositoryContext(input);
+      if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
+        throw new ForgeRepositoryContextError("Checks repository differs from the explicit target");
+      }
       if (!input.repoOwner || !input.repoName) {
         throw new Error("Gitea getCheckDetails requires repoOwner and repoName");
       }
@@ -2211,10 +2298,15 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       }
       const sha =
         input.changeRequestNumber !== undefined
-          ? await resolvePullRequestHeadShaByNumber(input.cwd, input.changeRequestNumber)
-          : await resolveCurrentPullRequestHeadSha(input.cwd);
+          ? await resolvePullRequestHeadShaByNumber(
+              input.cwd,
+              input.changeRequestNumber,
+              input.repository,
+            )
+          : await resolveCurrentPullRequestHeadSha(input.cwd, input.repository);
       const combined = await loadCombinedCommitStatusBestEffort({
         cwd: input.cwd,
+        repository: input.repository,
         repoOwner: input.repoOwner,
         repoName: input.repoName,
         sha,
@@ -2225,6 +2317,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       }
       const tasks = await loadActionTasksBestEffort({
         cwd: input.cwd,
+        repository: input.repository,
         repoOwner: input.repoOwner,
         repoName: input.repoName,
         sha,
@@ -2246,13 +2339,12 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       const shouldFetchIssues = kinds.includes("issue");
       const shouldFetchMergeRequests = kinds.includes("change_request");
       const [issuesResult, mergeRequestsResult] = await Promise.allSettled([
-        shouldFetchIssues
-          ? runIssueList({ cwd: input.cwd, query: input.query, limit: input.limit })
-          : Promise.resolve(null),
+        shouldFetchIssues ? runIssueList(input) : Promise.resolve(null),
         shouldFetchMergeRequests
           ? listPullRequestItems({
               cwd: input.cwd,
               state: "open",
+              repository: input.repository,
               query: input.query,
               limit: input.limit,
             }).then((items) => items.map(toPullRequestSummary))

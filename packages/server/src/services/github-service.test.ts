@@ -17,6 +17,7 @@ import {
   type GitHubPullRequestStatusFacts,
 } from "./github-service.js";
 import { isPlatform } from "../test-utils/platform.js";
+import type { ForgeRepositoryContext } from "./forge-service.js";
 import { CheckoutPrStatusResponseSchema } from "@getpaseo/protocol/messages";
 
 const EXPECTED_GITHUB_FAST_POLL_MS = 20_000;
@@ -524,6 +525,150 @@ function pullRequestTimelineJson(overrides: Record<string, unknown> = {}): strin
 }
 
 describe("ForgeService", () => {
+  it("routes explicit read identities across hosts, targets and same-name forks, with F/H-safe caches and polls", async () => {
+    vi.useFakeTimers();
+    const repository: ForgeRepositoryContext = {
+      host: "github.one.invalid",
+      targetRepository: "parent/repo",
+      sourceRepository: "fork/repo",
+      headRef: "feature/fork",
+      headSha: "1".repeat(40),
+      remoteHeadSha: "1".repeat(40),
+    };
+    let source = repository.sourceRepository;
+    let headSha = repository.headSha;
+    let state = "OPEN";
+    const calls: Array<{ args: string[]; options: GitHubCommandRunnerOptions }> = [];
+    const runner: GitHubCommandRunner = async (args, options) => {
+      calls.push({ args, options });
+      if (args[0] === "api" && args[1].startsWith("repos/"))
+        return {
+          stdout: JSON.stringify([
+            {
+              number: 42,
+              state: state.toLowerCase(),
+              head: { ref: repository.headRef, sha: headSha, repo: { full_name: source } },
+              base: {
+                repo: {
+                  full_name:
+                    options.envOverlay?.GH_HOST === repository.host ? "parent/repo" : "other/repo",
+                },
+              },
+            },
+          ]),
+          stderr: "",
+        };
+      if (args[0] === "pr" && args[1] === "view")
+        return {
+          stdout: currentPullRequestJson({
+            state,
+            headRefOid: headSha,
+            headRepositoryOwner: { login: "fork" },
+            url: `https://${options.envOverlay?.GH_HOST}/${options.envOverlay?.GH_HOST === repository.host ? "parent/repo" : "other/repo"}/pull/42`,
+          }),
+          stderr: "",
+        };
+      if (args[0] === "api" && args[1] === "graphql")
+        return { stdout: currentPullRequestGithubFactsJson(), stderr: "" };
+      return { stdout: "[]", stderr: "" };
+    };
+    const resolveRemoteUrl = vi.fn(async () => {
+      throw new Error("implicit repository discovery");
+    });
+    const service = createGitHubService({
+      runner,
+      resolveGhPath: () => "/fake/gh",
+      resolveRemoteUrl,
+    });
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    const callback = vi.fn();
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      ...input,
+      onStatus: callback,
+    });
+    try {
+      expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(42);
+      const count = calls.length;
+      await service.getCurrentPullRequestStatus(input);
+      expect(calls).toHaveLength(count);
+      const other = { ...repository, host: "github.two.invalid", targetRepository: "other/repo" };
+      expect(
+        (await service.getCurrentPullRequestStatus({ ...input, repository: other }))?.number,
+      ).toBe(42);
+      expect(
+        calls.slice(count).every(({ options }) => options.envOverlay?.GH_HOST === other.host),
+      ).toBe(true);
+      expect(calls.slice(count).find(({ args }) => args[0] === "pr")?.args).toContain(
+        "github.two.invalid/other/repo",
+      );
+      source = "same-name/repo";
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, sourceRepository: "another/repo" },
+        }),
+      ).toBeNull();
+      source = repository.sourceRepository;
+      headSha = "2".repeat(40);
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        }),
+      ).toBeNull();
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha, remoteHeadSha: null },
+          headSha,
+        }),
+      ).toMatchObject({ headRefName: repository.headRef });
+      state = "MERGED";
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha, remoteHeadSha: null },
+          headSha,
+          force: true,
+          reason: "terminal-head-proof",
+        }),
+      ).toBeNull();
+      expect(
+        (
+          await service.getCurrentPullRequestStatus({
+            ...input,
+            repository: { ...repository, headSha, remoteHeadSha: headSha },
+            headSha,
+          })
+        )?.state,
+      ).toBe("merged");
+      await expect(
+        service.getPullRequestTimeline?.({
+          cwd: input.cwd,
+          repository,
+          repoOwner: "wrong",
+          repoName: "repo",
+          prNumber: 42,
+        }),
+      ).rejects.toThrow("differs from the explicit target");
+      expect(resolveRemoteUrl).not.toHaveBeenCalled();
+      subscription?.unsubscribe();
+      callback.mockClear();
+      const afterDispose = calls.length;
+      await vi.advanceTimersByTimeAsync(400_000);
+      expect(callback).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(afterDispose);
+    } finally {
+      subscription?.unsubscribe();
+      service.dispose?.();
+      vi.useRealTimers();
+    }
+  });
   beforeEach(() => {
     vi.useFakeTimers();
   });

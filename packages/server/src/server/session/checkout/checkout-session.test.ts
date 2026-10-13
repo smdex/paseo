@@ -13,7 +13,11 @@ import {
 import type { GitMutationService } from "../git-mutation/git-mutation-service.js";
 import { createGitHubService } from "../../../services/github-service.js";
 import { ForgeCliMissingError } from "../../../services/forge-cli-command.js";
-import type { ForgeService } from "../../../services/forge-service.js";
+import {
+  ForgeRepositoryContextError,
+  type ForgeRepositoryContext,
+  type ForgeService,
+} from "../../../services/forge-service.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type {
   CheckoutDiffCompareInput,
@@ -1404,6 +1408,117 @@ describe("CheckoutSession", () => {
   });
 
   describe("timeline routing", () => {
+    it("responds with a read error when explicit repository resolution fails closed", async () => {
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          resolveForge: async () => {
+            throw new ForgeRepositoryContextError("Ambiguous jj remote");
+          },
+        },
+      });
+      await checkout.handlePullRequestTimelineRequest({
+        type: "pull_request_timeline_request",
+        cwd: "/repo",
+        prNumber: 14,
+        repoOwner: "g",
+        repoName: "r",
+        requestId: "explicit-failure",
+      });
+      expect(emitted.at(-1)).toMatchObject({
+        type: "pull_request_timeline_response",
+        payload: { items: [], authState: "error", error: { message: "Ambiguous jj remote" } },
+      });
+    });
+
+    itIfJj(
+      "passes native jj repository identity to timeline, checks, and search reads",
+      async () => {
+        const fixture = createScratchJjRepo({ colocate: false });
+        sessionDisposables.push(fixture.dispose);
+        const repository: ForgeRepositoryContext = {
+          host: "github.com",
+          targetRepository: "parent/repo",
+          sourceRepository: "fork/repo",
+          headRef: "feature",
+          headSha: "1".repeat(40),
+          remoteHeadSha: null,
+        };
+        const reads: Array<ForgeRepositoryContext | undefined> = [];
+        const service: ForgeService = {
+          ...createGitHubService(),
+          async isAuthenticated(input) {
+            reads.push(input.repository);
+            return true;
+          },
+          async getPullRequestTimeline(input) {
+            reads.push(input.repository);
+            return {
+              prNumber: input.prNumber,
+              repoOwner: input.repoOwner,
+              repoName: input.repoName,
+              items: [],
+              truncated: false,
+              error: null,
+            };
+          },
+          async getCheckDetails(input) {
+            reads.push(input.repository);
+            return {
+              checkRunId: 7,
+              name: "check",
+              annotations: [],
+              failedJobs: [],
+              truncated: false,
+            };
+          },
+          async searchIssuesAndPrs(input) {
+            reads.push(input.repository);
+            return {
+              items: [],
+              authState: "authenticated",
+              featuresEnabled: true,
+              githubFeaturesEnabled: true,
+            };
+          },
+        };
+        const { checkout, emitted } = makeCheckoutSession({
+          git: {
+            resolveForge: async () => ({
+              forge: "github",
+              host: repository.host,
+              service,
+              repository,
+            }),
+          },
+        });
+        await checkout.handlePullRequestTimelineRequest({
+          type: "pull_request_timeline_request",
+          cwd: fixture.repoDir,
+          prNumber: 14,
+          repoOwner: "parent",
+          repoName: "repo",
+          requestId: "jj-timeline",
+        });
+        await checkout.handleCheckoutForgeGetCheckDetailsRequest({
+          type: "checkout.forge.get_check_details.request",
+          cwd: fixture.repoDir,
+          checkRunId: 7,
+          repoOwner: "parent",
+          repoName: "repo",
+          requestId: "jj-check",
+        });
+        await checkout.handleForgeSearchRequest({
+          type: "github_search_request",
+          cwd: fixture.repoDir,
+          query: "task",
+          requestId: "jj-search",
+        });
+        expect(reads).toEqual([repository, repository, repository, repository]);
+        expect(emitted).toHaveLength(3);
+        expect(emitted.find(isCheckDetailsResponse)).toMatchObject({ payload: { success: true } });
+      },
+    );
+
     it("routes the timeline request through the resolved GitLab adapter", async () => {
       const gitlabCalls: Array<{ cwd: string; prNumber: number }> = [];
       const gitlabService: Partial<ForgeService> = {

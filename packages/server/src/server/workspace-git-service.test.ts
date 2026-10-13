@@ -1562,7 +1562,7 @@ describe("WorkspaceGitServiceImpl", () => {
 });
 
 test.skipIf(!isJjAvailable())(
-  "native jj blocks forge lookup, retained polls, and manual forge invalidation even with a forge-shaped remote",
+  "native jj forge refresh and retained polls use explicit context and dispose on head replacement",
   async () => {
     const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
     expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
@@ -1570,9 +1570,16 @@ test.skipIf(!isJjAvailable())(
       repo.jj(["git", "remote", "add", "origin", "https://github.com/acme/repo.git"]).status,
     ).toBe(0);
     const forge = createGitHubServiceStub();
-    const retain = vi.fn(() => ({ unsubscribe() {} }));
+    const unsubscribePoll = vi.fn();
+    const retain = vi.fn(
+      (
+        _input: Parameters<NonNullable<ForgeService["retainCurrentPullRequestStatusPoll"]>>[0],
+        _onUpdate: (status: CurrentPullRequestStatus | null) => void,
+      ) => ({ unsubscribe: unsubscribePoll }),
+    );
     forge.retainCurrentPullRequestStatusPoll = retain;
     const lookups: string[] = [];
+    vi.stubEnv("PASEO_JJ_DISPATCH", "1");
     const service = new WorkspaceGitServiceImpl({
       logger: createTestLogger(),
       paseoHome: repo.dir,
@@ -1593,22 +1600,56 @@ test.skipIf(!isJjAvailable())(
     });
     const subscription = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
     try {
-      await expect(service.resolveForge(repo.repoDir)).resolves.toBeNull();
+      await expect(service.resolveForge(repo.repoDir)).resolves.toMatchObject({
+        forge: "github",
+        repository: {
+          host: "github.com",
+          sourceRepository: "acme/repo",
+          targetRepository: "acme/repo",
+          headRef: "main",
+        },
+      });
       const snapshot = await service.getSnapshot(repo.repoDir, {
         force: true,
         includeForge: true,
         reason: "manual-refresh",
       });
       expect(snapshot.git.vcs).toBe("jj");
-      expect(snapshot.forge.featuresEnabled).toBe(false);
+      expect(snapshot.forge.featuresEnabled).toBe(true);
       expect(snapshot.forge.pullRequest).toBeNull();
       expect(lookups).toEqual([]);
-      expect(retain).not.toHaveBeenCalled();
-      expect(forge.isAuthenticated).not.toHaveBeenCalled();
-      expect(forge.invalidate).not.toHaveBeenCalled();
+      expect(retain).toHaveBeenCalled();
+      const initial = retain.mock.calls.at(-1)?.[0];
+      expect(initial?.repository).toMatchObject({
+        host: "github.com",
+        sourceRepository: "acme/repo",
+        targetRepository: "acme/repo",
+        headRef: "main",
+        headSha: snapshot.git.currentBranch ? expect.any(String) : null,
+      });
+      expect(forge.isAuthenticated).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(forge.invalidate).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(forge.getCurrentPullRequestStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(repo.jj(["describe", "-r", "main", "-m", "rewritten head"]).status).toBe(0);
+      await service.getSnapshot(repo.repoDir, {
+        force: true,
+        includeForge: true,
+        reason: "manual-refresh",
+      });
+      const replacement = retain.mock.calls.at(-1)?.[0];
+      expect(replacement?.repository?.headSha).not.toBe(initial?.repository?.headSha);
+      expect(unsubscribePoll).toHaveBeenCalled();
     } finally {
       subscription.unsubscribe();
       await service.dispose();
+      expect(unsubscribePoll).toHaveBeenCalledTimes(retain.mock.calls.length);
+      vi.unstubAllEnvs();
       repo.dispose();
     }
   },

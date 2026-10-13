@@ -1,4 +1,10 @@
 import { resolve } from "node:path";
+import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
+import {
+  ForgeRepositoryContextError,
+  type ForgeRepositoryContext,
+} from "../services/forge-service.js";
+import { resolveSshHostname } from "./ssh-hostname.js";
 import { randomUUID } from "node:crypto";
 import { withWorkspaceLifecycle } from "./workspace-lifecycle.js";
 import {
@@ -674,6 +680,90 @@ async function getJjDefaultWorkspaceBase({
     ? { refName: current.remoteRef ?? current.localRef ?? "@", displayName: current.name }
     : { refName: "@", displayName: "Current change" };
   return defaultWorkspaceBase;
+}
+
+export async function getJjForgeRepositoryContext(
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<ForgeRepositoryContext & { remoteUrl: string }> {
+  const facts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
+  if (!facts.isJj) throw new ForgeRepositoryContextError("The jj repository is unavailable");
+  const checkpoint = await readJjCheckpoint(facts.identity.workspaceRoot, context?.paseoHome);
+  if (checkpoint) validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
+  const mapping = checkpoint?.publication;
+  let remote = facts.remotes.length === 1 ? facts.remotes[0] : undefined;
+  if (mapping) {
+    remote = facts.remotes.find(
+      (entry) => entry.name === mapping.remoteName && entry.url === mapping.remoteUrl,
+    );
+  }
+  const location = remote ? parseGitRemoteLocation(remote.url) : null;
+  if (!location || !remote)
+    throw new ForgeRepositoryContextError(
+      "Select an unambiguous jj forge remote before reading forge state",
+    );
+  const repository = location.path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const bookmark = jjOwnedBookmark(facts);
+  let headRef = bookmark;
+  let sourceRepository = repository;
+  let targetRepository = repository;
+  if (mapping) {
+    if (!mapping.sourceRepository || !mapping.targetRepository) {
+      throw new ForgeRepositoryContextError(
+        "The saved jj publication mapping has no exact source/target repository",
+      );
+    }
+    if (mapping.localBookmark !== bookmark) {
+      throw new ForgeRepositoryContextError(
+        "The saved jj publication mapping differs from the workspace owner",
+      );
+    }
+    sourceRepository = mapping.sourceRepository;
+    targetRepository = mapping.targetRepository;
+    headRef = mapping.remoteBookmark;
+  }
+  const heads = await readJjForgeHeads(cwd, bookmark, headRef, remote.name, context);
+  return {
+    remoteUrl: remote.url,
+    host: ["ssh", "scp"].includes(location.transport)
+      ? ((await resolveSshHostname(location.host)) ?? location.host)
+      : location.host,
+    targetRepository,
+    sourceRepository,
+    headRef,
+    ...heads,
+  };
+}
+
+async function readJjForgeHeads(
+  cwd: string,
+  bookmark: string | null,
+  headRef: string | null,
+  remoteName: string,
+  context?: JjCheckoutContext,
+): Promise<Pick<ForgeRepositoryContext, "headSha" | "remoteHeadSha">> {
+  async function exactHead(revset: string, required: boolean): Promise<string | null> {
+    const result = await runJj(
+      ["log", "--no-graph", "-r", revset, "-T", COMMIT_ID_LINES_TEMPLATE],
+      { cwd },
+      context,
+    );
+    const ids = result.stdout.trim().split("\n").filter(Boolean);
+    if (!result.truncated && ids.length === 1 && /^[0-9a-f]{40,64}$/.test(ids[0])) return ids[0];
+    if (!required && !result.truncated && ids.length === 0) return null;
+    throw new ForgeRepositoryContextError("The jj forge head is missing or ambiguous");
+  }
+  return {
+    headSha: bookmark
+      ? await exactHead(`bookmarks(exact:${JSON.stringify(bookmark)})`, true)
+      : null,
+    remoteHeadSha: headRef
+      ? await exactHead(
+          `remote_bookmarks(exact:${JSON.stringify(headRef)}, exact:${JSON.stringify(remoteName)})`,
+          false,
+        )
+      : null,
+  };
 }
 
 export async function getJjStatus(
