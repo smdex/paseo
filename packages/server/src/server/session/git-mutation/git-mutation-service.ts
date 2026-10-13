@@ -7,6 +7,7 @@ import type {
 import {
   dispatchExecuteBranchCheckout,
   dispatchExecuteCreateBranchFromBase,
+  resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-session.js";
@@ -119,7 +120,12 @@ export function createGitMutationService(deps: {
         throw new Error(`Branch already exists: ${newBranchName}`);
       }
 
-      await ensureCleanWorkingTree(cwd);
+      // jj preserves the working copy across `jj new` (snapshots ride the
+      // change), so the git clean-tree gate must not reject jj checkouts
+      // (review fix 12).
+      if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+        await ensureCleanWorkingTree(cwd);
+      }
       // --no-track: a branch we create is not a continuation of its base, so it gets no
       // upstream. Without it git hands the new branch `origin/<base>` whenever the base is a
       // remote-tracking ref or branch.autoSetupMerge asks for inheritance, and every later

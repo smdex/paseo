@@ -96,7 +96,20 @@ async function createWorktreeCoreWithPriority(
   const intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
     forge: forge.forge,
     forgeService: forge.service,
-    resolveDefaultBranch: (root) => resolveDefaultBranch(root, deps),
+    resolveDefaultBranch: async (root) => {
+      const base = await resolveDefaultBranch(root, deps).catch(() => null);
+      if (base) {
+        return base;
+      }
+      // jj-only fresh-repo fallback (review fix 16): a repository without
+      // main/master bookmarks still has a base — the working copy, pinned to
+      // its stable commit id by createJjWorktree. Git keeps failing exactly
+      // as before.
+      if ((await resolveEffectiveBackend(root)) === "jj") {
+        return "@";
+      }
+      throw new Error("Unable to resolve repository default branch");
+    },
   });
   let normalizedSlug: string;
 

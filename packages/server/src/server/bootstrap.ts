@@ -91,6 +91,18 @@ export function formatListenTarget(listenTarget: ListenTarget | null): string | 
   return listenTarget.path;
 }
 
+import { resolveJjRuntime } from "../utils/vcs-backend.js";
+
+let jjRuntimeWarmupPromise: Promise<unknown> | null = null;
+
+/** Await the one-shot jj runtime probe (5s-capped) before serving. */
+async function ensureJjRuntimeWarmed(): Promise<void> {
+  if (!jjRuntimeWarmupPromise) {
+    jjRuntimeWarmupPromise = resolveJjRuntime();
+  }
+  await jjRuntimeWarmupPromise;
+}
+
 export async function fanOutReconciledWorkspaceUpdates(input: {
   sessions: Iterable<{
     syncWorkspaceGitObserversForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
@@ -1682,6 +1694,10 @@ export async function createPaseoDaemon(
               logger.info("Daemon password authentication enabled");
             }
 
+            // Settle the jj runtime probe BEFORE the server constructs and
+            // could answer server_info, so checkoutJj is advertised from a
+            // known-good probe rather than a cold mirror (review should-fix 1).
+            await ensureJjRuntimeWarmed();
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,

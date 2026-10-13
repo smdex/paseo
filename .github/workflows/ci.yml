@@ -234,7 +234,14 @@ jobs:
           else
             tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/jj"
           fi
-          bin="$(find "${RUNNER_TEMP}/jj" -type f -name jj | head -n 1)"
+          # The Windows binary is jj.exe; find the per-OS executable name so
+          # the discovered path is never empty (review fix 17).
+          case "${{ runner.os }}" in
+            Windows) exe="jj.exe" ;;
+            *) exe="jj" ;;
+          esac
+          bin="$(find "${RUNNER_TEMP}/jj" -type f -name "${exe}" | head -n 1)"
+          test -n "${bin}"
           "${bin}" --version
           echo "$(dirname "${bin}")" >> "$GITHUB_PATH"
 

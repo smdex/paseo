@@ -42,6 +42,10 @@ const PaseoWorktreeMetadataV2Schema = z.object({
       worktreePort: z.number().int().positive(),
     })
     .optional(),
+  // jj only: the workspace-OWNED feature bookmark this Paseo worktree manages.
+  // Owned bookmarks are advanced by Paseo mutations and never deleted by
+  // recovery flows; derivation never substitutes for a recorded owner.
+  jjBookmark: z.string().min(1).optional(),
 });
 
 const PaseoWorktreeMetadataSchema = z.union([
@@ -247,6 +251,7 @@ export function writePaseoWorktreeMetadata(
     baseRefName: string;
     baseRef?: string;
     changeRequestLookupTarget?: PaseoWorktreeChangeRequestHint;
+    jjBookmark?: string;
   },
 ): void {
   const baseRefName = normalizeBaseRefName(options.baseRefName);
@@ -256,13 +261,16 @@ export function writePaseoWorktreeMetadata(
     assertValidBaseRef(baseRef);
   }
 
+  // jjBookmark only parses on the V2 shape, so its presence upgrades the
+  // record version; plain writes keep the V1 layout unchanged.
   const metadata: PaseoWorktreeMetadata = {
-    version: 1,
+    version: options.jjBookmark ? 2 : 1,
     baseRefName,
     ...(baseRef ? { baseRef } : {}),
     ...(options.changeRequestLookupTarget
       ? { changeRequestLookupTarget: options.changeRequestLookupTarget }
       : {}),
+    ...(options.jjBookmark ? { jjBookmark: options.jjBookmark } : {}),
   };
   writePaseoWorktreeMetadataFile(worktreeRoot, metadata);
 }

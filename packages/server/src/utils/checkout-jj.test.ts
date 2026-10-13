@@ -773,3 +773,49 @@ describeIfJj("checkout-jj remote ops", () => {
     );
   });
 });
+
+describeIfJj("checkout-jj stale reads", () => {
+  it("recovers snapshot facts from a stale working copy (review fix 15)", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["new", "@-", "-m", "base work"]);
+
+    // Rewrite the checked-out commit from a second workspace → stale.
+    const second = join(fixture.dir, "second");
+    fixture.jj(["workspace", "add", second, "--name", "second", "--revision", "main"]);
+    fixture.jj(["rebase", "-s", "@", "-d", "root()"], second);
+
+    // A plain command would fail with "The working copy is stale"; facts reads
+    // recover via update-stale + retry.
+    const facts = await getJjSnapshotFacts(fixture.repoDir);
+    expect(facts.isJj).toBe(true);
+  });
+});
+
+describeIfJj("checkout-jj history first-parent files", () => {
+  it("lists merge-introduced files from the first-parent baseline (review fix 13)", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+
+    // Main line: one described change on the base.
+    fixture.jj(["new", "@-", "-m", "main line"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "a\nmain\n");
+    fixture.jj(["commit", "-m", "main line"]);
+    const mainLine = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+
+    // Side change with its own file.
+    fixture.jj(["new", mainLine, "-m", "side work"]);
+    writeFileSync(join(fixture.repoDir, "side.txt"), "side\n");
+    fixture.jj(["commit", "-m", "side work"]);
+    const side = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+
+    // A real merge: two parents.
+    fixture.jj(["new", mainLine, side, "-m", "merged main line"]);
+
+    const { commits } = await listJjCommits({ cwd: fixture.repoDir });
+    const mergeCommit = commits.find((commit) => commit.subject === "merged main line");
+    expect(mergeCommit).toBeTruthy();
+    // The second-parent file appears in the merge's file list (the combined
+    // diff would show none).
+    expect(mergeCommit?.files.map((file) => file.path)).toContain("side.txt");
+  });
+});

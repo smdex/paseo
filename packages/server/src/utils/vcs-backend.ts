@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export type VcsBackend = "jj" | "git" | "none";
@@ -90,7 +90,10 @@ export function resetJjRuntimeCache(): void {
  * with their own repo detection). Default: on.
  */
 export function isJjDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.PASEO_JJ_DISPATCH !== "0";
+  // Opt-in until the Phase F activation flips the default: every jj path
+  // (dispatch, observation, advertisement) stays dormant unless explicitly
+  // enabled, so incomplete surfaces are never exposed to ordinary users.
+  return env.PASEO_JJ_DISPATCH === "1";
 }
 
 /**
@@ -246,14 +249,29 @@ export function resolveJjRepoIdentity(cwd: string): JjRepoIdentity | null {
 
   const primaryRoot = dirname(dirname(sharedStorePath));
   const colocated = isColocatedStore(sharedStorePath, primaryRoot);
-  return { workspaceRoot, sharedStorePath, colocated, primaryRoot };
+  // Canonicalize the store path (realpath with fallback) so a symlinked
+  // primary and its secondary workspaces report ONE shared identity — the
+  // grouping key for observation and probe coalescing.
+  let canonicalStorePath = sharedStorePath;
+  try {
+    canonicalStorePath = realpathSync(sharedStorePath);
+  } catch {
+    // keep the lexical path when realpath fails (race with removal)
+  }
+  return { workspaceRoot, sharedStorePath: canonicalStorePath, colocated, primaryRoot };
 }
 
 function findJjRoot(startDir: string): string | null {
   let current = startDir;
   for (;;) {
+    // .jj first: a colocated root (both .jj and .git) IS a jj repo. Then .git
+    // blocks the walk: a nested repository is its own repo, never observed
+    // through an enclosing jj store.
     if (hasDirEntry(current, ".jj")) {
       return current;
+    }
+    if (hasDirEntry(current, ".git")) {
+      return null;
     }
     const parent = dirname(current);
     if (parent === current) {

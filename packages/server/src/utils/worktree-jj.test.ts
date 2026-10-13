@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   createJjWorktree,
   deleteJjPaseoWorktree,
+  JjUnsnapshottedFilesError,
   getJjPaseoWorktreesRoot,
   jjRevisionResolves,
   listJjPaseoWorktrees,
@@ -258,6 +259,94 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       .jj(["log", "--no-graph", "-r", "paseo/recovery/doomed", "-T", "description"])
       .stdout.trim();
     expect(description).toBe("precious work");
+  });
+
+  it("blocks deletion when jj refuses to snapshot workspace files", async () => {
+    const fixture = createFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "unsnapshotted",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/unsnapshotted" },
+      worktreesRoot: fixture.worktreesRoot,
+    });
+
+    // A file over snapshot.max-new-file-size is refused by jj (verified on
+    // 0.45.1): it would be LOST by forget+remove, so deletion must block.
+    writeFileSync(join(created.worktreePath, "huge.bin"), Buffer.alloc(1024 * 1024 + 64, 1));
+
+    await expect(
+      deleteJjPaseoWorktree({
+        cwd: fixture.repoDir,
+        worktreePath: created.worktreePath,
+        worktreesRoot: fixture.worktreesRoot,
+      }),
+    ).rejects.toBeInstanceOf(JjUnsnapshottedFilesError);
+    expect(existsSync(created.worktreePath)).toBe(true);
+    expect(workspaceEntries(fixture).map((entry) => entry.name)).toContain("unsnapshotted");
+  });
+
+  it("moves an existing recovery pin to the new head instead of failing open", async () => {
+    const fixture = createFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "repin",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/repin" },
+      worktreesRoot: fixture.worktreesRoot,
+    });
+
+    // First archive pins and persists; restore brings the workspace back with
+    // the OLD pin still present.
+    const pins: string[] = [];
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      worktreesRoot: fixture.worktreesRoot,
+      persistRecoveryPin: async (pin) => {
+        pins.push(pin);
+      },
+    });
+    await restoreJjWorkspace({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      workspaceName: "repin",
+      revision: pins[0] ?? "",
+    });
+    // New work in the restored workspace must become the pin target on the
+    // second archive (strict move, review fix 3).
+    writeFileSync(join(created.worktreePath, "second-round.txt"), "work\n");
+    fixture.jj(["describe", "-m", "second round", "-r", "repin@"]);
+
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      worktreesRoot: fixture.worktreesRoot,
+      persistRecoveryPin: async () => {},
+    });
+    const pinnedHead = fixture
+      .jj(["log", "--no-graph", "-r", "paseo/recovery/repin", "-T", "description.first_line()"])
+      .stdout.trim();
+    expect(pinnedHead).toBe("second round");
+  });
+
+  it("records and honors managed bookmark ownership (review fix 7)", async () => {
+    const fixture = createFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "owned",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/owned" },
+      worktreesRoot: fixture.worktreesRoot,
+    });
+
+    const metadata = readPaseoWorktreeMetadata(created.worktreePath);
+    expect(metadata?.version).toBe(2);
+    expect(metadata?.version === 2 ? metadata.jjBookmark : null).toBe("feat/owned");
+
+    // An alias bookmark on the same head must NOT null the managed owner.
+    fixture.jj(["bookmark", "create", "alias", "-r", "owned@"]);
+    const { getJjWorkspaceBookmark } = await import("./checkout-jj.js");
+    await expect(
+      getJjWorkspaceBookmark(created.worktreePath, { worktreesRoot: fixture.worktreesRoot }),
+    ).resolves.toBe("feat/owned");
   });
 
   it("aborts deletion with nothing removed when pin persistence fails", async () => {
