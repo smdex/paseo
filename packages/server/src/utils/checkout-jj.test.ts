@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -23,6 +23,12 @@ import {
   jjRenameBookmark,
 } from "./checkout-jj.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
+import {
+  writePaseoWorktreeMetadata,
+  writePaseoWorktreeRuntimeMetadata,
+  writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
+  readPaseoWorktreeMetadata,
+} from "./worktree-metadata.js";
 
 const jjAvailable = isJjAvailable();
 const describeIfJj = describe.skipIf(!jjAvailable);
@@ -295,6 +301,24 @@ describeIfJj("checkout-jj status", () => {
 
     // A further edit makes @ diverge from the pushed bookmark by one change.
     writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
+
+    // The pushed bookmark itself is IN SYNC with its remote: the un-pushed
+    // edit rides the working-copy change @, which a bookmark push does not
+    // send. Counting @ (the old semantics) would wrongly report "ahead" for
+    // a bookmark with nothing new to push. Advancing the bookmark — what a
+    // finish-and-push flow does — is what makes it read ahead.
+    const synced = await getJjStatus(fixture.repoDir);
+    expect(synced.isGit).toBe(true);
+    if (synced.isGit) {
+      expect(synced.upstreamRef).toBe("origin/feature");
+      expect(synced.aheadOfOrigin).toBe(0);
+      expect(synced.behindOfOrigin).toBe(0);
+    }
+
+    fixture.jj(["describe", "-m", "advance feature"]);
+    // Advance the pushed bookmark onto the described change (what the app's
+    // finish-and-push flow does via the advance config).
+    fixture.jj(["bookmark", "move", "--allow-backwards", "feature", "--to", "@"]);
 
     const status = await getJjStatus(fixture.repoDir);
     expect(status.isGit).toBe(true);
@@ -817,5 +841,235 @@ describeIfJj("checkout-jj history first-parent files", () => {
     // The second-parent file appears in the merge's file list (the combined
     // diff would show none).
     expect(mergeCommit?.files.map((file) => file.path)).toContain("side.txt");
+  });
+});
+
+describeIfJj("checkout-jj root-relative filesets (subdirectory callers)", () => {
+  it("discards the requested root-relative paths from a subdirectory cwd", async () => {
+    const fixture = scratch({
+      files: { "a.txt": "original\n", "sub/c.txt": "original\n" },
+    });
+    writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
+    writeFileSync(join(fixture.repoDir, "sub", "c.txt"), "changed\n");
+
+    const { jjDiscard } = await import("./checkout-jj.js");
+    await jjDiscard(join(fixture.repoDir, "sub"), ["a.txt"]);
+
+    expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe("original\n");
+    expect(readFileSync(join(fixture.repoDir, "sub", "c.txt"), "utf8")).toBe("changed\n");
+  });
+
+  it("returns the requested file's diff from a subdirectory cwd", async () => {
+    const fixture = scratch({
+      files: { "a.txt": "one\ntwo\n", "sub/c.txt": "one\ntwo\n" },
+    });
+    fixture.jj(["describe", "-m", "touch both"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "one\nTWO\n");
+    writeFileSync(join(fixture.repoDir, "sub", "c.txt"), "one\nTWO\n");
+    fixture.jj(["commit", "-m", "touch both"]);
+    const change = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+
+    const diff = await getJjCommitFileDiff({
+      cwd: join(fixture.repoDir, "sub"),
+      change,
+      path: "a.txt",
+    });
+    expect(diff).not.toBeNull();
+    expect(diff?.path).toBe("a.txt");
+    expect(diff?.additions).toBe(1);
+    expect(diff?.deletions).toBe(1);
+  });
+});
+
+describeIfJj("checkout-jj managed bookmark ownership", () => {
+  interface ManagedFixture {
+    repoDir: string;
+    workspacePath: string;
+    worktreesRoot: string;
+    jj: ScratchJjRepoFixture["jj"];
+  }
+
+  function managedFixture(options?: { jjBookmark?: string | null }): ManagedFixture {
+    const fixture = scratch({ colocate: true, files: { "readme.md": "hello\n" } });
+    const base = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+    fixture.jj(["bookmark", "create", "main", "-r", base]);
+    const worktreesRoot = join(fixture.dir, "worktrees-home");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const workspacePath = join(worktreesRoot, "projhash", "owned-ws");
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    fixture.jj(["workspace", "add", workspacePath, "--name", "owned-ws"]);
+    writePaseoWorktreeMetadata(workspacePath, {
+      baseRefName: "main",
+      baseRef: base,
+      ...(options?.jjBookmark !== undefined && options.jjBookmark !== null
+        ? { jjBookmark: options.jjBookmark }
+        : {}),
+    });
+    if (options?.jjBookmark) {
+      fixture.jj(["bookmark", "create", options.jjBookmark, "-r", "owned-ws@"], workspacePath);
+    }
+    return { repoDir: fixture.repoDir, workspacePath, worktreesRoot, jj: fixture.jj };
+  }
+
+  it("status uses the recorded owner, not the derived ancestor bookmark", async () => {
+    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const status = await getJjStatus(managed.workspacePath, {
+      worktreesRoot: managed.worktreesRoot,
+    });
+    expect(status.isGit).toBe(true);
+    if (!status.isGit) return;
+    expect(status.currentBranch).toBe("feat/owned");
+  });
+
+  it("managed ownership null never falls back to ancestor inference", async () => {
+    const managed = managedFixture({ jjBookmark: null });
+    const status = await getJjStatus(managed.workspacePath, {
+      worktreesRoot: managed.worktreesRoot,
+    });
+    expect(status.isGit).toBe(true);
+    if (!status.isGit) return;
+    // The workspace's parent chain carries `main`, but Paseo manages this
+    // workspace and recorded NO owner — deriving `main` would advance the
+    // base on the next commit.
+    expect(status.currentBranch).toBeNull();
+  });
+
+  it("commit from a subdirectory advances the recorded owner, never the base", async () => {
+    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const subprojectDir = join(managed.workspacePath, "subdir");
+    mkdirSync(subprojectDir, { recursive: true });
+    writeFileSync(join(managed.workspacePath, "work.txt"), "work\n");
+    const { jjCommit } = await import("./checkout-jj.js");
+    const mainBefore = managed
+      .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+      .stdout.trim();
+    const result = await jjCommit(subprojectDir, {
+      message: "advance the owner",
+    });
+    expect(result.bookmark).toBe("feat/owned");
+    const mainTarget = managed
+      .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+      .stdout.trim();
+    expect(mainTarget).toBe(mainBefore); // base never advanced
+    const ownerOnHead = managed
+      .jj(["log", "--no-graph", "-r", "feat/owned", "-T", "commit_id"])
+      .stdout.trim();
+    expect(ownerOnHead).not.toBe(mainBefore); // owner advanced onto the work
+  });
+});
+
+describeIfJj("checkout-jj diff and history hardening", () => {
+  it("marks a truncated history patch as too_large instead of parsing it", async () => {
+    const bigLine = "x".repeat(64);
+    const fixture = scratch({ files: { "huge.txt": `${bigLine}\n` } });
+    const replaced = `${bigLine} replaced\n`.repeat(24_000); // > 1MB patch
+    writeFileSync(join(fixture.repoDir, "huge.txt"), replaced);
+    fixture.jj(["commit", "-m", "huge change"]);
+    const change = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+
+    const diff = await getJjCommitFileDiff({ cwd: fixture.repoDir, change, path: "huge.txt" });
+    expect(diff).not.toBeNull();
+    expect(diff?.status).toBe("too_large");
+    expect(diff?.hunks).toEqual([]);
+  }, 60_000);
+
+  it("keeps the binary marker on mixed binary/text diffs", async () => {
+    const fixture = scratch({ files: { "text.txt": "one\n" } });
+    writeFileSync(join(fixture.repoDir, "text.txt"), "two\n");
+    writeFileSync(join(fixture.repoDir, "blob.bin"), Buffer.from([0, 1, 2, 0, 3, 0]));
+
+    const result = await getJjDiff(fixture.repoDir, {
+      mode: "uncommitted",
+      includeStructured: true,
+    });
+    expect(result.diffTooLarge).toBeFalsy();
+    const structured = result.structured ?? [];
+    const binary = structured.find((file) => file.path === "blob.bin");
+    const text = structured.find((file) => file.path === "text.txt");
+    expect(binary?.status).toBe("binary");
+    expect(text?.status).toBeUndefined();
+  });
+
+  it("compares only the selected push remote and excludes the empty working-copy child", async () => {
+    const fixture = scratch({ files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const origin = scratchBareGitOrigin();
+    const backup = scratchBareGitOrigin();
+    fixture.jj(["git", "remote", "add", "origin", origin]);
+    fixture.jj(["git", "remote", "add", "backup", backup]);
+    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]);
+    writeFileSync(join(fixture.repoDir, "new.txt"), "one ahead\n");
+    fixture.jj([
+      "commit",
+      "-m",
+      "one ahead",
+      "--config",
+      'experimental-advance-branches.enabled-branches=["main"]',
+    ]);
+    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "backup"]);
+    fixture.jj(["git", "fetch", "--remote", "origin"]);
+    fixture.jj(["git", "fetch", "--remote", "backup"]);
+    await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
+      aheadOfOrigin: 1,
+      behindOfOrigin: 0,
+    });
+    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]);
+    await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
+      aheadOfOrigin: 0,
+      behindOfOrigin: 0,
+    });
+  });
+
+  it("counts upstream ahead against the bookmark target, not the empty working copy", async () => {
+    const fixture = scratch({ colocate: true, files: { "a.txt": "a\n" } });
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const origin = scratchBareGitOrigin();
+    fixture.jj(["git", "remote", "add", "origin", origin]);
+    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]);
+    fixture.jj(["git", "fetch", "--remote", "origin"]);
+
+    // Finish the described change onto main (the bookmark advances past the
+    // pushed remote state by exactly one described change).
+    writeFileSync(join(fixture.repoDir, "b.txt"), "b\n");
+    fixture.jj(["describe", "-m", "one ahead"]);
+    fixture.jj(["bookmark", "move", "--allow-backwards", "main", "--to", "@"]);
+
+    const status = await getJjStatus(fixture.repoDir);
+    expect(status.isGit).toBe(true);
+    if (!status.isGit) return;
+    expect(status.aheadOfOrigin).toBe(1);
+    expect(status.behindOfOrigin).toBe(0);
+  });
+});
+
+describeIfJj("checkout-jj rename preserves metadata", () => {
+  it("updates only jjBookmark and keeps runtime metadata", async () => {
+    const fixture = scratch({ colocate: true, files: { "readme.md": "hello\n" } });
+    const base = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+    fixture.jj(["bookmark", "create", "main", "-r", base]);
+    const worktreesRoot = join(fixture.dir, "worktrees-home");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const workspacePath = join(worktreesRoot, "projhash", "renamable");
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    fixture.jj(["workspace", "add", workspacePath, "--name", "renamable"]);
+    fixture.jj(["bookmark", "create", "feat/old", "-r", "renamable@"], workspacePath);
+    writePaseoWorktreeMetadata(workspacePath, {
+      baseRefName: "main",
+      baseRef: base,
+      jjBookmark: "feat/old",
+    });
+    writePaseoWorktreeRuntimeMetadata(workspacePath, { worktreePort: 4242 });
+    writePaseoWorktreeFirstAgentBranchAutoNameMetadata(workspacePath, {
+      placeholderBranchName: "feat/old",
+    });
+    const metadataBefore = readPaseoWorktreeMetadata(workspacePath);
+
+    await jjRenameBookmark(workspacePath, "feat/new", { worktreesRoot });
+
+    const updated = readPaseoWorktreeMetadata(workspacePath);
+    expect(updated).toEqual({ ...metadataBefore, jjBookmark: "feat/new" });
+    expect(updated?.version).toBe(2);
+    expect(updated?.jjBookmark).toBe("feat/new");
+    expect(updated?.runtime?.worktreePort).toBe(4242);
   });
 });

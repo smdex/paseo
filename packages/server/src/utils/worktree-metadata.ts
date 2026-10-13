@@ -298,6 +298,23 @@ export function writePaseoWorktreeRuntimeMetadata(
   writePaseoWorktreeMetadataFile(worktreeRoot, next);
 }
 
+/**
+ * Patch ONLY the managed jj bookmark of an existing metadata record,
+ * preserving every other field (runtime port, first-agent auto-name state).
+ * A full `writePaseoWorktreeMetadata` reconstructs a subset and would drop
+ * them. No-op when no record exists or the recorded owner is not `from`.
+ */
+export function updatePaseoWorktreeJjBookmark(
+  worktreeRoot: string,
+  rename: { from: string; to: string },
+): void {
+  const current = readPaseoWorktreeMetadata(worktreeRoot);
+  if (!current || current.version !== 2 || current.jjBookmark !== rename.from) {
+    return;
+  }
+  writePaseoWorktreeMetadataFile(worktreeRoot, { ...current, jjBookmark: rename.to });
+}
+
 export function writePaseoWorktreeFirstAgentBranchAutoNameMetadata(
   worktreeRoot: string,
   options: { placeholderBranchName: string },

@@ -7,6 +7,7 @@ import type {
 import {
   dispatchExecuteBranchCheckout,
   dispatchExecuteCreateBranchFromBase,
+  NotSupportedOnJjError,
   resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
@@ -95,6 +96,15 @@ export function createGitMutationService(deps: {
 
   return {
     async checkoutExistingBranch(cwd, branch) {
+      // jj is checked BEFORE validation and the clean-tree gate: switching is
+      // deferred on jj (typed error), and jj's dirty-workspace model must
+      // never surface the git-shaped "commit or stash" message that the app
+      // answers with a stash offer jj rejects.
+      if ((await resolveEffectiveBackend(cwd)) === "jj") {
+        throw new NotSupportedOnJjError(
+          "Switching bookmarks is not supported on jj repositories yet; use jj new in a terminal",
+        );
+      }
       assertSafeGitRef(branch, "branch");
       const resolution = await workspaceGitService.validateBranchRef(cwd, branch);
       if (resolution.kind === "not-found") {

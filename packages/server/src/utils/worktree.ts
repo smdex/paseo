@@ -62,6 +62,8 @@ export interface WorktreeConfig {
 
 export interface CreatedWorktree extends WorktreeConfig {
   comparisonBaseRef: string | null;
+  /** Creation-time authority for jj provisioning rollback, never inferred later. */
+  jjCreatedBookmark?: { name: string; target: string };
 }
 
 export interface WorktreeRuntimeEnv {

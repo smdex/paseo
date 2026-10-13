@@ -10,6 +10,8 @@ import {
   jjFilesetArg,
   literalJjFileset,
   runJjCommand,
+  withJjDeletionTransaction,
+  JjMutationBarrierError,
 } from "./run-jj-command";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj";
 
@@ -308,5 +310,48 @@ describe("literalJjFileset", () => {
       const names = await diffNamesFor(["--", "a[1].txt"]);
       expect(names).toEqual([]);
     });
+  });
+});
+
+describe("jj deletion barrier", () => {
+  it("drains an in-flight command before starting deletion and rejects overlapping deletions", async () => {
+    const { spawn, processes } = fakeSpawn({ neverExit: true });
+    const run = createRunJjCommand("barrier-drain", { spawn });
+    const events: string[] = [];
+    const command = run(["describe", "-m", "in flight"], { cwd: "/tmp/barrier-drain" });
+    const deletion = withJjDeletionTransaction("/tmp/barrier-drain", async () => {
+      events.push("deletion");
+    });
+    await expect(
+      withJjDeletionTransaction("/tmp/barrier-drain", async () => {}),
+    ).rejects.toBeInstanceOf(JjMutationBarrierError);
+    await expect(run(["log"], { cwd: "/tmp/barrier-drain/subdir" })).rejects.toBeInstanceOf(
+      JjMutationBarrierError,
+    );
+    expect(events).toEqual([]);
+    expect(processes).toHaveLength(1);
+    events.push("exit");
+    processes[0]!.emitExit(0);
+    await command;
+    await deletion;
+    expect(events).toEqual(["exit", "deletion"]);
+  });
+
+  it("permits the deletion's own commands but does not exempt a second workspace", async () => {
+    const { spawn } = fakeSpawn({ exitCode: 0 });
+    const run = createRunJjCommand("barrier-own", { spawn });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const other = withJjDeletionTransaction("/tmp/barrier-other", () => gate);
+    await withJjDeletionTransaction("/tmp/barrier-own", async () => {
+      await run(["status"], { cwd: "/tmp/barrier-own" });
+      await expect(
+        run(["describe", "-m", "wrong root"], { cwd: "/tmp/barrier-other" }),
+      ).rejects.toBeInstanceOf(JjMutationBarrierError);
+    });
+    release();
+    await other;
   });
 });

@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -29,6 +30,10 @@ import {
   type PersistedWorkspaceRecord,
 } from "../../workspace-registry.js";
 import { createWorkspaceRecoveryService } from "./workspace-recovery-service.js";
+import { createJjWorktree } from "../../../utils/worktree-jj.js";
+import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
+
+const describeIfJj = describe.skipIf(!isJjAvailable());
 
 const NOW = "2026-07-11T10:12:30.752Z";
 const tempDirectories: string[] = [];
@@ -476,4 +481,275 @@ test("restore rejects a branch checked out elsewhere without inventing another b
       encoding: "utf8",
     }).trim(),
   ).toBe("* feature");
+});
+
+describeIfJj("workspace recovery on jj", () => {
+  function jjHarness(input: {
+    records: PersistedWorkspaceRecord[];
+    project: PersistedProjectRecord;
+  }) {
+    const records = new Map(input.records.map((record) => [record.workspaceId, { ...record }]));
+    const cleared: string[] = [];
+    const service = createWorkspaceRecoveryService({
+      paseoHome: "/paseo-home",
+      getWorkspace: async (workspaceId) => records.get(workspaceId) ?? null,
+      getProject: async (projectId) =>
+        input.project.projectId === projectId ? input.project : null,
+      isDirectory: async (path) => existsSync(path),
+      unarchiveWorkspace: async (record) => {
+        const current = records.get(record.workspaceId);
+        if (current) {
+          records.set(record.workspaceId, { ...current, archivedAt: null });
+        }
+      },
+      clearRecoveryPin: async (workspaceId) => {
+        const current = records.get(workspaceId);
+        if (!current) {
+          return 0;
+        }
+        const pin = current.recoveryBookmark ?? null;
+        records.set(workspaceId, { ...current, recoveryBookmark: null });
+        cleared.push(workspaceId);
+        let remaining = 0;
+        for (const record of records.values()) {
+          if (record.workspaceId !== workspaceId && record.recoveryBookmark === pin) {
+            remaining += 1;
+          }
+        }
+        return remaining;
+      },
+    });
+    return { service, records, cleared };
+  }
+
+  function jjProjectFixture() {
+    const fixture = createScratchJjRepo({ colocate: true, files: { "readme.md": "hello\n" } });
+    tempDirectories.push(fixture.dir);
+    const base = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
+    fixture.jj(["bookmark", "create", "main", "-r", base]);
+    const worktreesRoot = join(fixture.dir, "worktrees-home");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const project = createProject({
+      projectId: "p1",
+      rootPath: fixture.repoDir,
+      kind: "git",
+    });
+    return { fixture, base, worktreesRoot, project };
+  }
+
+  it("recognizes a registered backing root for a surviving subproject record", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "root-name",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feature-root" },
+    });
+    const cwd = join(created.worktreePath, "different-subproject-name");
+    mkdirSync(cwd);
+    fixture.jj(["bookmark", "create", "paseo/recovery/subproject", "-r", "root-name@"]);
+    const record = createWorkspace({
+      workspaceId: "wks_subproject",
+      projectId: project.projectId,
+      cwd,
+      worktreeRoot: created.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      recoveryBookmark: "paseo/recovery/subproject",
+    });
+    const { service } = jjHarness({ records: [record], project });
+    await expect(service.inspect("wks_subproject")).resolves.toMatchObject({
+      kind: "recoverable",
+      action: "unarchive",
+    });
+  });
+
+  it("classifies a surviving unregistered directory as restore, by worktree root", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "survivor",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/survivor" },
+      worktreesRoot,
+    });
+    fixture.jj(["describe", "-m", "surviving work"], created.worktreePath);
+    const { deleteJjPaseoWorktree, recoveryPinName } =
+      await import("../../../utils/worktree-jj.js");
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      worktreesRoot,
+    });
+    // Simulate the crash window: forget+quarantine happened, but a partial
+    // failure left a directory behind at the original path.
+    mkdirSync(created.worktreePath, { recursive: true });
+    writeFileSync(join(created.worktreePath, "partial.txt"), "survived\n");
+
+    const record = createWorkspace({
+      workspaceId: "wks_survivor",
+      projectId: project.projectId,
+      cwd: created.worktreePath,
+      worktreeRoot: created.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      branch: "feat/survivor",
+      recoveryBookmark: recoveryPinName("survivor"),
+    });
+    const { service } = jjHarness({ records: [record], project });
+
+    await expect(service.inspect("wks_survivor")).resolves.toMatchObject({
+      kind: "recoverable",
+      action: "restore",
+    });
+  });
+
+  it("restores by moving a surviving directory aside and recreating at the pin", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "restorable",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/restorable" },
+      worktreesRoot,
+    });
+    fixture.jj(["describe", "-m", "pinned work"], created.worktreePath);
+    const { deleteJjPaseoWorktree, recoveryPinName } =
+      await import("../../../utils/worktree-jj.js");
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: created.worktreePath,
+      worktreesRoot,
+    });
+    // Surviving directory from a partial deletion (nonempty → blocks add).
+    mkdirSync(created.worktreePath, { recursive: true });
+    writeFileSync(join(created.worktreePath, "orphaned.txt"), "kept\n");
+
+    const record = createWorkspace({
+      workspaceId: "wks_restorable",
+      projectId: project.projectId,
+      cwd: created.worktreePath,
+      worktreeRoot: created.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      branch: "feat/restorable",
+      recoveryBookmark: recoveryPinName("restorable"),
+    });
+    const { service } = jjHarness({ records: [record], project });
+
+    await expect(service.restore("wks_restorable")).resolves.toEqual({
+      workspaceId: "wks_restorable",
+      action: "restore",
+    });
+    // The workspace is back at the pin's change...
+    const description = fixture
+      .jj(["log", "--no-graph", "-r", "restorable@-", "-T", "description"])
+      .stdout.trim();
+    expect(description).toBe("pinned work");
+    // ...and the surviving directory was preserved as an orphan sibling.
+    const orphanParent = join(created.worktreePath, "..");
+    const orphans = readdirSync(orphanParent).filter((name) =>
+      name.startsWith("restorable.orphan-"),
+    );
+    expect(orphans.length).toBe(1);
+    expect(existsSync(join(orphanParent, orphans[0] ?? "", "orphaned.txt"))).toBe(true);
+    expect(existsSync(join(created.worktreePath, "orphaned.txt"))).toBe(false);
+  });
+
+  it("keeps a shared recovery pin while a sibling record still references it", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const pinShared = "paseo/recovery/shared";
+    const createdA = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "shared-a",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/shared-a" },
+      worktreesRoot,
+    });
+    fixture.jj(["bookmark", "create", pinShared, "-r", "shared-a@"]);
+    const { deleteJjPaseoWorktree } = await import("../../../utils/worktree-jj.js");
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: createdA.worktreePath,
+      worktreesRoot,
+    });
+
+    // Two archived records shared the backing checkout and thus the pin (the
+    // archive flow persists it for every sibling record).
+    const recordA = createWorkspace({
+      workspaceId: "wks_a",
+      projectId: project.projectId,
+      cwd: createdA.worktreePath,
+      worktreeRoot: createdA.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      branch: "feat/shared-a",
+      recoveryBookmark: pinShared,
+    });
+    const recordB = createWorkspace({
+      workspaceId: "wks_b",
+      projectId: project.projectId,
+      cwd: createdA.worktreePath,
+      worktreeRoot: createdA.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      branch: "feat/shared-a",
+      recoveryBookmark: pinShared,
+    });
+    const { service } = jjHarness({ records: [recordA, recordB], project });
+    const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
+
+    // Restoring ONE record must not consume the pin the sibling still needs.
+    await service.restore("wks_a");
+    expect(await jjRevisionResolves(fixture.repoDir, pinShared)).toBe(true);
+    // The backing root now exists, so the last sibling plain-unarchives.
+    await expect(service.restore("wks_b")).resolves.toEqual({
+      workspaceId: "wks_b",
+      action: "unarchive",
+    });
+    expect(await jjRevisionResolves(fixture.repoDir, pinShared)).toBe(false);
+  });
+
+  it("refuses an invalid recovery reference even when plain-unarchiving a surviving root", async () => {
+    const { fixture, project } = jjProjectFixture();
+    const record = createWorkspace({
+      workspaceId: "wks_invalid_pin",
+      projectId: project.projectId,
+      cwd: fixture.repoDir,
+      worktreeRoot: fixture.repoDir,
+      mainRepoRoot: fixture.repoDir,
+      recoveryBookmark: "main",
+    });
+    const { service, cleared, records } = jjHarness({ records: [record], project });
+    await expect(service.restore("wks_invalid_pin")).rejects.toThrow("not a Paseo recovery pin");
+    expect(cleared).toEqual([]);
+    expect(records.get("wks_invalid_pin")?.archivedAt).toBe(record.archivedAt);
+    const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
+    expect(await jjRevisionResolves(fixture.repoDir, "main")).toBe(true);
+  });
+
+  it("consumes the recovery pin when the last referencing record restores", async () => {
+    const { fixture, worktreesRoot, project } = jjProjectFixture();
+    const createdA = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "last-ref",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/last-ref" },
+      worktreesRoot,
+    });
+    fixture.jj(["describe", "-m", "last ref work"], createdA.worktreePath);
+    const { deleteJjPaseoWorktree, recoveryPinName } =
+      await import("../../../utils/worktree-jj.js");
+    await deleteJjPaseoWorktree({
+      cwd: fixture.repoDir,
+      worktreePath: createdA.worktreePath,
+      worktreesRoot,
+    });
+
+    const record = createWorkspace({
+      workspaceId: "wks_last",
+      projectId: project.projectId,
+      cwd: createdA.worktreePath,
+      worktreeRoot: createdA.worktreePath,
+      mainRepoRoot: fixture.repoDir,
+      branch: "feat/last-ref",
+      recoveryBookmark: recoveryPinName("last-ref"),
+    });
+    const { service } = jjHarness({ records: [record], project });
+    const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
+
+    await service.restore("wks_last");
+    expect(await jjRevisionResolves(fixture.repoDir, record.recoveryBookmark ?? "")).toBe(false);
+  });
 });

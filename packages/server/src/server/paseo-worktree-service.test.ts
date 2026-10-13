@@ -23,6 +23,12 @@ import { readPaseoWorktreeMetadata } from "../utils/worktree-metadata.js";
 import { createWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../utils/path.js";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import {
+  getJjPaseoWorktreesRoot,
+  listJjWorkspaces,
+  jjRevisionResolves,
+} from "../utils/worktree-jj.js";
 import { deriveProjectKey } from "./project-key.js";
 
 const cleanupPaths: string[] = [];
@@ -1359,3 +1365,44 @@ function createGitHubPrRemoteRepo(): { tempDir: string; repoDir: string } {
   execFileSync("git", ["fetch", "origin"], { cwd: repoDir, stdio: "pipe" });
   return { tempDir, repoDir };
 }
+
+test.skipIf(!isJjAvailable())(
+  "jj provisioning failure forgets the created workspace before removing disk and cleans up its bookmark",
+  async () => {
+    const fixture = createScratchJjRepo({ files: { "README.md": "hello\n" } });
+    cleanupPaths.push(fixture.dir);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const deps = createDeps();
+    deps.workspaceGitService.resolveRepoRoot = async () => fixture.repoDir;
+    deps.workspaceProvisioning = {
+      createWorkspaceForWorktree: async () => {
+        throw new Error("provisioning failed");
+      },
+    };
+    const worktreesRoot = path.join(fixture.dir, "worktrees");
+    await expect(
+      createPaseoWorktree(
+        {
+          cwd: fixture.repoDir,
+          worktreeSlug: "failed-provision",
+          branchName: "feature-failed",
+          runSetup: false,
+          worktreesRoot,
+        },
+        deps,
+      ),
+    ).rejects.toThrow("provisioning failed");
+    expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name)).toEqual([
+      "default",
+    ]);
+    expect(await jjRevisionResolves(fixture.repoDir, "feature-failed")).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          await getJjPaseoWorktreesRoot(fixture.repoDir, { worktreesRoot }),
+          "failed-provision",
+        ),
+      ),
+    ).toBe(false);
+  },
+);

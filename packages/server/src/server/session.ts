@@ -217,7 +217,7 @@ import {
   matchesAgentUpdatesFilter,
   type AgentUpdatesService,
 } from "./session/agent-updates/agent-updates-service.js";
-import { expandTilde } from "../utils/path.js";
+import { expandTilde, createRealpathAwarePathMatcher } from "../utils/path.js";
 import {
   searchDirectoryEntries,
   WORKSPACE_SEARCH_HIDDEN_DIRECTORIES,
@@ -930,11 +930,18 @@ export class Session {
       unarchiveWorkspace: async (workspace) => {
         await this.workspaceProvisioning.ensureWorkspaceRecordUnarchived(workspace);
       },
+      reportOrphan: (orphanPath) =>
+        this.sessionLogger.warn(
+          { orphanPath },
+          "Preserved surviving jj workspace directory during recovery",
+        ),
       clearRecoveryPin: async (workspaceId) => {
+        const pin = (await this.workspaceRegistry.get(workspaceId))?.recoveryBookmark ?? null;
         await this.workspaceRegistry.update(workspaceId, (record) => ({
           ...record,
           recoveryBookmark: null,
         }));
+        return pin ? this.countRecoveryPinReferences(pin, workspaceId) : 0;
       },
     });
     this.checkoutSession = new CheckoutSession({
@@ -943,7 +950,11 @@ export class Session {
         emitWorkspaceUpdateForCwd: (cwd) => this.emitWorkspaceUpdateForCwd(cwd),
         handleWorkspaceGitBranchSnapshot: (cwd, branchName) =>
           this.workspaceGitObserver.handleBranchSnapshot(cwd, branchName),
-        renameCurrentBranch: (cwd, branch) => this.renameCurrentBranch(cwd, branch),
+        renameCurrentBranch: (cwd, branch) =>
+          this.renameCurrentBranch(cwd, branch, {
+            paseoHome: this.paseoHome,
+            worktreesRoot: this.worktreesRoot,
+          }),
       },
       gitMutation: this.gitMutation,
       workspaceGitService: this.workspaceGitService,
@@ -5218,6 +5229,8 @@ export class Session {
             recoveryBookmark: pin,
           }));
         },
+        findWorkspaceIdsForBackingPath: (backingPath) =>
+          this.findWorkspaceIdsForBackingPath(backingPath),
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
           this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
@@ -5777,6 +5790,35 @@ export class Session {
   private async findWorkspaceIdForCwd(cwd: string): Promise<string | null> {
     const workspaces = await this.workspaceRegistry.list();
     return resolveWorkspaceIdForPath(cwd, workspaces);
+  }
+
+  /**
+   * Every registry record (any archive state) whose BACKING CHECKOUT is the
+   * given worktree path — the jj archive flow persists recovery authority for
+   * each of them, so earlier-archived sibling records stay restorable.
+   */
+  private async findWorkspaceIdsForBackingPath(backingPath: string): Promise<string[]> {
+    const workspaces = await this.workspaceRegistry.list();
+    const matchesBacking = createRealpathAwarePathMatcher(backingPath);
+    return workspaces
+      .filter(
+        (record) =>
+          record.isPaseoOwnedWorktree &&
+          typeof record.worktreeRoot === "string" &&
+          matchesBacking(record.worktreeRoot),
+      )
+      .map((record) => record.workspaceId);
+  }
+
+  /** How many records OTHER than the cleared one still hold this recovery pin. */
+  private async countRecoveryPinReferences(
+    pin: string,
+    excludeWorkspaceId: string,
+  ): Promise<number> {
+    const workspaces = await this.workspaceRegistry.list();
+    return workspaces.filter(
+      (record) => record.workspaceId !== excludeWorkspaceId && record.recoveryBookmark === pin,
+    ).length;
   }
 
   private matchesWorkspaceFilter(input: {
