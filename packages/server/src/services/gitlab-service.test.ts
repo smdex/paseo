@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { PullRequestCommandStatus } from "./forge-service.js";
+import type { ForgeRepositoryContext, PullRequestCommandStatus } from "./forge-service.js";
 import { GITLAB_ACTIVE_PIPELINE_STATUS_SET } from "@getpaseo/protocol/gitlab-pipeline";
 import type { GitLabStatusFacts } from "./gitlab-facts.js";
 import {
@@ -261,6 +261,88 @@ const DISCUSSIONS = [
 ];
 
 describe("createGitLabService", () => {
+  it("binds native read requests to host/target/source projects and requires exact F/H terminal evidence", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitlab.one.invalid",
+      sourceRepository: "fork/repo",
+      targetRepository: "group/sub/repo",
+      headRef: OPEN_MR.source_branch,
+      headSha: OPEN_MR.sha,
+      remoteHeadSha: OPEN_MR.sha,
+    };
+    let sourceId = 101;
+    let sha = OPEN_MR.sha;
+    let state = "opened";
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "mr")
+          return ok(
+            JSON.stringify(
+              args[1] === "list"
+                ? [{ ...OPEN_MR, source_project_id: sourceId, sha, state }]
+                : { ...OPEN_MR, source_project_id: sourceId, sha, state },
+            ),
+          );
+        if (args[0] === "issue") return ok("[]");
+        if (args[0] === "api") {
+          const path = args[1].slice("projects/".length);
+          if (!path.includes("/"))
+            return ok(JSON.stringify({ id: 101, path_with_namespace: decodeURIComponent(path) }));
+          return ok(JSON.stringify({ approvals_required: 0, approvals_left: 0 }));
+        }
+        throw new Error(`Unexpected read ${args.join(" ")}`);
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("implicit Git discovery");
+        },
+      },
+    );
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(14);
+    for (const { host, targetRepository } of [
+      repository,
+      { ...repository, host: "gitlab.two.invalid", targetRepository: "other/repo" },
+    ]) {
+      await service.listPullRequests({
+        cwd: input.cwd,
+        repository: { ...repository, host, targetRepository },
+      });
+      expect(calls.at(-1)).toContain(`https://${host}/${targetRepository}`);
+      await service.searchIssuesAndPrs({
+        cwd: input.cwd,
+        repository: { ...repository, host, targetRepository },
+        query: "issue",
+        kinds: ["issue"],
+      });
+      expect(calls.at(-1)).toContain(`https://${host}/${targetRepository}`);
+    }
+    expect(calls.find((args) => args[1] === "projects/fork%2Frepo")).toEqual([
+      "api",
+      "projects/fork%2Frepo",
+      "--hostname",
+      repository.host,
+    ]);
+    sourceId = 999;
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    sourceId = 101;
+    sha = "2".repeat(40);
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    sha = OPEN_MR.sha;
+    state = "merged";
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, remoteHeadSha: null },
+      }),
+    ).toBeNull();
+    expect((await service.getCurrentPullRequestStatus(input))?.state).toBe("merged");
+  });
   it("maps a glab merge request view to the neutral current PR status", async () => {
     const { service, calls } = makeService((args) =>
       ok(JSON.stringify(args[1] === "list" ? [OPEN_MR] : OPEN_MR)),

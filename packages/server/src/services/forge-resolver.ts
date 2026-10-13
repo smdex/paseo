@@ -2,7 +2,10 @@ import { LRUCache } from "lru-cache";
 import { parseGitRemoteLocation, type GitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import { resolveSshHostname, type SshHostnameResolver } from "../utils/ssh-hostname.js";
 import { defaultResolveRemoteUrl } from "./forge-cli-command.js";
-import type { ForgeService } from "./forge-service.js";
+import type { ForgeService, ForgeRepositoryContext } from "./forge-service.js";
+import { requireForgeRepositoryContext } from "./forge-cli-command.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { getJjForgeRepositoryContext } from "../utils/checkout-jj.js";
 import {
   createForgeService,
   defaultForgeRegistry,
@@ -16,12 +19,14 @@ export interface ForgeResolution {
   host: string;
   /** Adapter for {@link forge}, shared across resolutions of the same forge. */
   service: ForgeService;
+  repository?: ForgeRepositoryContext;
 }
 
 /** Probe a host for a forge id when the name heuristic is inconclusive. */
 export type ForgeHostProbe = (host: string) => Promise<string | null>;
 
 export interface CreateForgeResolverOptions {
+  paseoHome?: string;
   resolveRemoteUrl?: (cwd: string) => Promise<string | null>;
   createService?: (forge: string) => ForgeService | null;
   probeForge?: ForgeHostProbe;
@@ -251,6 +256,16 @@ export function createForgeResolver(options: CreateForgeResolverOptions = {}): F
     resolveFromRemoteUrlAsync,
     invalidate,
     async resolve(cwd: string): Promise<ForgeResolution | null> {
+      if ((await resolveEffectiveBackend(cwd)) === "jj") {
+        const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
+          paseoHome: options.paseoHome,
+        });
+        requireForgeRepositoryContext({ cwd, repository });
+        const resolution = await resolveFromRemoteUrlAsync(remoteUrl);
+        return resolution
+          ? { ...resolution, repository: { ...repository, host: resolution.host } }
+          : null;
+      }
       return resolveFromRemoteUrlAsync(await resolveRemoteUrlCached(cwd));
     },
   };

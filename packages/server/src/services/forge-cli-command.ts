@@ -2,6 +2,34 @@ import { z } from "zod";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { execCommand } from "../utils/spawn.js";
+import { detectVcsBackend } from "../utils/vcs-backend.js";
+import { ForgeRepositoryContextError, type ForgeRepositoryContext } from "./forge-service.js";
+
+/** Native/colocated jj must never let a CLI infer a repository from cwd. */
+export function requireForgeRepositoryContext(options: {
+  cwd: string;
+  repository?: ForgeRepositoryContext;
+}): ForgeRepositoryContext | undefined {
+  const repository = options.repository;
+  if (!repository) {
+    if (detectVcsBackend(options.cwd) === "jj") {
+      throw new ForgeRepositoryContextError("Explicit forge repository context is required for jj");
+    }
+    return undefined;
+  }
+  const path = /^[^\s/:?#]+(?:\/[^\s/:?#]+)+$/;
+  if (
+    !/^[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?$/.test(repository.host) ||
+    !path.test(repository.targetRepository) ||
+    !path.test(repository.sourceRepository) ||
+    [repository.headSha, repository.remoteHeadSha].some(
+      (sha) => sha !== null && !/^[0-9a-f]{40,64}$/.test(sha),
+    )
+  ) {
+    throw new ForgeRepositoryContextError("Invalid explicit forge repository identity");
+  }
+  return repository;
+}
 
 /**
  * Timeout for the per-host CLI auth probe (`gh`/`glab`/`tea` auth status) used
