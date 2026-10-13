@@ -270,6 +270,96 @@ export async function importJjCheckpoint(input: {
   );
 }
 
+const RestorePhaseSchema = z.object({
+  version: z.literal(1),
+  backingRoot: z.string(),
+  sharedStore: z.string(),
+  incarnation: z.string().nullable(),
+  recoveryPin: z.string(),
+  archiveGeneration: z.number().int().nonnegative(),
+  selection: HeadSchema,
+  status: z.enum(["pending", "completed"]),
+});
+export type JjRestorePhase = z.infer<typeof RestorePhaseSchema>;
+
+// Registration precedes UUID/metadata materialization. This root-keyed fact
+// must be discoverable even by a newly registered child with no UUID yet.
+function jjRestorePhasePath(backingRoot: string, paseoHome?: string): string {
+  const key = createHash("sha256").update(workspaceLifecycleKey(backingRoot)).digest("hex");
+  return join(
+    paseoHome ? resolve(paseoHome) : resolvePaseoHome(),
+    "projects",
+    "jj-checkpoints",
+    "restores",
+    `${key}.json`,
+  );
+}
+
+export async function readJjRestorePhase(
+  backingRoot: string,
+  paseoHome?: string,
+): Promise<JjRestorePhase | null> {
+  try {
+    const phase = RestorePhaseSchema.parse(
+      JSON.parse(await fs.readFile(jjRestorePhasePath(backingRoot, paseoHome), "utf8")),
+    );
+    if (phase.backingRoot !== workspaceLifecycleKey(backingRoot))
+      throw new Error("Restore backing differs");
+    return phase;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw new JjCheckpointError(
+      "The saved jj restoration phase cannot be read; reconcile it before unarchive, mutation or publication.",
+    );
+  }
+}
+
+export async function assertJjRestorationResolved(
+  backingRoot: string,
+  paseoHome?: string,
+): Promise<void> {
+  const phase = await readJjRestorePhase(backingRoot, paseoHome);
+  if (phase && phase.status !== "completed")
+    throw new JjCheckpointError(
+      "An unresolved jj restoration requires reconciliation before unarchive, mutation or publication; files and pins remain retained.",
+    );
+}
+
+export async function beginJjCheckpointRestoration(
+  checkpoint: JjCheckpoint,
+  recoveryPin: string,
+  paseoHome?: string,
+): Promise<JjRestorePhase> {
+  await assertJjRestorationResolved(checkpoint.backingRoot, paseoHome);
+  const phase: JjRestorePhase = {
+    version: 1,
+    backingRoot: checkpoint.backingRoot,
+    sharedStore: checkpoint.sharedStore,
+    incarnation: checkpoint.incarnation,
+    recoveryPin,
+    archiveGeneration: checkpoint.generation,
+    selection: checkpoint.selection,
+    status: "pending",
+  };
+  await writeJsonFileAtomic(jjRestorePhasePath(phase.backingRoot, paseoHome), phase);
+  return phase;
+}
+
+export async function completeJjCheckpointRestoration(
+  phase: JjRestorePhase,
+  paseoHome?: string,
+): Promise<void> {
+  const current = await readJjRestorePhase(phase.backingRoot, paseoHome);
+  if (JSON.stringify(current) !== JSON.stringify(phase))
+    throw new JjCheckpointError(
+      "The jj restoration phase changed; retained heads require reconciliation.",
+    );
+  await writeJsonFileAtomic(jjRestorePhasePath(phase.backingRoot, paseoHome), {
+    ...phase,
+    status: "completed",
+  });
+}
+
 export async function restoreJjCheckpoint(input: {
   backingRoot: string;
   sharedStore: string;
