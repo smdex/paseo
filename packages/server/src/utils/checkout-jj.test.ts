@@ -1248,6 +1248,17 @@ describeIfJj("durable native change checkpoint", () => {
     );
   });
 
+  it("does not silently apply Finish's description fallback to an empty Describe request", async () => {
+    const fixture = scratch({ colocate: false });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    expect(fixture.jj(["describe", "-m", "Existing description"]).status).toBe(0);
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await expect(
+      jjDescribe(fixture.repoDir, { message: "", expectedChangeId: before.changeId }, context),
+    ).rejects.toThrow("Description is required");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(before.commitId);
+  });
+
   it("New retains the previous native selection as durable WIP", async () => {
     const fixture = scratch({ colocate: false, files: { "file.txt": "base\n" } });
     const context = { paseoHome: join(fixture.dir, "home") };
