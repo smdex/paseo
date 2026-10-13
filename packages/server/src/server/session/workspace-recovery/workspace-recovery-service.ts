@@ -3,7 +3,8 @@ import { basename, dirname } from "node:path";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 
 import { resolveRepositoryDefaultBranch } from "../../../utils/checkout-git.js";
-import { resolveEffectiveBackend } from "../../../utils/checkout-dispatch.js";
+import { detectVcsBackend, resolveJjRepoIdentity } from "../../../utils/vcs-backend.js";
+import { jjWorkspaceAuthority, validatePresentJjWorkspace } from "../../workspace-jj-authority.js";
 import { createRealpathAwarePathMatcher } from "../../../utils/path.js";
 import {
   withWorkspaceLifecycle,
@@ -132,7 +133,11 @@ export function createWorkspaceRecoveryService(deps: {
   unarchiveWorkspace: (workspace: PersistedWorkspaceRecord) => Promise<void>;
   // Clear only the restored archive generation. Pins are retained: jj has no
   // external-CAS deletion primitive and another daemon may still need them.
-  clearRecoveryPin?: (workspaceId: string, expectedPin: string) => Promise<void>;
+  clearRecoveryPin?: (
+    workspaceId: string,
+    expectedPin: string,
+    expected: PersistedWorkspaceRecord,
+  ) => Promise<void>;
   reportOrphan?: (path: string) => void;
   reportRetainedPin?: (pin: string, error: unknown) => void;
 }): WorkspaceRecoveryService {
@@ -168,52 +173,46 @@ export function createWorkspaceRecoveryService(deps: {
       };
     }
 
-    if (await deps.isDirectory(workspace.cwd)) {
-      // A jj workspace whose directory survived a partial deletion (forget
-      // succeeded, quarantine/remove failed) still needs recreation: jj no
-      // longer registers it. Registration is checked by the record's backing
-      // WORKTREE ROOT against `jj workspace list` — never by basename(cwd),
-      // which is wrong for subproject records and can falsely classify a
-      // still-registered checkout.
-      if (workspace.kind === "worktree") {
-        const sourceRepoRoot = workspace.mainRepoRoot ?? project.rootPath;
-        if ((await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
-          const registered = await jjWorkspaceRootRegistered(
-            sourceRepoRoot,
-            workspace.worktreeRoot ?? workspace.cwd,
-          );
-          if (!registered) {
-            return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
-          }
-          try {
-            assertJjWorkspaceIncarnation(
-              workspace.worktreeRoot ?? workspace.cwd,
-              workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
-            );
-          } catch (error) {
-            return {
-              kind: "unavailable",
-              workspaceId,
-              reason: "workspace_directory_missing",
-              message: String(error),
-            };
-          }
-        }
-      }
-      return createRecoveryPlan({ action: "unarchive", workspace });
+    let authority;
+    try {
+      authority = jjWorkspaceAuthority(workspace);
+    } catch (error) {
+      return unavailableWorkspace(workspaceId, String(error));
     }
-
-    if (workspace.kind !== "worktree") {
-      return {
-        kind: "unavailable",
+    const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
+    const sourceRepoRoot =
+      workspace.mainRepoRoot ?? resolveJjRepoIdentity(backingRoot)?.primaryRoot ?? project.rootPath;
+    const directoryPresent = await deps.isDirectory(workspace.cwd);
+    if (directoryPresent) return resolveSurvivingRecovery(workspace, sourceRepoRoot);
+    if (authority === "external")
+      return unavailableWorkspace(
         workspaceId,
-        reason: "workspace_directory_missing",
-        message: "The archived workspace directory no longer exists and cannot be recreated.",
-      };
+        "The external jj workspace directory no longer exists and cannot be recreated.",
+      );
+    if (authority === "managed") {
+      if (
+        !workspace.recoveryBookmark ||
+        !(await deps.isDirectory(sourceRepoRoot)) ||
+        detectVcsBackend(sourceRepoRoot) !== "jj"
+      )
+        return unavailableWorkspace(
+          workspaceId,
+          "The saved jj source or recovery pin is unavailable; refusing alternate recovery.",
+        );
+      return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
     }
+    if (detectVcsBackend(sourceRepoRoot) === "jj")
+      return unavailableWorkspace(
+        workspaceId,
+        "Unknown legacy jj workspace authority; refusing automatic recreation.",
+      );
+    if (workspace.kind !== "worktree")
+      return unavailableWorkspace(
+        workspaceId,
+        "The archived workspace directory no longer exists and cannot be recreated.",
+      );
     // COMPAT(worktreeRestoreMissingMainRepoRoot): records created before v0.1.110
     // lack placement ownership; remove the project-root fallback after 2027-01-17.
-    const sourceRepoRoot = workspace.mainRepoRoot ?? project.rootPath;
     if (!(await deps.isDirectory(sourceRepoRoot))) {
       return {
         kind: "unavailable",
@@ -224,6 +223,37 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+  }
+
+  async function resolveSurvivingRecovery(
+    workspace: PersistedWorkspaceRecord,
+    sourceRepoRoot: string,
+  ): Promise<UnavailableRecoveryState | RecoveryPlan> {
+    const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
+    try {
+      if (jjWorkspaceAuthority(workspace) === "managed") {
+        if (detectVcsBackend(sourceRepoRoot) !== "jj")
+          throw new Error("Managed jj source repository is unavailable; refusing Git recovery");
+        const registered = await jjWorkspaceRootRegistered(sourceRepoRoot, backingRoot);
+        // An exact-pin restore may preserve a forgotten partial non-checkout in quarantine.
+        // A real checkout (including a replacement Git repo) must prove its incarnation.
+        const partialDirectory =
+          !registered &&
+          detectVcsBackend(backingRoot) === "none" &&
+          Boolean(workspace.recoveryBookmark);
+        if (!partialDirectory)
+          assertJjWorkspaceIncarnation(
+            backingRoot,
+            workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
+          );
+        if (!registered)
+          return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+      }
+      await validatePresentJjWorkspace(workspace);
+    } catch (error) {
+      return unavailableWorkspace(workspace.workspaceId, String(error));
+    }
+    return createRecoveryPlan({ action: "unarchive", workspace });
   }
 
   async function inspect(workspaceId: string): Promise<WorkspaceRecoveryState> {
@@ -273,6 +303,7 @@ export function createWorkspaceRecoveryService(deps: {
         await deps.clearRecoveryPin(
           resolved.workspace.workspaceId,
           resolved.workspace.recoveryBookmark,
+          resolved.workspace,
         );
       } catch (error) {
         // The restore/unarchive already committed. Retaining its private pin
@@ -287,7 +318,9 @@ export function createWorkspaceRecoveryService(deps: {
     workspace: PersistedWorkspaceRecord,
     sourceRepoRoot: string,
   ): Promise<void> {
-    if ((await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+    if (jjWorkspaceAuthority(workspace) === "managed") {
+      if (detectVcsBackend(sourceRepoRoot) !== "jj")
+        throw new Error("Managed jj source changed; refusing Git recovery");
       await recreateArchivedJjWorkspace(workspace, sourceRepoRoot);
       return;
     }
@@ -498,6 +531,10 @@ async function resolveRecoveryBase(repoRoot: string, recordedBase: string | null
     });
   }
   return defaultBranch;
+}
+
+function unavailableWorkspace(workspaceId: string, message: string): UnavailableRecoveryState {
+  return { kind: "unavailable", workspaceId, reason: "workspace_directory_missing", message };
 }
 
 function createRecoveryPlan(

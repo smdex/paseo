@@ -6,6 +6,7 @@ import type { DaemonConfigStore } from "../daemon-config-store.js";
 import {
   archiveByScope,
   type ActiveWorkspaceRef,
+  type WorkspaceArchiveAuthorityPorts,
   killTerminalsForWorkspace,
 } from "../workspace-archive-service.js";
 import type {
@@ -17,7 +18,7 @@ import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
 import type { WorkspaceArchiveContext } from "../workspace-registry.js";
 
-export interface AutoArchiveArchiveOptions {
+export interface AutoArchiveArchiveOptions extends WorkspaceArchiveAuthorityPorts {
   paseoHome: string;
   paseoWorktreesBaseRoot?: string;
   daemonConfigStore: DaemonConfigStore;
@@ -93,6 +94,9 @@ export async function archiveIfSafe(input: {
         agentStorage: options.agentStorage,
         findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
         listActiveWorkspaces: options.listActiveWorkspaces,
+        getWorkspace: options.getWorkspace,
+        setWorkspaceRecoveryPin: options.setWorkspaceRecoveryPin,
+        findWorkspaceIdsForBackingPath: options.findWorkspaceIdsForBackingPath,
         archiveWorkspaceRecord: (workspaceIdToArchive) =>
           options.archiveWorkspaceRecord(workspaceIdToArchive, {
             autoArchivedChangeRequestUrl: pullRequest.url,

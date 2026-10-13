@@ -124,6 +124,9 @@ export interface PaseoToolHostDependencies {
   >;
   findWorkspaceIdForCwd?: ArchiveDependencies["findWorkspaceIdForCwd"];
   listActiveWorkspaces?: ArchiveDependencies["listActiveWorkspaces"];
+  getWorkspace?: ArchiveDependencies["getWorkspace"];
+  setWorkspaceRecoveryPin?: ArchiveDependencies["setWorkspaceRecoveryPin"];
+  findWorkspaceIdsForBackingPath?: ArchiveDependencies["findWorkspaceIdsForBackingPath"];
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
@@ -3345,6 +3348,9 @@ function archiveWorktreeDependencies(
     agentStorage: context.agentStorage,
     findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
     listActiveWorkspaces: options.listActiveWorkspaces,
+    getWorkspace: options.getWorkspace,
+    setWorkspaceRecoveryPin: options.setWorkspaceRecoveryPin,
+    findWorkspaceIdsForBackingPath: options.findWorkspaceIdsForBackingPath,
     archiveWorkspaceRecord: options.archiveWorkspaceRecord,
     emitWorkspaceUpdatesForWorkspaceIds: options.emitWorkspaceUpdatesForWorkspaceIds,
     markWorkspaceArchiving: options.markWorkspaceArchiving,

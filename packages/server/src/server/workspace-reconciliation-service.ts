@@ -1,3 +1,5 @@
+import { hasDurableJjAuthority, sameJjWorkspaceAuthority } from "./workspace-jj-authority.js";
+import { detectVcsBackend } from "../utils/vcs-backend.js";
 import { statSync, watch as watchPath } from "node:fs";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
@@ -400,12 +402,16 @@ export class WorkspaceReconciliationService {
         });
         if (!update) return;
 
-        const updated = await this.workspaceRegistry.update(workspace.workspaceId, (current) => ({
-          ...current,
-          ...update.fields,
-          updatedAt: timestamp,
-        }));
-        if (!updated) return;
+        let committed = false;
+        const updated = await this.workspaceRegistry.update(workspace.workspaceId, (current) => {
+          // Reads precede this queued commit; authority may have been established meanwhile.
+          const protectedAuthority =
+            hasDurableJjAuthority(current) || detectVcsBackend(current.cwd) === "jj";
+          if (protectedAuthority || !sameJjWorkspaceAuthority(workspace, current)) return current;
+          committed = true;
+          return { ...current, ...update.fields, updatedAt: timestamp };
+        });
+        if (!updated || !committed) return;
         changes.push({
           kind: "workspace_updated",
           workspaceId: workspace.workspaceId,
