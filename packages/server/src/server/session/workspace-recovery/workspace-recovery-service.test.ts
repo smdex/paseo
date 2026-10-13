@@ -18,7 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, it, test } from "vitest";
 
 import pino from "pino";
 import { archivePersistedWorkspaceRecord } from "../../workspace-archive-service.js";
@@ -960,4 +960,43 @@ describeIfJj("workspace recovery on jj", () => {
     const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
     expect(await jjRevisionResolves(fixture.repoDir, pin)).toBe(true);
   });
+  test.each(["source-disappeared", "backing-disappeared", "external-contradiction"] as const)(
+    "known jj recovery refuses %s without consuming pins or entering Git recreation",
+    async (failure) => {
+      const { fixture, worktreesRoot, project } = jjProjectFixture();
+      const created = await createJjWorktree({
+        cwd: fixture.repoDir,
+        worktreeSlug: "protected",
+        worktreesRoot,
+        source: { kind: "branch-off", baseBranch: "main", branchName: "protected-feature" },
+      });
+      const pin = "paseo/recovery/protected";
+      fixture.jj(["bookmark", "create", pin, "-r", "main"]);
+      const record = createWorkspace({
+        workspaceId: "protected",
+        projectId: project.projectId,
+        cwd: created.worktreePath,
+        worktreeRoot: created.worktreePath,
+        mainRepoRoot: fixture.repoDir,
+        jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+        jjWorkspaceManagement: "managed",
+        recoveryBookmark: pin,
+        kind: "directory",
+        isPaseoOwnedWorktree: false,
+      });
+      if (failure === "source-disappeared")
+        rmSync(join(fixture.repoDir, ".jj"), { recursive: true, force: true });
+      if (failure === "backing-disappeared")
+        rmSync(join(created.worktreePath, ".jj"), { recursive: true, force: true });
+      if (failure === "external-contradiction") record.jjWorkspaceManagement = "external";
+      const h = jjHarness({ project, records: [record] });
+      await expect(h.service.inspect("protected")).resolves.toMatchObject({ kind: "unavailable" });
+      await expect(h.service.restore("protected")).rejects.toThrow(
+        /incarnation|source repository|contradicts/,
+      );
+      expect(h.records.get("protected")).toEqual(record);
+      expect(h.cleared).toEqual([]);
+      expect(readFileSync(join(created.worktreePath, "readme.md"), "utf8")).toBe("hello\n");
+    },
+  );
 });

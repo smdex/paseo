@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import { areEquivalentPaths } from "../utils/path.js";
+import { jjWorkspaceAuthority, sameJjWorkspaceAuthority } from "./workspace-jj-authority.js";
 import {
   generateProjectId,
   type PersistedProjectKind,
@@ -87,6 +88,8 @@ const PersistedWorkspaceRecordSchema = z.object({
   mainRepoRoot: z.string().nullable().default(null),
   // Persisted separately from the pathname, which can be reused after archive.
   jjWorkspaceId: z.string().min(1).optional(),
+  // Absent is unknown legacy provenance, never inferred external ownership.
+  jjWorkspaceManagement: z.enum(["managed", "external"]).optional(),
   // jj only: private recovery bookmark pinned before the workspace was forgotten.
   // Null on git workspaces and on jj workspaces that were never archived.
   recoveryBookmark: z
@@ -191,12 +194,36 @@ export async function clearWorkspaceRecoveryReference(
   registry: Pick<WorkspaceRegistry, "update">,
   workspaceId: string,
   expectedPin: string,
+  expected?: PersistedWorkspaceRecord,
 ): Promise<void> {
-  await registry.update(workspaceId, (record) =>
-    record.recoveryBookmark === expectedPin
-      ? { ...record, jjWorkspaceId: record.jjWorkspaceId ?? expectedPin, recoveryBookmark: null }
-      : record,
-  );
+  await registry.update(workspaceId, (record) => {
+    jjWorkspaceAuthority(record);
+    if (expected && !sameJjWorkspaceAuthority(expected, record)) return record;
+    return record.recoveryBookmark === expectedPin
+      ? {
+          ...record,
+          jjWorkspaceManagement: "managed",
+          jjWorkspaceId: record.jjWorkspaceId ?? expectedPin,
+          recoveryBookmark: null,
+        }
+      : record;
+  });
+}
+
+/** Compare inside the queued update, not before asynchronous pin creation. */
+export async function setWorkspaceRecoveryReference(
+  registry: Pick<WorkspaceRegistry, "update">,
+  workspaceId: string,
+  pin: string,
+  expected: PersistedWorkspaceRecord,
+): Promise<void> {
+  const updated = await registry.update(workspaceId, (record) => {
+    if (!sameJjWorkspaceAuthority(expected, record) || jjWorkspaceAuthority(record) !== "managed")
+      throw new Error("Workspace managed incarnation changed before recovery pin persistence");
+    return { ...record, jjWorkspaceManagement: "managed", recoveryBookmark: pin };
+  });
+  if (!updated)
+    throw new Error(`Workspace disappeared before recovery pin persistence: ${workspaceId}`);
 }
 
 type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord;
@@ -701,6 +728,7 @@ export function createPersistedWorkspaceRecord(input: {
   mainRepoRoot?: string | null;
   recoveryBookmark?: string | null;
   jjWorkspaceId?: string;
+  jjWorkspaceManagement?: "managed" | "external";
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;

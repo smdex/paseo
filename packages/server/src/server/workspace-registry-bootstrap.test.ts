@@ -1,3 +1,9 @@
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import {
+  writePaseoWorktreeMetadata,
+  readPaseoWorktreeMetadata,
+} from "../utils/worktree-metadata.js";
+import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
 import os from "node:os";
 import path from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -527,54 +533,113 @@ describe("bootstrapWorkspaceRegistries", () => {
     });
   });
 
-  test("preserves existing workspace IDs when only the projects file is missing", async () => {
-    await workspaceRegistry.initialize();
-    await workspaceRegistry.upsert({
-      workspaceId: "ws-existing",
-      projectId: NON_GIT_PROJECT,
-      cwd: NON_GIT_PROJECT,
-      kind: "directory",
-      displayName: "non-git-project",
-      createdAt: "2026-03-01T00:00:00.000Z",
-      updatedAt: "2026-03-01T00:00:00.000Z",
-      archivedAt: null,
-    });
+  test.each(["managed", "external", undefined] as const)(
+    "preserves existing authority (%s) when only the projects file is missing",
+    async (management) => {
+      await workspaceRegistry.initialize();
+      await workspaceRegistry.upsert({
+        workspaceId: "ws-existing",
+        projectId: NON_GIT_PROJECT,
+        cwd: NON_GIT_PROJECT,
+        kind: "directory",
+        displayName: "non-git-project",
+        title: "Keep my title",
+        jjWorkspaceManagement: management,
+        ...(management === "managed"
+          ? { jjWorkspaceId: "saved-incarnation", recoveryBookmark: "paseo/recovery/saved" }
+          : {}),
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+        archivedAt: null,
+      });
+      const savedAuthority = await workspaceRegistry.get("ws-existing");
 
-    await agentStorage.initialize();
-    await agentStorage.upsert({
-      id: "agent-1",
-      provider: "codex",
-      cwd: NON_GIT_PROJECT,
-      createdAt: "2026-03-02T00:00:00.000Z",
-      updatedAt: "2026-03-02T00:00:00.000Z",
-      lastActivityAt: "2026-03-02T00:00:00.000Z",
-      lastUserMessageAt: null,
-      title: null,
-      labels: {},
-      lastStatus: "idle",
-      lastModeId: null,
-      config: null,
-      runtimeInfo: { provider: "codex", sessionId: null },
-      persistence: null,
-      archivedAt: null,
-    });
+      await agentStorage.initialize();
+      await agentStorage.upsert({
+        id: "agent-1",
+        provider: "codex",
+        cwd: NON_GIT_PROJECT,
+        createdAt: "2026-03-02T00:00:00.000Z",
+        updatedAt: "2026-03-02T00:00:00.000Z",
+        lastActivityAt: "2026-03-02T00:00:00.000Z",
+        lastUserMessageAt: null,
+        title: null,
+        labels: {},
+        lastStatus: "idle",
+        lastModeId: null,
+        config: null,
+        runtimeInfo: { provider: "codex", sessionId: null },
+        persistence: null,
+        archivedAt: null,
+      });
 
-    await bootstrapWorkspaceRegistries({
-      paseoHome,
-      agentStorage,
-      projectRegistry,
-      workspaceRegistry,
-      workspaceGitService,
-      logger,
-    });
+      await bootstrapWorkspaceRegistries({
+        paseoHome,
+        agentStorage,
+        projectRegistry,
+        workspaceRegistry,
+        workspaceGitService,
+        logger,
+      });
 
-    const workspaces = await workspaceRegistry.list();
-    expect(workspaces).toHaveLength(1);
-    expect(workspaces[0]?.workspaceId).toBe("ws-existing");
-    expect(workspaces[0]?.cwd).toBe(NON_GIT_PROJECT);
+      const workspaces = await workspaceRegistry.list();
+      expect(workspaces).toHaveLength(1);
+      expect(workspaces[0]?.workspaceId).toBe("ws-existing");
+      expect(workspaces[0]?.cwd).toBe(NON_GIT_PROJECT);
+      expect(await workspaceRegistry.get("ws-existing")).toEqual(savedAuthority);
 
-    const projects = await projectRegistry.list();
-    expect(projects).toHaveLength(1);
-    expect(projects[0]?.projectId).toBe(NON_GIT_PROJECT);
-  });
+      const projects = await projectRegistry.list();
+      expect(projects).toHaveLength(1);
+      expect(projects[0]?.projectId).toBe(NON_GIT_PROJECT);
+    },
+  );
+  test.skipIf(!isJjAvailable()).each(["external", "managed", undefined] as const)(
+    "bootstrap does not stamp jj branch identity into %s contradictory/unknown checkouts",
+    async (management) => {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "readme.txt": "keep\n" } });
+      try {
+        writePaseoWorktreeMetadata(fixture.repoDir, { baseRefName: "main", jjBookmark: "feature" });
+        const metadata = readPaseoWorktreeMetadata(fixture.repoDir);
+        await workspaceRegistry.upsert(
+          createPersistedWorkspaceRecord({
+            workspaceId: "protected",
+            projectId: "project",
+            cwd: fixture.repoDir,
+            kind: "worktree",
+            displayName: "protected",
+            branch: "feature",
+            worktreeRoot: fixture.repoDir,
+            isPaseoOwnedWorktree: true,
+            mainRepoRoot: fixture.repoDir,
+            jjWorkspaceManagement: management,
+            ...(management === "managed" ? { jjWorkspaceId: "unknown-old-incarnation" } : {}),
+            createdAt: "now",
+            updatedAt: "now",
+          }),
+        );
+        await projectRegistry.upsert({
+          projectId: "project",
+          rootPath: fixture.repoDir,
+          kind: "git",
+          displayName: "project",
+          createdAt: "now",
+          updatedAt: "now",
+          archivedAt: null,
+        });
+        const saved = await workspaceRegistry.get("protected");
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry,
+          workspaceGitService,
+          logger,
+        });
+        expect(readPaseoWorktreeMetadata(fixture.repoDir)).toEqual(metadata);
+        expect(await workspaceRegistry.get("protected")).toEqual(saved);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
 });

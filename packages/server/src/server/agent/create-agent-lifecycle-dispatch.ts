@@ -4,7 +4,11 @@ import type pino from "pino";
 
 import type { ForgeService } from "../../services/forge-service.js";
 import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
-import { archiveByScope, type ActiveWorkspaceRef } from "../workspace-archive-service.js";
+import {
+  archiveByScope,
+  type WorkspaceArchiveAuthorityPorts,
+  type ActiveWorkspaceRef,
+} from "../workspace-archive-service.js";
 import type {
   CreatePaseoWorktreeWorkflowFn,
   CreatePaseoWorktreeWorkflowResult,
@@ -18,7 +22,7 @@ import type {
 import type { AgentManager, AgentSubscriber, SubscribeOptions } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 
-interface CreateAgentLifecycleDispatchDependencies {
+interface CreateAgentLifecycleDispatchDependencies extends WorkspaceArchiveAuthorityPorts {
   paseoHome: string;
   worktreesRoot?: string;
   agentManager: AgentManager;
@@ -189,6 +193,9 @@ export class CreateAgentLifecycleDispatch {
         agentManager: this.dependencies.agentManager,
         agentStorage: this.dependencies.agentStorage,
         findWorkspaceIdForCwd: this.dependencies.findWorkspaceIdForCwd,
+        getWorkspace: this.dependencies.getWorkspace,
+        setWorkspaceRecoveryPin: this.dependencies.setWorkspaceRecoveryPin,
+        findWorkspaceIdsForBackingPath: this.dependencies.findWorkspaceIdsForBackingPath,
         listActiveWorkspaces: this.dependencies.listActiveWorkspaces,
         archiveWorkspaceRecord: this.dependencies.archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds: this.dependencies.emitWorkspaceUpdatesForWorkspaceIds,

@@ -1,3 +1,4 @@
+import { createWorkspaceArchiveAuthorityPorts } from "./workspace-archive-service.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1450,8 +1451,8 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     const recoveryPlacementRead = Promise.withResolvers<void>();
     const directoryChecks: string[] = [];
     const archiving = h.archive({
-      setWorkspaceRecoveryPin: async (id, pin) => {
-        await h.deps.setWorkspaceRecoveryPin!(id, pin);
+      setWorkspaceRecoveryPin: async (id, pin, expected) => {
+        await h.deps.setWorkspaceRecoveryPin!(id, pin, expected);
         persisted.resolve();
         await finishArchive.promise;
       },
@@ -1498,8 +1499,8 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     const archivePlacementRead = Promise.withResolvers<void>();
     const service = createWorkspaceRecoveryService({
       ...h.recoveryDeps,
-      clearRecoveryPin: async (id, pin) => {
-        await h.recoveryDeps.clearRecoveryPin!(id, pin);
+      clearRecoveryPin: async (id, pin, expected) => {
+        await h.recoveryDeps.clearRecoveryPin!(id, pin, expected);
         atRetirement.resolve();
         await finishRestore.promise;
       },
@@ -1534,5 +1535,171 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       "next generation\n",
     );
     expect(await jjRevisionResolves(h.fixture.repoDir, newPin)).toBe(true);
+  });
+  test.each([
+    "incarnation",
+    "backing-metadata",
+    "source-metadata",
+    "contradictory-external",
+  ] as const)(
+    "managed archive refuses %s before setup/agent/archive effects even with dispatch disabled",
+    async (disappearance) => {
+      const h = await lifecycleHarness();
+      await h.registry.update("lifecycle-a", (record) => ({
+        ...record,
+        jjWorkspaceManagement: "managed",
+        isPaseoOwnedWorktree: false,
+        kind: "directory",
+      }));
+      writeFileSync(path.join(h.created.worktreePath, "preserve.txt"), "preserve live files\n");
+      if (disappearance === "incarnation")
+        rmSync(path.join(h.created.worktreePath, ".jj", "paseo", "incarnation"));
+      if (disappearance === "backing-metadata")
+        rmSync(path.join(h.created.worktreePath, ".jj"), { recursive: true, force: true });
+      if (disappearance === "source-metadata")
+        rmSync(path.join(h.fixture.repoDir, ".jj"), { recursive: true, force: true });
+      if (disappearance === "contradictory-external")
+        await h.registry.update("lifecycle-a", (record) => ({
+          ...record,
+          jjWorkspaceManagement: "external",
+        }));
+      const saved = await h.registry.get("lifecycle-a");
+      let effects = 0;
+      const oldDispatch = process.env.PASEO_JJ_DISPATCH;
+      process.env.PASEO_JJ_DISPATCH = "0";
+      try {
+        await expect(
+          h.archive({
+            stopWorkspaceSetup: async () => {
+              effects++;
+            },
+            archiveWorkspaceRecord: async () => {
+              effects++;
+            },
+            killTerminalsForWorkspace: async () => {
+              effects++;
+            },
+          }),
+        ).rejects.toThrow(/incarnation|source repository changed|contradicts/);
+        expect(effects).toBe(0);
+        expect(await h.registry.get("lifecycle-a")).toEqual(saved);
+        expect(readFileSync(path.join(h.created.worktreePath, "preserve.txt"), "utf8")).toBe(
+          "preserve live files\n",
+        );
+      } finally {
+        if (oldDispatch === undefined) delete process.env.PASEO_JJ_DISPATCH;
+        else process.env.PASEO_JJ_DISPATCH = oldDispatch;
+      }
+    },
+  );
+
+  test("jj archive-by-path with no authoritative records refuses before teardown", async () => {
+    const h = await lifecycleHarness();
+    let effects = 0;
+    await expect(
+      archiveByScope(
+        {
+          ...h.deps,
+          listActiveWorkspaces: async () => [],
+          stopWorkspaceSetup: async () => {
+            effects++;
+          },
+          archiveWorkspaceRecord: async () => {
+            effects++;
+          },
+        },
+        {
+          scope: { kind: "worktree", targetPath: h.created.worktreePath },
+          requestId: "no-authority",
+        },
+      ),
+    ).rejects.toThrow("No workspace record authorizes");
+    expect(effects).toBe(0);
+    expect(existsSync(h.created.worktreePath)).toBe(true);
+  });
+
+  test("production archive ports pin only matching managed sibling incarnations", async () => {
+    const h = await lifecycleHarness();
+    const matching = (await h.registry.get("lifecycle-a"))!;
+    for (const sibling of [
+      {
+        workspaceId: "earlier",
+        jjWorkspaceId: matching.jjWorkspaceId,
+        jjWorkspaceManagement: "managed" as const,
+        recoveryBookmark: null,
+      },
+      {
+        workspaceId: "unrelated",
+        jjWorkspaceId: "older-incarnation",
+        jjWorkspaceManagement: "managed" as const,
+        recoveryBookmark: "paseo/recovery/older",
+      },
+      {
+        workspaceId: "external",
+        jjWorkspaceId: undefined,
+        jjWorkspaceManagement: "external" as const,
+        recoveryBookmark: null,
+      },
+      {
+        workspaceId: "unknown",
+        jjWorkspaceId: undefined,
+        jjWorkspaceManagement: undefined,
+        recoveryBookmark: null,
+      },
+    ])
+      await h.registry.upsert({
+        ...matching,
+        ...sibling,
+        archivedAt: "earlier",
+        isPaseoOwnedWorktree: false,
+      });
+    const old = await h.registry.get("unrelated");
+    const external = await h.registry.get("external");
+    const unknown = await h.registry.get("unknown");
+    await expect(
+      h.archive(createWorkspaceArchiveAuthorityPorts(h.registry)),
+    ).resolves.toMatchObject({ removedDirectory: true });
+    const pin = (await h.registry.get("lifecycle-a"))?.recoveryBookmark;
+    expect((await h.registry.get("earlier"))?.recoveryBookmark).toBe(pin);
+    expect(await h.registry.get("unrelated")).toEqual(old);
+    expect(await h.registry.get("external")).toEqual(external);
+    expect(await h.registry.get("unknown")).toEqual(unknown);
+  });
+  test("archive preflight refuses a current record moved to another valid managed backing root", async () => {
+    const h = await lifecycleHarness();
+    const replacement = await createJjWorktree({
+      cwd: h.fixture.repoDir,
+      worktreeSlug: "other",
+      worktreesRoot: path.join(h.fixture.dir, "custom-worktrees"),
+      source: { kind: "branch-off", baseBranch: "main", branchName: "other-feature" },
+    });
+    let reads = 0;
+    let effects = 0;
+    await expect(
+      h.archive({
+        getWorkspace: async (id) => {
+          reads++;
+          if (reads === 3)
+            await h.registry.update(id, (current) => ({
+              ...current,
+              cwd: replacement.worktreePath,
+              worktreeRoot: replacement.worktreePath,
+              jjWorkspaceId: readJjWorkspaceIncarnation(replacement.worktreePath)!,
+              jjWorkspaceManagement: "managed",
+            }));
+          return h.registry.get(id);
+        },
+        stopWorkspaceSetup: async () => {
+          effects++;
+        },
+        archiveWorkspaceRecord: async () => {
+          effects++;
+        },
+      }),
+    ).rejects.toThrow("backing authority changed");
+    expect(effects).toBe(0);
+    expect((await h.registry.get("lifecycle-a"))?.archivedAt).toBeNull();
+    expect(existsSync(h.created.worktreePath)).toBe(true);
+    expect(existsSync(replacement.worktreePath)).toBe(true);
   });
 });
