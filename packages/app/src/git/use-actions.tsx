@@ -463,6 +463,11 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       s.sessions[serverId]?.serverInfo?.features?.checkoutForgeSetAutoMerge === true ||
       s.sessions[serverId]?.serverInfo?.features?.checkoutGithubSetAutoMerge === true,
   );
+  // jj RPCs require the advertised daemon capability — vcs data alone could
+  // come from a newer daemon mismatch (review should-fix 1).
+  const checkoutJjEnabled = useSessionStore(
+    (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutJj === true,
+  );
 
   const toastActionError = useCallback(
     (error: unknown, fallback: string) => {
@@ -813,7 +818,10 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
           handler: handleArchiveWorkspace,
         },
         "new-change": {
-          disabled: isActionDisabled(actionsDisabled, newChangeStatus),
+          disabled:
+            !checkoutJjEnabled ||
+            gitStatus?.vcs !== "jj" ||
+            isActionDisabled(actionsDisabled, newChangeStatus),
           status: newChangeStatus,
           icon: icons.newChange,
           handler: handleNewChange,
@@ -860,6 +868,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     mergeStatus,
     mergeFromBaseStatus,
     newChangeStatus,
+    checkoutJjEnabled,
     gitStatus?.vcs,
     archiveController.canArchive,
     archiveController.isArchiving,

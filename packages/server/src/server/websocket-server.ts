@@ -662,8 +662,11 @@ export class VoiceAssistantWebSocketServer {
     workspaceLabelService?: WorkspaceLabelService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
-    // Warm the jj runtime probe so the first server_info already reflects it
-    // (isJjFeatureAvailable reads the sync mirror populated here).
+    // Warm the jj runtime probe AND hold construction until it settles, so
+    // the first server_info can never advertise checkoutJj from a cold probe
+    // while dispatch would route differently (review should-fix 1). The probe
+    // has a 5s cap; on timeout the feature stays unadvertised until the next
+    // server_info after warm-up completes.
     warmJjRuntime();
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
