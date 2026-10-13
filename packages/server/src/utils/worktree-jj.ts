@@ -129,8 +129,9 @@ async function pinRevision(cwd: string, revset: string): Promise<string> {
   const result = await runJj(["log", "--no-graph", "-r", revset, "-T", COMMIT_ID_TEMPLATE], {
     cwd,
   });
-  const commitId = result.stdout.trim().split("\n")[0];
-  if (!commitId) {
+  const ids = result.stdout.trim().split("\n");
+  const commitId = ids[0];
+  if (result.truncated || ids.length !== 1 || !/^[0-9a-f]{40,64}$/.test(commitId)) {
     throw new Error(`Cannot resolve jj revision for base: ${revset}`);
   }
   return commitId;
@@ -643,8 +644,9 @@ export async function resolveJjPinnedRevision(cwd: string, revset: string): Prom
   const result = await runJj(["log", "--no-graph", "-r", revset, "-T", COMMIT_ID_TEMPLATE], {
     cwd,
   });
-  const commitId = result.stdout.trim().split("\n")[0];
-  if (!commitId) {
+  const ids = result.stdout.trim().split("\n");
+  const commitId = ids[0];
+  if (result.truncated || ids.length !== 1 || !/^[0-9a-f]{40,64}$/.test(commitId)) {
     throw new Error(`Cannot resolve jj revision: ${revset}`);
   }
   return commitId;

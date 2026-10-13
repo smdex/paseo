@@ -5269,6 +5269,7 @@ const CheckoutStatusCommonSchema = z.object({
   vcs: z.enum(["git", "jj"]).optional(),
   // jj change id of the working-copy commit (jj only; null when unknown).
   changeId: z.string().nullable().optional(),
+  defaultWorkspaceBase: z.object({ refName: z.string(), displayName: z.string() }).optional(),
 });
 
 const CheckoutStatusNotGitSchema = CheckoutStatusCommonSchema.extend({
@@ -5966,6 +5967,9 @@ export const BranchSuggestionsResponseSchema = z.object({
           hasRemote: z.boolean().optional(),
           localAhead: z.number().int().nonnegative().optional(),
           localBehind: z.number().int().nonnegative().optional(),
+          localRef: z.string().optional(),
+          remoteRef: z.string().optional(),
+          remoteName: z.string().optional(),
         }),
       )
       .optional(),

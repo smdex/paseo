@@ -72,6 +72,7 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       requestId,
       vcs: snapshot.git.vcs,
       changeId: snapshot.git.changeId ?? null,
+      defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
     };
   }
 
@@ -94,6 +95,7 @@ export function buildCheckoutStatusPayloadFromSnapshot({
     requestId,
     vcs: snapshot.git.vcs,
     changeId: snapshot.git.changeId ?? null,
+    defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
   };
 }
 

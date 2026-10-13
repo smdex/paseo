@@ -133,15 +133,21 @@ describe("checkout dispatch gate", () => {
       await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(JjUnavailableError);
     });
 
-    it("falls back to the git implementation when dispatch is disabled (escape hatch)", async () => {
+    it.each(["0", undefined])("refuses detected jj when dispatch is %s", async (value) => {
       const dir = scratchJj();
-      setEnv("PASEO_JJ_DISPATCH", "0");
-      // Colocated scratch repo: the git view is coherent (jj colocates by default).
-      const status = await dispatchGetCheckoutStatus(dir);
-      expect(status.isGit).toBe(true);
-      if (status.isGit) {
-        expect(status.vcs).toBeUndefined();
-      }
+      setEnv("PASEO_JJ_DISPATCH", value);
+      await expect(dispatchGetCheckoutStatus(dir)).rejects.toBeInstanceOf(JjUnavailableError);
+      await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(JjUnavailableError);
+      expect(isJjFeatureAvailable()).toBe(false);
+    });
+
+    it("refuses detected jj when the binary is missing instead of running enclosing Git", async () => {
+      const dir = scratchJj();
+      const emptyPath = scratchPlain();
+      setEnv("PATH", emptyPath);
+      resetJjRuntimeCache();
+      await expect(dispatchGetCheckoutStatus(dir)).rejects.toBeInstanceOf(JjUnavailableError);
+      await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(JjUnavailableError);
     });
 
     it("rejects stash listing on jj with NotSupportedOnJjError", async () => {

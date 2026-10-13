@@ -1825,3 +1825,77 @@ describe("WorkspaceReconciliationService", () => {
     },
   );
 });
+
+test.skipIf(!isJjAvailable())(
+  "discovers .jj at the existing narrow project watch without changing identity",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    projects.set(
+      "p-jj",
+      createPersistedProjectRecord({
+        projectId: "p-jj",
+        rootPath: fixture.repoDir,
+        kind: "non_git",
+        displayName: "project",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w-jj",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w-jj",
+        projectId: "p-jj",
+        cwd: fixture.repoDir,
+        kind: "directory",
+        displayName: "project",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    let emit: (event: string, filename: string | Buffer | null) => void = () => {};
+    let scheduled: () => void | Promise<void> = () => {};
+    let scheduledCount = 0;
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: createWorkspaceGitServiceStub({
+        [fixture.repoDir]: {
+          projectKind: "git",
+          projectDisplayName: "project",
+          workspaceDisplayName: "project",
+        },
+      }),
+      watchProjectRoot: (_root, _options, onChange) => {
+        emit = onChange;
+        return { close() {} };
+      },
+      clock: {
+        setTimeout: (callback) => {
+          scheduled = callback;
+          scheduledCount++;
+          return {};
+        },
+        clearTimeout() {},
+        setInterval: () => ({}),
+        clearInterval() {},
+      },
+    });
+    try {
+      await service.start();
+      emit("rename", "unrelated");
+      expect(scheduledCount).toBe(0);
+      emit("rename", ".jj");
+      expect(scheduledCount).toBe(1);
+      await scheduled();
+      expect(projects.get("p-jj")?.kind).toBe("git");
+      expect(workspaces.get("w-jj")?.projectId).toBe("p-jj");
+      expect(workspaces.get("w-jj")?.cwd).toBe(fixture.repoDir);
+    } finally {
+      service.dispose();
+      fixture.dispose();
+    }
+  },
+);

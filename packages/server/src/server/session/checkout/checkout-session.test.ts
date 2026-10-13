@@ -930,6 +930,42 @@ describe("CheckoutSession", () => {
     });
   });
 
+  describe("jj Refresh routing", () => {
+    itIfJj("refreshes local facts and diffs without resolving forge", async () => {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const calls: string[] = [];
+      const { subscriber, refreshedCwds } = createFakeDiffSubscriber({
+        cwd: "",
+        files: [],
+        error: null,
+      });
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          resolveForge: async () => {
+            throw new Error("forge must not run");
+          },
+          getSnapshot: async (cwd) => {
+            calls.push(cwd);
+            return createNoGitWorkspaceRuntimeSnapshot(cwd);
+          },
+        },
+        diff: subscriber,
+      });
+      await checkout.handleRefreshRequest({
+        type: "checkout.refresh.request",
+        cwd: fixture.repoDir,
+        requestId: "jj-refresh",
+      });
+      expect(calls).toEqual([fixture.repoDir]);
+      expect(refreshedCwds).toEqual([fixture.repoDir]);
+      expect(emitted.at(-1)).toMatchObject({
+        type: "checkout.refresh.response",
+        payload: { success: true, error: null },
+      });
+    });
+  });
+
   describe("pull request deferral on jj", () => {
     itIfJj("rejects PR creation with the typed deferral before any forge or git work", async () => {
       const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });

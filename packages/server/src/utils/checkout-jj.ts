@@ -64,6 +64,7 @@ export interface JjCheckoutContext {
   runJjCommand?: RunJjCommand;
   /** Pre-resolved facts, mirroring CheckoutContext.facts reuse. */
   facts?: JjSnapshotFacts | null;
+  signal?: AbortSignal;
 }
 
 function getRunJjCommand(context?: JjCheckoutContext): RunJjCommand {
@@ -85,7 +86,11 @@ async function runJj(
   // Every checkout-jj command runs with cwd = a workspace directory, so a
   // stale working copy (rewritten from another workspace) is recovered here
   // once instead of failing the read/mutation (review fix 15).
-  const staleSafe = await runJjCommandStaleSafe(args, options, runner);
+  const staleSafe = await runJjCommandStaleSafe(
+    args,
+    { ...options, signal: context?.signal },
+    runner,
+  );
   return {
     stdout: staleSafe.stdout,
     stderr: staleSafe.stderr,
@@ -306,7 +311,9 @@ function selectDefaultRemote(remotes: JjRemoteInfo[]): JjRemoteInfo | null {
   if (remotes.length === 0) {
     return null;
   }
-  return remotes.find((remote) => remote.name === "origin") ?? remotes[0] ?? null;
+  return (
+    remotes.find((remote) => remote.name === "origin") ?? (remotes.length === 1 ? remotes[0] : null)
+  );
 }
 
 function subjectFromDescription(description: string): string {
@@ -586,9 +593,7 @@ async function getJjUpstreamStatus(
   }
   // Use the same selected remote as push; never compare against every remote
   // or the colocated "git" export view (neither is the push destination).
-  const remote =
-    remotes.find((candidate) => candidate.name === "origin") ??
-    (remotes.length === 1 ? remotes[0] : null);
+  const remote = selectDefaultRemote(remotes);
   if (!remote) return null;
   const remoteRef = `remote_bookmarks(exact:"${bookmark}", exact:"${remote.name}")`;
   const probe = await runJj(
@@ -608,6 +613,25 @@ async function getJjUpstreamStatus(
   return { ref: `${remote.name}/${bookmark}`, aheadBehind: { ahead, behind } };
 }
 
+async function getJjDefaultWorkspaceBase({
+  cwd,
+  currentBranch,
+  context,
+}: {
+  cwd: string;
+  currentBranch: string | null;
+  context?: JjCheckoutContext;
+}): Promise<{ refName: string; displayName: string }> {
+  const suggestions = currentBranch
+    ? await listJjBookmarkSuggestions(cwd, { query: currentBranch }, context)
+    : [];
+  const current = suggestions.find((suggestion) => suggestion.name === currentBranch);
+  const defaultWorkspaceBase = current
+    ? { refName: current.remoteRef ?? current.localRef ?? "@", displayName: current.name }
+    : { refName: "@", displayName: "Current change" };
+  return defaultWorkspaceBase;
+}
+
 export async function getJjStatus(
   cwd: string,
   context?: JjCheckoutContext,
@@ -620,7 +644,7 @@ export async function getJjStatus(
   const { identity, workingCopy } = jjFacts;
   const currentBranch = jjOwnedBookmark(jjFacts);
   const remoteUrl = selectDefaultRemote(jjFacts.remotes)?.url ?? null;
-  const hasRemote = remoteUrl !== null;
+  const hasRemote = jjFacts.remotes.length > 0;
   const isDirty = !workingCopy.empty || workingCopy.untrackedPaths.length > 0;
   const baseRef = jjFacts.resolvedBaseRef;
   const factsContext = { ...context, facts: jjFacts };
@@ -636,7 +660,9 @@ export async function getJjStatus(
     factsContext,
   );
 
+  const defaultWorkspaceBase = await getJjDefaultWorkspaceBase({ cwd, currentBranch, context });
   const common = {
+    defaultWorkspaceBase,
     repoRoot: identity.workspaceRoot,
     currentBranch,
     isDirty,
@@ -881,27 +907,37 @@ export async function listJjCommits({
     return { baseRef: null, commits: [] };
   }
   const baseRef = jjFacts.resolvedBaseRef;
-  if (!baseRef) {
-    return { baseRef: null, commits: [] };
-  }
-
-  const workspaceRange = `${baseRef}..@`;
+  const workspaceRange = baseRef ? `${baseRef}..@` : "::@ ~ root()";
   const [workspaceLog, baseLog, onRemoteCommitIds] = await Promise.all([
-    runJj(["log", "--no-graph", "-r", workspaceRange, "-T", LOG_RECORD_TEMPLATE], { cwd }, context),
     runJj(
       [
         "log",
         "--no-graph",
-        "-n",
-        String(CHECKOUT_BASE_COMMIT_LIMIT),
+        ...(baseRef ? [] : ["-n", String(CHECKOUT_BASE_COMMIT_LIMIT)]),
         "-r",
-        `::${baseRef}`,
+        workspaceRange,
         "-T",
         LOG_RECORD_TEMPLATE,
       ],
       { cwd },
       context,
     ),
+    baseRef
+      ? runJj(
+          [
+            "log",
+            "--no-graph",
+            "-n",
+            String(CHECKOUT_BASE_COMMIT_LIMIT),
+            "-r",
+            `::${baseRef}`,
+            "-T",
+            LOG_RECORD_TEMPLATE,
+          ],
+          { cwd },
+          context,
+        )
+      : Promise.resolve({ stdout: "" }),
     listRemoteBookmarkCommitIds(cwd, context),
   ]);
 
@@ -1129,67 +1165,83 @@ interface JjBookmarkListEntry {
   name: string;
   commitId: string;
   committerDate: number;
-  hasRemote: boolean;
 }
 
-/**
- * Local bookmarks as branch suggestions. `mine()`-scoped commit metadata comes
- * from a single template query; remote presence from the tracked counterpart.
- */
+function parseBookmarkEntries(result: JjCommandResult): JjBookmarkListEntry[] {
+  if (result.truncated) throw new Error("jj bookmark list was truncated");
+  const entries: JjBookmarkListEntry[] = [];
+  for (const line of result.stdout.split("\n")) {
+    if (!line) continue;
+    const [name, commitId, date] = line.split("\t");
+    const committerDate = Number(date);
+    if (!name || !/^[0-9a-f]{40,64}$/.test(commitId) || !Number.isFinite(committerDate)) {
+      throw new Error("Invalid jj bookmark target");
+    }
+    if (!name.startsWith("paseo/recovery/")) entries.push({ name, commitId, committerDate });
+  }
+  return entries;
+}
+
+function uniqueBookmarkEntries(entries: JjBookmarkListEntry[]): Map<string, JjBookmarkListEntry> {
+  const targets = new Map<string, JjBookmarkListEntry>();
+  for (const entry of entries) {
+    if (targets.has(entry.name)) throw new Error(`Conflicted bookmark: ${entry.name}`);
+    targets.set(entry.name, entry);
+  }
+  return targets;
+}
+
 export async function listJjBookmarkSuggestions(
   cwd: string,
   options?: { query?: string; limit?: number },
   context?: JjCheckoutContext,
 ): Promise<BranchSuggestion[]> {
-  const query = options?.query ?? "";
-  // `committer` is not a standalone template function — `self.committer()` is.
-  const [localResult, remoteResult] = await Promise.all([
-    runJj(
-      [
-        "log",
-        "--no-graph",
-        "-r",
-        "bookmarks()",
-        "-T",
-        'bookmarks.map(|b| b.name() ++ "\\t" ++ commit_id ++ "\\t" ++ self.committer().timestamp().format("%s") ++ "\\n").join("")',
-      ],
-      { cwd },
-      context,
-    ),
-    runJj(
-      [
-        "log",
-        "--no-graph",
-        "-r",
-        "remote_bookmarks()",
-        "-T",
-        'remote_bookmarks.map(|b| b.name() ++ "\\n").join("")',
-      ],
-      { cwd },
-      context,
-    ),
-  ]);
-  const remoteNames = new Set(remoteResult.stdout.split("\n").filter((line) => line.length > 0));
-  const entries: JjBookmarkListEntry[] = [];
-  for (const line of localResult.stdout.split("\n")) {
-    if (!line) {
-      continue;
-    }
-    const [name, commitId, dateSeconds] = line.split("\t");
-    const committerDate = Number(dateSeconds);
-    if (!name || !commitId || !Number.isFinite(committerDate)) {
-      continue;
-    }
-    entries.push({ name, commitId, committerDate, hasRemote: remoteNames.has(name) });
+  const remote = selectDefaultRemote(await listJjRemotes(cwd, context));
+  const template =
+    'b.name() ++ "\\t" ++ commit_id ++ "\\t" ++ self.committer().timestamp().format("%s") ++ "\\n"';
+  const localResult = await runJj(
+    ["log", "--no-graph", "-r", "bookmarks()", "-T", `bookmarks.map(|b| ${template}).join("")`],
+    { cwd },
+    context,
+  );
+  const remoteResult = remote
+    ? await runJj(
+        [
+          "log",
+          "--no-graph",
+          "-r",
+          `remote_bookmarks(remote=exact:${JSON.stringify(remote.name)})`,
+          "-T",
+          `remote_bookmarks.filter(|b| b.remote() == ${JSON.stringify(remote.name)}).map(|b| ${template}).join("")`,
+        ],
+        { cwd },
+        context,
+      )
+    : null;
+  const localEntries = parseBookmarkEntries(localResult);
+  const remoteEntries = remoteResult ? parseBookmarkEntries(remoteResult) : [];
+  const locals = uniqueBookmarkEntries(localEntries);
+  const remotes = uniqueBookmarkEntries(remoteEntries);
+  const names = new Set([...locals.keys(), ...remotes.keys()]);
+  const suggestions: BranchSuggestion[] = [];
+  for (const name of names) {
+    if (options?.query && !name.includes(options.query)) continue;
+    const local = locals.get(name);
+    const remoteEntry = remotes.get(name);
+    const identical = local && remoteEntry && local.commitId === remoteEntry.commitId;
+    suggestions.push({
+      name,
+      committerDate: Math.max(local?.committerDate ?? 0, remoteEntry?.committerDate ?? 0),
+      hasLocal: local !== undefined,
+      hasRemote: remoteEntry !== undefined,
+      localRef: local?.commitId,
+      remoteRef: remoteEntry?.commitId,
+      remoteName: remoteEntry ? remote?.name : undefined,
+      ...(identical ? { localAhead: 0, localBehind: 0 } : {}),
+    });
   }
-  const filtered = query ? entries.filter((entry) => entry.name.includes(query)) : entries;
-  const limited = options?.limit !== undefined ? filtered.slice(0, options.limit) : filtered;
-  return limited.map((entry) => ({
-    name: entry.name,
-    committerDate: entry.committerDate * 1000,
-    hasLocal: true,
-    hasRemote: entry.hasRemote,
-  }));
+  suggestions.sort((a, b) => b.committerDate - a.committerDate || a.name.localeCompare(b.name));
+  return options?.limit === undefined ? suggestions : suggestions.slice(0, options.limit);
 }
 
 /** Bookmark-backed branch checkout resolution for validation flows. */
@@ -1440,13 +1492,8 @@ async function selectJjRemote(cwd: string, context?: JjCheckoutContext): Promise
   if (remotes.length === 0) {
     throw new JjPushTargetError("No git remote is configured for this repository.");
   }
-  if (remotes.length === 1) {
-    return remotes[0];
-  }
-  const origin = remotes.find((remote) => remote.name === "origin");
-  if (origin) {
-    return origin;
-  }
+  const selected = selectDefaultRemote(remotes);
+  if (selected) return selected;
   const names = remotes.map((remote) => remote.name).join(", ");
   throw new JjPushTargetError(
     `Multiple git remotes are configured (${names}); set up tracking or push a specific bookmark.`,
@@ -1477,7 +1524,11 @@ export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<
  */
 export async function jjPull(cwd: string, context?: JjCheckoutContext): Promise<void> {
   const remote = await selectJjRemote(cwd, context);
-  await runJj(["git", "fetch", "--remote", remote.name], { cwd }, context);
+  await runJj(
+    ["--config", "git.abandon-unreachable-commits=false", "git", "fetch", "--remote", remote.name],
+    { cwd },
+    context,
+  );
 }
 
 /**

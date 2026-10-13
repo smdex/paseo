@@ -408,9 +408,18 @@ describe("checkout status projection: vcs/changeId propagation", () => {
     const payload = buildCheckoutStatusPayloadFromSnapshot({
       cwd: "/repo",
       requestId: "r1",
-      snapshot: snapshotWith({ vcs: "jj", changeId: "xyz123" }),
+      snapshot: snapshotWith({
+        vcs: "jj",
+        changeId: "xyz123",
+        defaultWorkspaceBase: { refName: "a".repeat(40), displayName: "main" },
+      }),
     });
-    expect(payload).toMatchObject({ isGit: true, vcs: "jj", changeId: "xyz123" });
+    expect(payload).toMatchObject({
+      isGit: true,
+      vcs: "jj",
+      changeId: "xyz123",
+      defaultWorkspaceBase: { refName: "a".repeat(40), displayName: "main" },
+    });
   });
 
   test("omits vcs and nulls changeId for git snapshots (old clients see the old shape)", () => {

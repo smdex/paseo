@@ -1,6 +1,7 @@
 import type { CreatePaseoWorktreeInput } from "@getpaseo/client/internal/daemon-client";
-import type { ForgeSearchItem } from "@getpaseo/protocol/messages";
+import type { CheckoutStatusResponse, ForgeSearchItem } from "@getpaseo/protocol/messages";
 import type { ComboboxOptionModel } from "@/components/ui/combobox-options";
+import { i18n } from "@/i18n/i18next";
 import { getForgePresentation } from "@/git/forge";
 
 export interface BranchPickerDetail {
@@ -10,6 +11,9 @@ export interface BranchPickerDetail {
   hasRemote?: boolean;
   localAhead?: number;
   localBehind?: number;
+  localRef?: string;
+  remoteRef?: string;
+  remoteName?: string;
 }
 
 export type PickerItem =
@@ -63,10 +67,54 @@ function divergenceAccessibility(ahead: number, behind: number, counterpart: str
   return `${commitCount(behind)} behind ${counterpart}`;
 }
 
-export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): PickerItem[] {
+function branchPickerRef(detail: BranchPickerDetail, kind: "local" | "remote"): string {
+  if (kind === "local") return detail.localRef ?? `refs/heads/${detail.name}`;
+  return detail.remoteRef ?? `refs/remotes/${detail.remoteName ?? "origin"}/${detail.name}`;
+}
+
+interface RefPickerSearchInput {
+  status: CheckoutStatusResponse["payload"] | null | undefined;
+  enabled: boolean;
+}
+
+export function refPickerBackend({ status, enabled }: RefPickerSearchInput) {
+  return { vcs: status?.vcs, branchesEnabled: enabled && status?.isGit === true };
+}
+
+export function canSearchRefPickerChangeRequests({
+  status,
+  enabled,
+}: RefPickerSearchInput): boolean {
+  return enabled && status?.isGit === true && status.vcs !== "jj";
+}
+
+export function refPickerChangeRequests(
+  status: CheckoutStatusResponse["payload"] | null | undefined,
+  items: ForgeSearchItem[] | undefined,
+): ForgeSearchItem[] {
+  return canSearchRefPickerChangeRequests({ status, enabled: true }) ? (items ?? []) : [];
+}
+
+function hasExactJjBookmarkRefs(detail: BranchPickerDetail): boolean {
+  if (detail.hasLocal === undefined || detail.hasRemote === undefined) return false;
+  const completeRef = (ref: string | undefined) =>
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref ?? "");
+  return (
+    (detail.hasLocal || detail.hasRemote) &&
+    (!detail.hasLocal || completeRef(detail.localRef)) &&
+    (!detail.hasRemote || completeRef(detail.remoteRef))
+  );
+}
+
+export function buildBranchPickerItems(
+  details: readonly BranchPickerDetail[],
+  vcs?: BaseRefCheckoutStatus["vcs"],
+): PickerItem[] {
   const items: PickerItem[] = [];
 
-  for (const detail of details) {
+  // Optional on the wire for Git; never synthesize Git refs for an older native jj host.
+  const resolvedDetails = vcs === "jj" ? details.filter(hasExactJjBookmarkRefs) : details;
+  for (const detail of resolvedDetails) {
     const hasKnownProvenance = detail.hasLocal !== undefined || detail.hasRemote !== undefined;
     if (!hasKnownProvenance) {
       items.push({
@@ -90,14 +138,15 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
     // when the divergence is unknown.
     const showsBothRefs = hasLocal && hasRemote && (!hasDivergence || refsDiffer);
 
+    const remoteName = detail.remoteName ?? "origin";
     // The origin row goes first because it is the default base, and it never states
     // divergence: it is the reference point the local row is measured against.
     if (hasRemote) {
       items.push({
         kind: "branch",
         name: detail.name,
-        refName: `refs/remotes/origin/${detail.name}`,
-        accessibilityLabel: `${detail.name}, origin branch`,
+        refName: branchPickerRef(detail, "remote"),
+        accessibilityLabel: `${detail.name}, ${remoteName} branch`,
         committerDate: detail.committerDate,
       });
     }
@@ -106,7 +155,7 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
       const localItem: Extract<PickerItem, { kind: "branch" }> = {
         kind: "branch",
         name: showsBothRefs ? `${detail.name} (local)` : detail.name,
-        refName: `refs/heads/${detail.name}`,
+        refName: branchPickerRef(detail, "local"),
         accessibilityLabel: `${detail.name}, local branch`,
         committerDate: detail.committerDate,
       };
@@ -115,7 +164,7 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
         localItem.accessibilityLabel += `, ${divergenceAccessibility(
           localAhead,
           localBehind,
-          `origin ${detail.name}`,
+          `${remoteName} ${detail.name}`,
         )}`;
       }
       items.push(localItem);
@@ -128,6 +177,8 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
 export interface BaseRefCheckoutStatus {
   currentBranch: string | null;
   upstreamRef?: string | null;
+  vcs?: "git" | "jj";
+  defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
 // Display only. The exact ref is what every request carries; this is just how a ref reads in
@@ -161,6 +212,13 @@ function refQualifier(refName: string): string | null {
 // carries unpushed commits into the new workspace. The daemon sends the resolved ref rather
 // than a remote name, so a fork tracking upstream/main branches from upstream/main.
 export function defaultBasePickerItem(status: BaseRefCheckoutStatus): PickerItem | null {
+  if (status.vcs === "jj") {
+    const base = status.defaultWorkspaceBase;
+    if (!base) return null;
+    const name =
+      base.refName === "@" ? i18n.t("newWorkspace.refPicker.currentChange") : base.displayName;
+    return { kind: "branch", name, refName: base.refName, accessibilityLabel: name };
+  }
   const currentBranch = status.currentBranch;
   if (!currentBranch) return null;
   // COMPAT(checkoutUpstreamRef): added in v0.2.6, remove after 2027-02-01 once the daemon
@@ -216,7 +274,9 @@ export function prPickerOptionId(number: number): string {
 
 export function pickerOptionId(item: PickerItem): string {
   return item.kind === "branch"
-    ? branchPickerOptionId(item.refName)
+    ? branchPickerOptionId(
+        /^[0-9a-f]{40,64}$/.test(item.refName) ? `${item.refName}:${item.name}` : item.refName,
+      )
     : prPickerOptionId(item.item.number);
 }
 
@@ -244,13 +304,14 @@ export function buildPickerOptionData(input: {
   branchDetails: readonly BranchPickerDetail[];
   prItems: readonly ForgeSearchItem[];
   baseItem: PickerItem | null;
+  vcs?: BaseRefCheckoutStatus["vcs"];
 }): PickerOptionData {
   const itemById = new Map<string, PickerItem>();
   const timedOptions: TimedOption[] = [];
 
-  for (const branch of buildBranchPickerItems(input.branchDetails)) {
+  for (const branch of buildBranchPickerItems(input.branchDetails, input.vcs)) {
     if (branch.kind !== "branch") continue;
-    const id = branchPickerOptionId(branch.refName);
+    const id = pickerOptionId(branch);
     itemById.set(id, branch);
     timedOptions.push({
       option: { id, label: pickerItemLabel(branch) },

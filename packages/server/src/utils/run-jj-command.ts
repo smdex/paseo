@@ -43,6 +43,7 @@ export interface JjCommandOptions {
   timeout?: number;
   maxOutputBytes?: number;
   acceptExitCodes?: number[];
+  signal?: AbortSignal;
 }
 
 export interface JjCommandResult {
@@ -209,6 +210,7 @@ function executeJjCommand(
   context: JjExecutionContext,
 ): Promise<JjCommandResult> {
   try {
+    options.signal?.throwIfAborted();
     assertNoDeletionBarrier(options.cwd);
   } catch (error) {
     return Promise.reject(error);
@@ -224,6 +226,7 @@ function executeJjCommand(
     complete();
   };
   const startCommand = () => {
+    options.signal?.throwIfAborted();
     assertNoDeletionBarrier(options.cwd, transaction);
     let releaseProcessSlot!: () => void;
     const exited = new Promise<void>((resolve) => {
@@ -271,6 +274,7 @@ function executeJjCommand(
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", cancel);
         callback();
       };
 
@@ -287,6 +291,10 @@ function executeJjCommand(
       };
 
       let child: JjChildProcess;
+      function cancel(): void {
+        processError = options.signal?.reason;
+        child.kill("SIGKILL");
+      }
       try {
         child = spawn("jj", [...JJ_GLOBAL_ARGS, ...args], {
           cwd: options.cwd,
@@ -430,6 +438,8 @@ function executeJjCommand(
 
         settle(() => resolve(result));
       });
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      if (options.signal?.aborted) cancel();
     });
     void exited.then(finish);
     return { result: resultPromise, exited };
@@ -439,7 +449,11 @@ function executeJjCommand(
     .run(startCommand, { priority: context.priority() })
     .catch((error) => {
       // An admitted command refused at spawn has no child exit to release it.
-      if (error instanceof JjMutationBarrierError) finish();
+      if (
+        error instanceof JjMutationBarrierError ||
+        (options.signal?.aborted && error === options.signal.reason)
+      )
+        finish();
       throw error;
     });
 }
@@ -539,7 +553,7 @@ export interface StaleSafeJjRunResult {
  */
 export async function runJjCommandStaleSafe(
   args: string[],
-  options: { cwd: string; acceptExitCodes?: number[]; maxOutputBytes?: number },
+  options: Pick<JjCommandOptions, "cwd" | "acceptExitCodes" | "maxOutputBytes" | "signal">,
   run: RunJjCommand = runJjCommand,
 ): Promise<StaleSafeJjRunResult> {
   // Explicit caller lists are preserved verbatim on the retry; only an ABSENT
@@ -550,6 +564,7 @@ export async function runJjCommandStaleSafe(
     cwd: options.cwd,
     acceptExitCodes: [...new Set([...accepted, 1, 2])],
     maxOutputBytes: options.maxOutputBytes,
+    signal: options.signal,
   });
   if (first.exitCode === 0 || first.truncated) {
     // Truncated runs resolve like the base executor (output-cap kills); the
@@ -557,11 +572,12 @@ export async function runJjCommandStaleSafe(
     return first;
   }
   if (STALE_WORKING_COPY_PATTERN.test(first.stderr)) {
-    await run(["workspace", "update-stale"], { cwd: options.cwd });
+    await run(["workspace", "update-stale"], { cwd: options.cwd, signal: options.signal });
     const second = await run(args, {
       cwd: options.cwd,
       ...(explicitAccepted ? { acceptExitCodes: explicitAccepted } : {}),
       maxOutputBytes: options.maxOutputBytes,
+      signal: options.signal,
     });
     return {
       stdout: second.stdout,

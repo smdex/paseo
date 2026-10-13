@@ -604,3 +604,10 @@ describe("archiveIfSafe", () => {
     expect(existsSync(worktree.worktreePath)).toBe(true);
   });
 });
+
+test("refuses stale merged forge state on jj before ownership or archive effects", async () => {
+  const harness = createHarness({ snapshot: createSnapshot({ git: { vcs: "jj" } }) });
+  await runArchiveIfSafe(harness);
+  expect(harness.deps.isPaseoOwnedWorktreeCwd).not.toHaveBeenCalled();
+  expect(harness.deps.archiveByScope).not.toHaveBeenCalled();
+});

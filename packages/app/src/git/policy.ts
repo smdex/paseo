@@ -212,9 +212,15 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
 
   allActions.set("pull", {
     id: "pull",
-    label: i18n.t("workspace.git.actions.pull.label"),
-    pendingLabel: i18n.t("workspace.git.actions.pull.pending"),
-    successLabel: i18n.t("workspace.git.actions.pull.success"),
+    label: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.label" : "workspace.git.actions.pull.label",
+    ),
+    pendingLabel: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.pending" : "workspace.git.actions.pull.pending",
+    ),
+    successLabel: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.success" : "workspace.git.actions.pull.success",
+    ),
     disabled: input.runtime.pull.disabled,
     status: input.runtime.pull.status,
     unavailableMessage: input.runtime.pull.disabled ? undefined : getPullUnavailableMessage(input),
@@ -312,7 +318,9 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
   const primaryActionId = getPrimaryActionId(input);
   const primary = primaryActionId ? (allActions.get(primaryActionId) ?? null) : null;
 
-  const secondaryIds = [...REMOTE_ACTION_IDS];
+  const secondaryIds = input.isJj
+    ? REMOTE_ACTION_IDS.filter((id) => id !== "pull-and-push")
+    : [...REMOTE_ACTION_IDS];
   if (!input.isOnBaseBranch) {
     secondaryIds.push(...getFeatureActionIds(input));
   }
@@ -349,7 +357,7 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.hasUncommittedChanges) {
     return "commit";
   }
-  if (canPull(input)) {
+  if (!input.isJj && canPull(input)) {
     return "pull";
   }
   if (canPush(input)) {
@@ -560,7 +568,10 @@ function getEnablePullRequestAutoMergeActionLabel(id: PullRequestAutoMergeEnable
 }
 
 function canPull(input: BuildGitActionsInput): boolean {
-  return input.hasRemote && !input.hasUncommittedChanges && (input.behindOfOrigin ?? 0) > 0;
+  return (
+    input.hasRemote &&
+    (input.isJj || (!input.hasUncommittedChanges && (input.behindOfOrigin ?? 0) > 0))
+  );
 }
 
 function canPush(input: BuildGitActionsInput): boolean {
@@ -659,6 +670,7 @@ function getPullUnavailableMessage(input: BuildGitActionsInput): string | undefi
   if (!input.hasRemote) {
     return i18n.t("workspace.git.actions.unavailable.pullNoRemote");
   }
+  if (input.isJj) return undefined;
   if (input.hasUncommittedChanges) {
     return i18n.t("workspace.git.actions.unavailable.pullDirty");
   }

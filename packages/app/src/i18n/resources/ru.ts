@@ -805,6 +805,11 @@ export const ru: TranslationResources = {
           pending: "Создание коммита...",
           success: "Коммит создан",
         },
+        fetch: {
+          label: "Получить",
+          pending: "Получение...",
+          success: "Получено",
+        },
         pull: {
           label: "Получить изменения",
           pending: "Получение изменений...",
@@ -1378,6 +1383,7 @@ export const ru: TranslationResources = {
       launch: "Выберите, что запустить",
     },
     refPicker: {
+      currentChange: "Текущее изменение",
       startingRef: "Исходная точка",
       intoBase: "в ветку {{baseRef}}",
       searching: "Идет поиск...",

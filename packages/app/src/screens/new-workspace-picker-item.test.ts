@@ -5,6 +5,9 @@ import {
   type BranchPickerDetail,
   branchPickerOptionId,
   buildBranchPickerItems,
+  canSearchRefPickerChangeRequests,
+  refPickerChangeRequests,
+  refPickerBackend,
   buildPickerOptionData,
   defaultBasePickerItem,
   pickerItemToCheckoutRequest,
@@ -385,4 +388,98 @@ describe("starting-ref search", () => {
       ).toEqual(visible);
     },
   );
+});
+
+it("uses daemon-resolved jj local/remote refs and bookmarkless default without Git syntax", () => {
+  const local = "a".repeat(40);
+  const remote = "b".repeat(40);
+  const items = buildBranchPickerItems([
+    {
+      name: "main",
+      committerDate: 123,
+      hasLocal: true,
+      hasRemote: true,
+      localRef: local,
+      remoteRef: remote,
+      remoteName: "upstream",
+    },
+  ]);
+  expect(items.map((item) => pickerItemToCheckoutRequest(item))).toEqual([
+    { action: "branch-off", refName: remote },
+    { action: "branch-off", refName: local },
+  ]);
+  const current = defaultBasePickerItem({
+    currentBranch: null,
+    vcs: "jj",
+    defaultWorkspaceBase: { refName: "@", displayName: "Current change" },
+  });
+  expect(current).toMatchObject({ kind: "branch", name: "Current change" });
+  expect(pickerItemToCheckoutRequest(current)).toEqual({ action: "branch-off", refName: "@" });
+  const base = defaultBasePickerItem({
+    currentBranch: "main",
+    vcs: "jj",
+    upstreamRef: "upstream/main",
+    defaultWorkspaceBase: { refName: remote, displayName: "main" },
+  });
+  expect(pickerItemToCheckoutRequest(base)).toEqual({ action: "branch-off", refName: remote });
+});
+
+it("does not search or retain PR choices before backend resolution or on jj", () => {
+  expect(refPickerBackend({ status: undefined, enabled: true }).branchesEnabled).toBe(false);
+  expect(canSearchRefPickerChangeRequests({ status: undefined, enabled: true })).toBe(false);
+  expect(refPickerChangeRequests(undefined, [prItem])).toEqual([]);
+  const status = {
+    cwd: "/repo",
+    isGit: true as const,
+    isPaseoOwnedWorktree: false as const,
+    repoRoot: "/repo",
+    mainRepoRoot: null,
+    currentBranch: "main",
+    isDirty: false,
+    baseRef: null,
+    aheadBehind: null,
+    aheadOfOrigin: null,
+    behindOfOrigin: null,
+    hasRemote: true,
+    remoteUrl: "https://github.com/acme/repo",
+    error: null,
+    requestId: "status",
+  };
+  expect(
+    canSearchRefPickerChangeRequests({ status: { ...status, vcs: "jj" }, enabled: true }),
+  ).toBe(false);
+  expect(refPickerChangeRequests({ ...status, vcs: "jj" }, [prItem])).toEqual([]);
+  expect(canSearchRefPickerChangeRequests({ status, enabled: true })).toBe(true);
+  expect(refPickerChangeRequests(status, [prItem])).toEqual([prItem]);
+});
+
+it("keeps distinct named jj bookmark choices sharing one exact commit", () => {
+  const ref = "a".repeat(40);
+  const data = buildPickerOptionData({
+    branchDetails: [
+      { name: "first", committerDate: 1, hasLocal: true, hasRemote: false, localRef: ref },
+      { name: "second", committerDate: 1, hasLocal: true, hasRemote: false, localRef: ref },
+    ],
+    prItems: [],
+    baseItem: defaultBasePickerItem({
+      currentBranch: "first",
+      vcs: "jj",
+      defaultWorkspaceBase: { refName: ref, displayName: "first" },
+    }),
+  });
+  expect(data.options.map((option) => option.label).sort()).toEqual(["first", "second"]);
+  expect(new Set(data.options.map((option) => option.id)).size).toBe(2);
+  expect(data.itemById.get(data.selectedOptionId)).toMatchObject({ name: "first", refName: ref });
+});
+
+it("refuses native bookmark rows without exact refs rather than inventing Git refs", () => {
+  const legacy = [{ name: "main", committerDate: 1, hasLocal: true, hasRemote: true }];
+  expect(
+    buildPickerOptionData({ branchDetails: legacy, prItems: [], baseItem: null, vcs: "jj" })
+      .options,
+  ).toEqual([]);
+  expect(
+    buildPickerOptionData({ branchDetails: legacy, prItems: [], baseItem: null, vcs: "git" })
+      .options,
+  ).toHaveLength(2);
 });
