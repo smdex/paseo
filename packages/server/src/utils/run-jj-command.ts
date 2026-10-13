@@ -455,10 +455,13 @@ export async function runJjCommandStaleSafe(
   options: { cwd: string; acceptExitCodes?: number[]; maxOutputBytes?: number },
   run: RunJjCommand = runJjCommand,
 ): Promise<StaleSafeJjRunResult> {
-  const accepted = options.acceptExitCodes ?? [];
+  // Explicit caller lists are preserved verbatim on the retry; only an ABSENT
+  // list gets the executor's [0] default (review ND6).
+  const explicitAccepted = options.acceptExitCodes;
+  const accepted = explicitAccepted ?? [0];
   const first = await run(args, {
     cwd: options.cwd,
-    acceptExitCodes: [...new Set([0, ...accepted, 1, 2])],
+    acceptExitCodes: [...new Set([...accepted, 1, 2])],
     maxOutputBytes: options.maxOutputBytes,
   });
   if (first.exitCode === 0 || first.truncated) {
@@ -470,9 +473,7 @@ export async function runJjCommandStaleSafe(
     await run(["workspace", "update-stale"], { cwd: options.cwd });
     const second = await run(args, {
       cwd: options.cwd,
-      // undefined lets the base executor apply its [0] default; an explicit
-      // caller list is passed through verbatim.
-      ...(accepted.length > 0 ? { acceptExitCodes: accepted } : {}),
+      ...(explicitAccepted ? { acceptExitCodes: explicitAccepted } : {}),
       maxOutputBytes: options.maxOutputBytes,
     });
     return {
