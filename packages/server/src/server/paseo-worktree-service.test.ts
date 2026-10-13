@@ -1098,6 +1098,13 @@ function createDeps(options?: {
       projects.set(project.projectId, project);
       return project;
     },
+    update: async (projectId, updater) => {
+      const project = projects.get(projectId);
+      if (!project) return null;
+      const updated = updater(project);
+      projects.set(projectId, updated);
+      return updated;
+    },
     upsert: async (project) => {
       projects.set(project.projectId, project);
     },
