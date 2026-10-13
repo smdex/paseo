@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { PullRequestCommandStatus, PullRequestTimelineItem } from "./forge-service.js";
+import type {
+  ForgeRepositoryContext,
+  PullRequestCommandStatus,
+  PullRequestTimelineItem,
+} from "./forge-service.js";
 import {
   type CreateGiteaServiceOptions,
   createGiteaService,
@@ -430,6 +434,125 @@ function giteaMergeStatus(
 }
 
 describe("createGiteaService", () => {
+  it("selects the configured host login and explicit target for fork reads, checks, timeline and search", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitea.one.invalid",
+      sourceRepository: "fork/repo",
+      targetRepository: "parent/repo",
+      headRef: STATUS_PR_VIEW.head,
+      headSha: STATUS_PR_VIEW.headSha,
+      remoteHeadSha: STATUS_PR_VIEW.headSha,
+    };
+    let source = repository.sourceRepository;
+    let sha = repository.headSha ?? "";
+    let state: "open" | "closed" = "open";
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "login")
+          return ok(
+            JSON.stringify([
+              { name: "one", url: `https://${repository.host}` },
+              { name: "two", url: "https://gitea.two.invalid" },
+            ]),
+          );
+        const target = argValue(args, "--login") === "one" ? "parent/repo" : "other/repo";
+        if (args[0] === "api" && args[1].includes("/pulls?")) {
+          const candidate = currentPullRequestApi({
+            number: 5,
+            state,
+            headRef: STATUS_PR_VIEW.head,
+            headSha: sha,
+          });
+          return ok(
+            JSON.stringify([
+              {
+                ...candidate,
+                html_url: `https://${repository.host}/${target}/pulls/5`,
+                head: { ...candidate.head, repo: { ...candidate.head.repo, full_name: source } },
+                base: { ...candidate.base, repo: { ...candidate.base.repo, full_name: target } },
+              },
+            ]),
+          );
+        }
+        if (args[0] === "pr" && args[1] === "5")
+          return ok(JSON.stringify({ ...STATUS_PR_VIEW, state, headSha: sha }));
+        if (args[0] === "api" && args[1].endsWith("/status"))
+          return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+        if (args[0] === "api" && args[1].includes("/actions/"))
+          return ok(JSON.stringify({ workflow_runs: [] }));
+        return ok("[]");
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("implicit Git remote");
+        },
+        resolveCurrentBranch: async () => {
+          throw new Error("implicit Git branch");
+        },
+      },
+    );
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(5);
+    const other = { ...repository, host: "gitea.two.invalid", targetRepository: "other/repo" };
+    expect(
+      (await service.getCurrentPullRequestStatus({ ...input, repository: other }))?.number,
+    ).toBe(5);
+    for (const context of [repository, other]) {
+      await service.searchIssuesAndPrs({ cwd: input.cwd, repository: context, query: "feature" });
+      const read = calls.at(-1) ?? [];
+      expect(argValue(read, "--repo")).toBe(context.targetRepository);
+      expect(argValue(read, "--login")).toBe(context === repository ? "one" : "two");
+    }
+    await service.getPullRequestTimeline?.({
+      cwd: input.cwd,
+      repository,
+      repoOwner: "parent",
+      repoName: "repo",
+      prNumber: 5,
+    });
+    expect(calls.some((args) => args[1].startsWith("repos/parent/repo/issues/5/comments"))).toBe(
+      true,
+    );
+    const details = await service.getCheckDetails?.({
+      cwd: input.cwd,
+      repository,
+      repoOwner: "parent",
+      repoName: "repo",
+      checkRunId: 1,
+    });
+    expect(details?.checkRunId).toBe(1);
+    expect(
+      calls.some((args) => args[1] === `repos/parent/repo/commits/${repository.headSha}/status`),
+    ).toBe(true);
+    source = "another/repo";
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    source = repository.sourceRepository;
+    sha = "2".repeat(40);
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    sha = repository.headSha ?? "";
+    state = "closed";
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, remoteHeadSha: null },
+      }),
+    ).toBeNull();
+    expect((await service.getCurrentPullRequestStatus(input))?.state).toBe("closed");
+    await expect(
+      service.getCheckDetails?.({
+        cwd: input.cwd,
+        repository,
+        repoOwner: "wrong",
+        repoName: "repo",
+        checkRunId: 1,
+      }),
+    ).rejects.toThrow("differs from the explicit target");
+  });
   it("maps a tea pr list item to the neutral current PR status by head branch", async () => {
     const { service, calls } = makeService((args) => {
       if (args[0] === "pr" && args[1] === "list")

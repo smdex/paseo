@@ -7,6 +7,7 @@ import {
   ForgeAuthenticationError,
   ForgeCliMissingError,
   defaultResolveRemoteUrl,
+  requireForgeRepositoryContext,
   parseCliJsonOutput,
   probeHostViaCliAuthStatus,
   ForgeCommandError,
@@ -25,6 +26,7 @@ import type {
   DisablePullRequestAutoMergeOptions,
   EnablePullRequestAutoMergeOptions,
   ForgeReadOptions,
+  ForgeRepositoryContext,
   ForgeService,
   GetCheckDetailsOptions,
   GetPullRequestOptions,
@@ -94,6 +96,7 @@ export class GlabCommandError extends ForgeCommandError {
 
 export interface GlabCommandRunnerOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   envOverlay?: Record<string, string>;
 }
 
@@ -913,12 +916,27 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
   const resolveRemoteUrl = options.resolveRemoteUrl ?? defaultResolveRemoteUrl;
 
   async function run(args: string[], runOptions: GlabCommandRunnerOptions): Promise<string> {
+    const repository = requireForgeRepositoryContext(runOptions);
+    if (repository) {
+      args = args.map((arg) =>
+        arg.replace(
+          /projects\/:(?:id|fullpath)/g,
+          `projects/${encodeURIComponent(repository.targetRepository)}`,
+        ),
+      );
+      if (["mr", "issue", "ci"].includes(args[0]))
+        args = [...args, "--repo", `https://${repository.host}/${repository.targetRepository}`];
+      if (args[0] === "api") args = [...args, "--hostname", repository.host];
+    }
     const glabPath = await resolveGlab();
     if (!glabPath) {
       throw new GlabCliMissingError();
     }
     try {
-      const result = await runner(args, runOptions);
+      const result = await runner(args, {
+        cwd: runOptions.cwd,
+        ...(runOptions.envOverlay ? { envOverlay: runOptions.envOverlay } : {}),
+      });
       return result.stdout.trim();
     } catch (error) {
       throw glabCliRunner.normalizeError(error, { args, cwd: runOptions.cwd });
@@ -944,14 +962,23 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     });
   }
 
-  async function viewMergeRequest(cwd: string, ref: string): Promise<GitLabMergeRequest> {
+  async function viewMergeRequest(
+    cwd: string,
+    ref: string,
+    repository?: ForgeRepositoryContext,
+  ): Promise<GitLabMergeRequest> {
     assertSafeGlabPositional(ref);
-    return runJson(["mr", "view", ref, "-F", "json"], { cwd }, GitLabMergeRequestSchema);
+    return runJson(
+      ["mr", "view", ref, "-F", "json"],
+      { cwd, repository },
+      GitLabMergeRequestSchema,
+    );
   }
 
   async function listMergeRequestsBySourceBranch(
     cwd: string,
     sourceBranch: string,
+    repository?: ForgeRepositoryContext,
   ): Promise<GitLabMergeRequest[]> {
     return runJson(
       [
@@ -969,7 +996,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         "-F",
         "json",
       ],
-      { cwd },
+      { cwd, repository },
       z.array(GitLabMergeRequestSchema),
     );
   }
@@ -978,9 +1005,53 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     cwd: string,
     headRef: string,
     headSha?: string,
+    repository?: ForgeRepositoryContext,
   ): Promise<GitLabMergeRequest | null> {
-    const mergeRequests = await listMergeRequestsBySourceBranch(cwd, headRef);
-    const candidates = mergeRequests.filter((mr) => mr.source_branch === headRef);
+    if (repository && (!repository.headRef || !repository.headSha)) return null;
+    const mergeRequests = await listMergeRequestsBySourceBranch(
+      cwd,
+      repository?.headRef ?? headRef,
+      repository,
+    );
+    let candidates = mergeRequests.filter(
+      (mr) => mr.source_branch === (repository?.headRef ?? headRef),
+    );
+    if (repository) {
+      const source = await runJson(
+        ["api", `projects/${encodeURIComponent(repository.sourceRepository)}`],
+        { cwd, repository },
+        z.object({ id: z.number(), path_with_namespace: z.string() }),
+      );
+      const target = await runJson(
+        ["api", `projects/${encodeURIComponent(repository.targetRepository)}`],
+        { cwd, repository },
+        z.object({ id: z.number(), path_with_namespace: z.string() }),
+      );
+      if (
+        source.path_with_namespace !== repository.sourceRepository ||
+        target.path_with_namespace !== repository.targetRepository
+      )
+        return null;
+      candidates = candidates.filter(
+        (mr) =>
+          mr.source_project_id === source.id &&
+          mr.target_project_id === target.id &&
+          mr.sha === repository.headSha &&
+          (mapMergeRequestState(mr.state) === "open" ||
+            repository.remoteHeadSha === repository.headSha),
+      );
+      if (mergeRequests.length >= 100 || candidates.length !== 1) return null;
+      const match = candidates[0];
+      const view = await viewMergeRequest(cwd, String(match.iid), repository);
+      return view.sha === repository.headSha &&
+        view.source_branch === repository.headRef &&
+        view.source_project_id === match.source_project_id &&
+        view.target_project_id === match.target_project_id &&
+        (mapMergeRequestState(view.state) === "open" ||
+          repository.remoteHeadSha === repository.headSha)
+        ? view
+        : null;
+    }
     const match =
       candidates.find((mr) => mapMergeRequestState(mr.state) === "open") ??
       candidates.find(
@@ -988,7 +1059,9 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           mapMergeRequestState(mr.state) !== "open" && headSha !== undefined && mr.sha === headSha,
       ) ??
       null;
-    return match ? viewMergeRequest(cwd, String(match.iid)) : null;
+    if (!match) return null;
+    const view = await viewMergeRequest(cwd, String(match.iid), repository);
+    return view;
   }
 
   /**
@@ -1003,6 +1076,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     cwd: string,
     projectPath: string,
     iid: number,
+    repository?: ForgeRepositoryContext,
   ): Promise<boolean> {
     try {
       const probe = await runJson(
@@ -1010,7 +1084,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           "api",
           `projects/${encodeURIComponent(projectPath)}/merge_requests/${iid}/discussions?per_page=1&page=${TIMELINE_PAGE_SIZE + 1}`,
         ],
-        { cwd },
+        { cwd, repository },
         z.array(GitLabDiscussionSchema),
       );
       return probe.length > 0;
@@ -1027,15 +1101,16 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
   async function fetchApprovals(
     cwd: string,
     mr: GitLabMergeRequest,
+    repository?: ForgeRepositoryContext,
   ): Promise<GitLabApprovals | null> {
-    const projectPath = extractProjectPath(mr.references?.full);
+    const projectPath = repository?.targetRepository ?? extractProjectPath(mr.references?.full);
     if (!projectPath) {
       return null;
     }
     try {
       return await runJson(
         ["api", `projects/${encodeURIComponent(projectPath)}/merge_requests/${mr.iid}/approvals`],
-        { cwd },
+        { cwd, repository },
         GitLabApprovalsSchema,
       );
     } catch {
@@ -1058,6 +1133,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
   async function fetchPipelineChecks(
     cwd: string,
     mr: GitLabMergeRequest,
+    repository?: ForgeRepositoryContext,
   ): Promise<PipelineChecksResult> {
     if (mr.head_pipeline?.id === undefined) {
       return { checks: [], pipelineStatus: null };
@@ -1065,7 +1141,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     try {
       const pipeline = await runJson(
         ["ci", "get", "--merge-request", String(mr.iid), "--with-job-details", "-F", "json"],
-        { cwd },
+        { cwd, repository },
         GitLabPipelineDetailsSchema,
       );
       return { checks: toPullRequestChecks(pipeline), pipelineStatus: pipeline.status };
@@ -1091,7 +1167,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     input: ListPullRequestsOptions | ListIssuesOptions;
     schema: z.ZodType<T[]>;
   }): Promise<T[]> {
-    const textSearch = runJson(buildGitLabListArgs({ kind, input }), { cwd: input.cwd }, schema);
+    const textSearch = runJson(buildGitLabListArgs({ kind, input }), input, schema);
     const numberQuery = gitLabNumberQuery(input.query);
     if (!numberQuery) return textSearch;
 
@@ -1100,7 +1176,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     const [numberMatches, textMatches] = await Promise.all([
       runJson(
         ["api", `projects/:id/${resource}?state=opened&iids[]=${numberQuery}`],
-        { cwd: input.cwd },
+        input,
         schema,
       ),
       textSearch,
@@ -1136,8 +1212,9 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       if (!glabPath) {
         return false;
       }
-      const remoteUrl = await resolveRemoteUrl(input.cwd);
-      const host = remoteUrl ? parseGitLabHostFromRemoteUrl(remoteUrl) : null;
+      const repository = requireForgeRepositoryContext(input);
+      const remoteUrl = repository ? null : await resolveRemoteUrl(input.cwd);
+      const host = repository?.host ?? (remoteUrl ? parseGitLabHostFromRemoteUrl(remoteUrl) : null);
       if (!host) {
         return false;
       }
@@ -1151,13 +1228,19 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
 
     async getCurrentPullRequestStatus(input): Promise<CurrentPullRequestStatus | null> {
       try {
-        const mr = await resolveCurrentMergeRequest(input.cwd, input.headRef, input.headSha);
+        const repository = requireForgeRepositoryContext(input);
+        const mr = await resolveCurrentMergeRequest(
+          input.cwd,
+          input.headRef,
+          input.headSha,
+          repository,
+        );
         if (!mr) {
           return null;
         }
         const [approvals, pipelineChecks] = await Promise.all([
-          fetchApprovals(input.cwd, mr),
-          fetchPipelineChecks(input.cwd, mr),
+          fetchApprovals(input.cwd, mr, input.repository),
+          fetchPipelineChecks(input.cwd, mr, input.repository),
         ]);
         return toCurrentPullRequestStatus(
           mr,
@@ -1174,19 +1257,19 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     },
 
     async getPullRequest(input: GetPullRequestOptions): Promise<PullRequestSummary> {
-      const mr = await viewMergeRequest(input.cwd, String(input.number));
+      const mr = await viewMergeRequest(input.cwd, String(input.number), input.repository);
       return toPullRequestSummary(mr);
     },
 
     async getPullRequestHeadRef(input: GetPullRequestOptions): Promise<string> {
-      const mr = await viewMergeRequest(input.cwd, String(input.number));
+      const mr = await viewMergeRequest(input.cwd, String(input.number), input.repository);
       return mr.source_branch;
     },
 
     async getPullRequestCheckoutTarget(
       input: GetPullRequestOptions,
     ): Promise<PullRequestCheckoutTarget> {
-      const mr = await viewMergeRequest(input.cwd, String(input.number));
+      const mr = await viewMergeRequest(input.cwd, String(input.number), input.repository);
       return {
         number: mr.iid,
         baseRefName: mr.target_branch,
@@ -1230,7 +1313,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         input.base,
         "--yes",
       ];
-      const stdout = await run(args, { cwd: input.cwd });
+      const stdout = await run(args, input);
       const url = extractMergeRequestUrl(stdout);
       if (!url) {
         throw new Error("GitLab merge request was created but no URL was returned by glab");
@@ -1254,7 +1337,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       } else if (input.mergeMethod === "rebase") {
         args.push("--rebase");
       }
-      await run(args, { cwd: input.cwd });
+      await run(args, input);
       return { success: true };
     },
 
@@ -1267,8 +1350,9 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         repoName: input.repoName,
       };
       try {
-        const mr = await viewMergeRequest(input.cwd, String(input.prNumber));
-        const projectPath = extractProjectPath(mr.references?.full);
+        const mr = await viewMergeRequest(input.cwd, String(input.prNumber), input.repository);
+        const projectPath =
+          input.repository?.targetRepository ?? extractProjectPath(mr.references?.full);
         if (!projectPath) {
           return {
             ...identity,
@@ -1285,7 +1369,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
             "api",
             `projects/${encodeURIComponent(projectPath)}/merge_requests/${mr.iid}/discussions?per_page=${TIMELINE_PAGE_SIZE}`,
           ],
-          { cwd: input.cwd },
+          input,
           z.array(GitLabDiscussionSchema),
         );
         const items = discussions
@@ -1296,7 +1380,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           .sort(compareTimelineItems);
         const truncated =
           discussions.length >= TIMELINE_PAGE_SIZE
-            ? await hasDiscussionsAfterFirstPage(input.cwd, projectPath, mr.iid)
+            ? await hasDiscussionsAfterFirstPage(input.cwd, projectPath, mr.iid, input.repository)
             : false;
         return {
           ...identity,
@@ -1326,7 +1410,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           : ["--pipeline-id", String(input.checkRunId)];
       const pipeline = await runJson(
         ["ci", "get", ...selector, "--with-job-details", "-F", "json"],
-        { cwd: input.cwd },
+        input,
         GitLabPipelineDetailsSchema,
       );
       return toCheckDetails(pipeline);
@@ -1341,12 +1425,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       const shouldFetchIssues = kinds.includes("issue");
       const shouldFetchMergeRequests = kinds.includes("change_request");
       const [issuesResult, mergeRequestsResult] = await Promise.allSettled([
-        shouldFetchIssues
-          ? runIssueList({ cwd: input.cwd, query: input.query, limit: input.limit })
-          : Promise.resolve(null),
-        shouldFetchMergeRequests
-          ? runMergeRequestList({ cwd: input.cwd, query: input.query, limit: input.limit })
-          : Promise.resolve(null),
+        shouldFetchIssues ? runIssueList(input) : Promise.resolve(null),
+        shouldFetchMergeRequests ? runMergeRequestList(input) : Promise.resolve(null),
       ]);
 
       const requestedResults = [
@@ -1426,7 +1506,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       } else if (input.mergeMethod === "rebase") {
         args.push("--rebase");
       }
-      await run(args, { cwd: input.cwd });
+      await run(args, input);
       return { success: true };
     },
 
@@ -1443,7 +1523,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           "POST",
           `projects/:fullpath/merge_requests/${input.prNumber}/cancel_merge_when_pipeline_succeeds`,
         ],
-        { cwd: input.cwd },
+        input,
       );
       return { success: true };
     },

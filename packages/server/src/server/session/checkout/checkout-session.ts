@@ -37,6 +37,7 @@ import type { GitMutationService } from "../git-mutation/git-mutation-service.js
 import type {
   ForgeAuthState,
   ForgeService,
+  ForgeRepositoryContext,
   PullRequestTimelineItem,
   SearchResult,
 } from "../../../services/forge-service.js";
@@ -181,18 +182,21 @@ export class CheckoutSession {
 
   private async resolveForgeService(
     cwd: string,
-  ): Promise<{ forge: string; service: ForgeService } | null> {
-    if ((await resolveEffectiveBackend(cwd)) === "jj") return null;
+  ): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext } | null> {
     const resolution = await this.workspaceGitService.resolveForge(cwd);
     if (!resolution) {
       return null;
     }
-    return { forge: resolution.forge, service: resolution.service };
+    return {
+      forge: resolution.forge,
+      service: resolution.service,
+      repository: resolution.repository,
+    };
   }
 
   private async requireForgeService(
     cwd: string,
-  ): Promise<{ forge: string; service: ForgeService }> {
+  ): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext }> {
     const resolution = await this.resolveForgeService(cwd);
     if (!resolution) {
       throw new NoResolvedForgeServiceError(cwd);
@@ -1344,62 +1348,63 @@ export class CheckoutSession {
       return;
     }
 
-    const resolvedForge = await this.resolveForgeService(cwd);
-    if (!resolvedForge) {
-      this.host.emit({
-        type: "pull_request_timeline_response",
-        payload: {
-          cwd,
-          prNumber,
-          items: [],
-          truncated: false,
-          error: {
-            kind: "unknown",
-            message: "No supported forge remote is configured for this workspace",
-          },
-          requestId,
-          githubFeaturesEnabled: false,
-          authState: "no_remote",
-        },
-      });
-      return;
-    }
-    const { forge, service } = resolvedForge;
-
-    // A throwing auth probe (authProbeCanThrow) yields the precise kind; a
-    // false return can't distinguish cli_missing from unauthenticated, so
-    // authState is omitted rather than guessed.
-    let featuresEnabled: boolean;
-    let probeAuthState: ForgeAuthState | undefined;
     try {
-      featuresEnabled = await service.isAuthenticated({ cwd });
-    } catch (error) {
-      featuresEnabled = false;
-      probeAuthState = forgeAuthStateFromError(error);
-    }
-    if (!featuresEnabled) {
-      this.host.emit({
-        type: "pull_request_timeline_response",
-        payload: {
-          cwd,
-          prNumber,
-          items: [],
-          truncated: false,
-          error: {
-            kind: "unknown",
-            message: `${getForgeDefinitionOrNeutral(forge).displayName} CLI is unavailable or not authenticated`,
+      const resolvedForge = await this.resolveForgeService(cwd);
+      if (!resolvedForge) {
+        this.host.emit({
+          type: "pull_request_timeline_response",
+          payload: {
+            cwd,
+            prNumber,
+            items: [],
+            truncated: false,
+            error: {
+              kind: "unknown",
+              message: "No supported forge remote is configured for this workspace",
+            },
+            requestId,
+            githubFeaturesEnabled: false,
+            authState: "no_remote",
           },
-          requestId,
-          githubFeaturesEnabled: false,
-          ...(probeAuthState ? { authState: probeAuthState } : {}),
-        },
-      });
-      return;
-    }
+        });
+        return;
+      }
+      const { forge, service, repository } = resolvedForge;
 
-    try {
+      // A throwing auth probe (authProbeCanThrow) yields the precise kind; a
+      // false return can't distinguish cli_missing from unauthenticated, so
+      // authState is omitted rather than guessed.
+      let featuresEnabled: boolean;
+      let probeAuthState: ForgeAuthState | undefined;
+      try {
+        featuresEnabled = await service.isAuthenticated({ cwd, repository });
+      } catch (error) {
+        featuresEnabled = false;
+        probeAuthState = forgeAuthStateFromError(error);
+      }
+      if (!featuresEnabled) {
+        this.host.emit({
+          type: "pull_request_timeline_response",
+          payload: {
+            cwd,
+            prNumber,
+            items: [],
+            truncated: false,
+            error: {
+              kind: "unknown",
+              message: `${getForgeDefinitionOrNeutral(forge).displayName} CLI is unavailable or not authenticated`,
+            },
+            requestId,
+            githubFeaturesEnabled: false,
+            ...(probeAuthState ? { authState: probeAuthState } : {}),
+          },
+        });
+        return;
+      }
+
       const timeline = await service.getPullRequestTimeline({
         cwd,
+        repository,
         prNumber,
         repoOwner,
         repoName,
@@ -1469,9 +1474,10 @@ export class CheckoutSession {
           "Check details request must address a check by checkRunId or workflowRunId",
         );
       }
-      const { service } = await this.requireForgeService(cwd);
+      const { service, repository } = await this.requireForgeService(cwd);
       const details = await service.getCheckDetails({
         cwd,
+        repository,
         repoOwner,
         repoName,
         checkRunId,
@@ -1512,16 +1518,15 @@ export class CheckoutSession {
 
     try {
       const resolvedCwd = expandTilde(cwd);
-      if ((await resolveEffectiveBackend(resolvedCwd)) === "jj") {
-        throw new NotSupportedOnJjError("Forge search");
-      }
+
       // COMPAT(githubSearchRpc): the legacy github_search RPC is GitHub by
       // definition; forge.search.* shipped in v0.2.0-beta.1 and resolves the
       // cwd's forge. Remove after 2027-01-17 once the supported client floor
       // is >= v0.2.0.
       const resolvedForge =
-        msg.type === "github_search_request"
-          ? { forge: "github", service: this.github }
+        msg.type === "github_search_request" &&
+        (await resolveEffectiveBackend(resolvedCwd)) !== "jj"
+          ? { forge: "github", service: this.github, repository: undefined }
           : await this.resolveForgeService(resolvedCwd);
       if (!resolvedForge) {
         if (msg.type === "github_search_request") {
@@ -1552,6 +1557,7 @@ export class CheckoutSession {
       const { forge, service } = resolvedForge;
       const result = await service.searchIssuesAndPrs({
         cwd: resolvedCwd,
+        repository: resolvedForge.repository,
         query,
         limit,
         kinds,
