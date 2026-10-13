@@ -3338,38 +3338,65 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     let trackedFiles: string[] = [];
     try {
       const listed = await runJjCommand(["file", "list"], { cwd: rootPath });
+      if (listed.truncated) {
+        // Incomplete listing: excluding anything could hide tracked trees.
+        return { ignored, failed: true };
+      }
       trackedFiles = listed.stdout.split("\n").filter((line) => line.length > 0);
     } catch {
       // Without the tracked tree nothing can be safely excluded.
       return { ignored, failed: true };
     }
-    const trackedDirectories = new Set(
-      trackedFiles.flatMap((file) => {
-        const separator = file.lastIndexOf("/");
-        return separator > 0 ? [file.slice(0, separator)] : [];
-      }),
-    );
-    const candidates = new Set<string>(JJ_FALLBACK_IGNORED_DIRECTORIES);
+    // Ordered top-level gitignore rules with negation (last match wins) —
+    // mirrors gitignore semantics for the directory-name patterns the
+    // watcher consumes; anchored patterns are honored as top-level names.
+    const rules: Array<{ negate: boolean; pattern: string }> = [];
     try {
       const gitignore = await readFile(join(rootPath, ".gitignore"), "utf8");
       for (const rawLine of gitignore.split("\n")) {
         let line = rawLine.trim();
-        if (!line || line.startsWith("#") || line.startsWith("!")) {
+        if (!line || line.startsWith("#")) {
           continue;
         }
-        // Directory patterns carry a trailing slash; strip it. Patterns with
-        // an EMBEDDED slash address subdirectories — skip those (only
-        // top-level ignores can become watcher-excluded roots).
-        if (line.endsWith("/")) {
+        const negate = line.startsWith("!");
+        if (negate) {
+          line = line.slice(1).trim();
+        }
+        // Directory patterns carry a trailing slash; anchored top-level
+        // patterns a leading one. Strip both; only plain top-level names
+        // participate (embedded slashes address subdirectories).
+        while (line.endsWith("/")) {
           line = line.slice(0, -1);
         }
-        if (line.includes("/")) {
+        while (line.startsWith("/")) {
+          line = line.slice(1);
+        }
+        if (!line || line.includes("/") || line.includes("*")) {
           continue;
         }
-        candidates.add(line);
+        rules.push({ negate, pattern: line });
       }
     } catch {
-      // No readable .gitignore: the static floor still applies.
+      // No readable .gitignore: rules stay empty; the cache floor below
+      // still applies (tradeoff: an unignored empty `build/` is excluded —
+      // tracked content always wins, and negations are honored).
+    }
+    const floorIgnored = (name: string): boolean => {
+      let result = JJ_FALLBACK_IGNORED_DIRECTORIES.includes(
+        name as (typeof JJ_FALLBACK_IGNORED_DIRECTORIES)[number],
+      );
+      for (const rule of rules) {
+        if (rule.pattern === name) {
+          result = !rule.negate;
+        }
+      }
+      return result;
+    };
+    const candidates = new Set<string>(JJ_FALLBACK_IGNORED_DIRECTORIES);
+    for (const rule of rules) {
+      if (!rule.negate) {
+        candidates.add(rule.pattern);
+      }
     }
     for (const name of candidates) {
       const candidate = join(rootPath, name);
@@ -3380,11 +3407,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         // Tracked content inside: keep it observable.
         continue;
       }
-      if (
-        [...trackedDirectories].some(
-          (directory) => directory === name || directory.startsWith(`${name}/`),
-        )
-      ) {
+      if (!floorIgnored(name)) {
         continue;
       }
       ignored.add(candidate);

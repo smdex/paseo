@@ -275,7 +275,10 @@ export function createWorkspaceRecoveryService(deps: {
     sourceRepoRoot: string,
   ): Promise<void> {
     const pin = workspace.recoveryBookmark;
-    if (pin !== null && !pin.startsWith("paseo/recovery/")) {
+    // Full private-pin shape: namespace + one safe path segment. A revset like
+    // "paseo/recovery/fake+" must be refused, not resolved (review fix 5).
+    const PIN_PATTERN = /^paseo\/recovery\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+    if (pin !== null && !PIN_PATTERN.test(pin)) {
       // Trust boundary (review fix 5): a stored value outside the private pin
       // namespace is not a recovery handle — refuse instead of resolving or
       // deleting an arbitrary bookmark.

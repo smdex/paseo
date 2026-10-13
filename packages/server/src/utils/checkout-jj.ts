@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import { parseAndHighlightDiff, parseDiff } from "../server/utils/diff-highlighter.js";
 import { isPaseoOwnedWorktreeCwd } from "./worktree.js";
-import { readPaseoWorktreeMetadata } from "./worktree-metadata.js";
+import { readPaseoWorktreeMetadata, writePaseoWorktreeMetadata } from "./worktree-metadata.js";
 import { detectVcsBackend, resolveJjRepoIdentity, type JjRepoIdentity } from "./vcs-backend.js";
 import {
   jjFilesetArg,
@@ -780,12 +780,17 @@ interface JjFileCounts {
 }
 
 /** Per-file line counts via the first-parent patch parsed by parseDiff. */
+interface JjFirstParentFile {
+  counts: JjFileCounts;
+  status: JjChangedFile["status"] | null;
+}
+
 async function getJjChangeFileCounts(
   cwd: string,
   change: JjChangeMeta,
   context?: JjCheckoutContext,
-): Promise<Map<string, JjFileCounts>> {
-  const counts = new Map<string, JjFileCounts>();
+): Promise<Map<string, JjFirstParentFile>> {
+  const counts = new Map<string, JjFirstParentFile>();
   const diffArgs =
     change.parents.length === 0
       ? ["diff", "--git", "-r", change.commitId]
@@ -800,14 +805,23 @@ async function getJjChangeFileCounts(
     return counts;
   }
   for (const file of parseDiff(result.stdout)) {
-    counts.set(file.path, { additions: file.additions, deletions: file.deletions });
+    let status: JjChangedFile["status"] = "modified";
+    if (file.isNew) {
+      status = "added";
+    } else if (file.isDeleted) {
+      status = "deleted";
+    }
+    counts.set(file.path, {
+      counts: { additions: file.additions, deletions: file.deletions },
+      status,
+    });
   }
   return counts;
 }
 
 function toCheckoutCommit(
   record: RawLogRecord,
-  counts: Map<string, JjFileCounts>,
+  counts: Map<string, JjFirstParentFile>,
   onRemoteCommitIds: Set<string>,
   workspaceCommitIds: Set<string>,
 ): CheckoutCommit {
@@ -816,18 +830,14 @@ function toCheckoutCommit(
   // counts (review fix 13): the log record's combined-parent file list is
   // empty for clean merges and would hide second-parent files. Status chars
   // are kept when the path matches the record; parseDiff flags map otherwise.
-  const recordStatusByPath = new Map(record.files.map((file) => [file.path, file.status]));
   const files: CheckoutCommitFile[] =
     counts.size > 0
-      ? [...counts.entries()].map(([path, fileCounts]) => {
-          const status = recordStatusByPath.get(path);
-          return {
-            path,
-            additions: fileCounts.additions,
-            deletions: fileCounts.deletions,
-            status: status ?? "modified",
-          };
-        })
+      ? [...counts.entries()].map(([path, file]) => ({
+          path,
+          additions: file.counts.additions,
+          deletions: file.counts.deletions,
+          status: file.status ?? "modified",
+        }))
       : // Oversized change (counts truncated): keep the record's file list
         // with unknown counts rather than showing no files at all.
         record.files.map((file) => ({
@@ -1454,5 +1464,16 @@ export async function jjRenameBookmark(
     throw new Error(`Bookmark already exists: ${newName}`);
   }
   await runJj(["bookmark", "rename", bookmark, newName], { cwd }, context);
+  // Keep managed ownership metadata current (review ND1): a renamed owner
+  // must stop resolving through the stale recorded name.
+  const identity = resolveJjRepoIdentity(cwd);
+  const owned =
+    identity && (await isPaseoOwnedWorktreeCwd(cwd, { knownGitCommonDir: null })).allowed;
+  if (owned && identity.workspaceRoot === resolve(cwd)) {
+    const metadata = readPaseoWorktreeMetadata(cwd);
+    if (metadata?.version === 2 && metadata.jjBookmark === bookmark) {
+      writePaseoWorktreeMetadata(cwd, { ...metadata, jjBookmark: newName });
+    }
+  }
   return { previousBranch: bookmark, currentBranch: newName };
 }
