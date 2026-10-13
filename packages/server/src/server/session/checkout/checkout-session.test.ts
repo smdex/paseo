@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import pino from "pino";
 import {
   type CheckoutDiffSubscriber,
@@ -29,7 +29,17 @@ import {
 } from "../../test-utils/workspace-git-service-stub.js";
 import { createWorktree, deletePaseoWorktree } from "../../../utils/worktree.js";
 import { expandTilde } from "../../../utils/path.js";
+import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
+
+const itIfJj = it.skipIf(!isJjAvailable());
+const sessionDisposables: Array<() => void> = [];
+
+afterAll(() => {
+  for (const dispose of sessionDisposables.splice(0)) {
+    dispose();
+  }
+});
 
 function isCheckDetailsResponse(msg: SessionOutboundMessage): boolean {
   return msg.type === "checkout.forge.get_check_details.response";
@@ -803,6 +813,120 @@ describe("CheckoutSession", () => {
           },
         },
       ]);
+    });
+  });
+
+  describe("new change", () => {
+    it("emits an error response on a non-jj checkout", async () => {
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutNewChangeRequest({
+        type: "checkout.new_change.request",
+        cwd: "/repo",
+        requestId: "nc1",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd: "/repo",
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          requestId: "nc1",
+        },
+      });
+    });
+
+    itIfJj("starts a working-copy change on a jj checkout and reports its ids", async () => {
+      const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const { subscriber, refreshedCwds } = createFakeDiffSubscriber({
+        cwd: "",
+        files: [],
+        error: null,
+      });
+      const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+        diff: subscriber,
+      });
+
+      await checkout.handleCheckoutNewChangeRequest({
+        type: "checkout.new_change.request",
+        cwd: fixture.repoDir,
+        requestId: "nc2",
+      });
+
+      expect(gitMutationCalls.notifyGitMutation).toEqual([
+        { cwd: fixture.repoDir, reason: "new-change", options: undefined },
+      ]);
+      expect(refreshedCwds).toEqual([fixture.repoDir]);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd: fixture.repoDir,
+          success: true,
+          error: null,
+          requestId: "nc2",
+        },
+      });
+      const payload =
+        emitted[0].type === "checkout.new_change.response" ? emitted[0].payload : null;
+      expect(payload?.changeId).toMatch(/^[a-z0-9]+$/);
+      expect(payload?.commitId).toMatch(/^[0-9a-f]+$/);
+    });
+  });
+
+  describe("describe change", () => {
+    it("rejects an empty description", async () => {
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: "/repo",
+        message: "   ",
+        requestId: "dc1",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd: "/repo",
+          success: false,
+          changeId: null,
+          requestId: "dc1",
+        },
+      });
+    });
+
+    itIfJj("describes the working-copy change on a jj checkout", async () => {
+      const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: fixture.repoDir,
+        message: "retitled by paseo",
+        requestId: "dc2",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd: fixture.repoDir,
+          success: true,
+          error: null,
+          requestId: "dc2",
+        },
+      });
+      const description = fixture.jj(["log", "-r", "@", "--no-graph", "-T", "description"]);
+      expect(description.status).toBe(0);
+      expect(description.stdout.trim()).toBe("retitled by paseo");
     });
   });
 

@@ -198,6 +198,7 @@ interface UseGitActionsInput {
     merge: ReactElement;
     mergeFromBase: ReactElement;
     archive: ReactElement;
+    newChange: ReactElement;
   };
 }
 
@@ -442,6 +443,9 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const mergeFromBaseStatus = useCheckoutGitActionsStore((s) =>
     s.getStatus({ serverId, cwd, actionId: "merge-from-base" }),
   );
+  const newChangeStatus = useCheckoutGitActionsStore((s) =>
+    s.getStatus({ serverId, cwd, actionId: "new-change" }),
+  );
 
   const runCommit = useCheckoutGitActionsStore((s) => s.commit);
   const runPull = useCheckoutGitActionsStore((s) => s.pull);
@@ -453,6 +457,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const runDisablePrAutoMerge = useCheckoutGitActionsStore((s) => s.disablePrAutoMerge);
   const runMergeBranch = useCheckoutGitActionsStore((s) => s.mergeBranch);
   const runMergeFromBase = useCheckoutGitActionsStore((s) => s.mergeFromBase);
+  const runNewChange = useCheckoutGitActionsStore((s) => s.newChange);
   const githubAutoMergeActionsEnabled = useSessionStore(
     (s) =>
       s.sessions[serverId]?.serverInfo?.features?.checkoutForgeSetAutoMerge === true ||
@@ -485,6 +490,17 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         toastActionError(err, t("workspace.git.actions.toasts.failedCommit"));
       });
   }, [cwd, runCommit, serverId, t, toastActionError, toastActionSuccess]);
+
+  const handleNewChange = useCallback(() => {
+    void runNewChange({ serverId, cwd })
+      .then(() => {
+        toastActionSuccess(t("workspace.git.actions.newChange.success"));
+        return;
+      })
+      .catch((err) => {
+        toastActionError(err, t("workspace.git.actions.toasts.failedNewChange"));
+      });
+  }, [cwd, runNewChange, serverId, t, toastActionError, toastActionSuccess]);
 
   const handlePull = useCallback(() => {
     void runPull({ serverId, cwd })
@@ -704,6 +720,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       behindOfOrigin,
       shouldPromoteArchive,
       shipDefault,
+      isJj: gitStatus?.vcs === "jj",
       runtime: {
         commit: {
           disabled: isActionDisabled(actionsDisabled, commitStatus),
@@ -795,6 +812,12 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
           icon: icons.archive,
           handler: handleArchiveWorkspace,
         },
+        "new-change": {
+          disabled: isActionDisabled(actionsDisabled, newChangeStatus),
+          status: newChangeStatus,
+          icon: icons.newChange,
+          handler: handleNewChange,
+        },
       },
     };
   }, [
@@ -836,6 +859,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     disablePrAutoMergeStatus,
     mergeStatus,
     mergeFromBaseStatus,
+    newChangeStatus,
+    gitStatus?.vcs,
     archiveController.canArchive,
     archiveController.isArchiving,
     handleCommit,
@@ -849,6 +874,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     handleMergeBranch,
     handleMergeFromBase,
     handleArchiveWorkspace,
+    handleNewChange,
     icons,
     prIcon,
     baseRef,
@@ -947,6 +973,12 @@ function getTranslatedGitActionLabels(
         label: t("workspace.git.actions.pullAndPush.label"),
         pendingLabel: t("workspace.git.actions.pullAndPush.pending"),
         successLabel: t("workspace.git.actions.pullAndPush.success"),
+      };
+    case "new-change":
+      return {
+        label: t("workspace.git.actions.newChange.label"),
+        pendingLabel: t("workspace.git.actions.newChange.pending"),
+        successLabel: t("workspace.git.actions.newChange.success"),
       };
     case "pr":
       return hasPullRequest

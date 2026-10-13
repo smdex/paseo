@@ -836,6 +836,11 @@ export const ar: TranslationResources = {
           pending: "أرشفة...",
           success: "مؤرشف",
         },
+        newChange: {
+          label: "تغيير جديد",
+          pending: "جارٍ بدء تغيير جديد...",
+          success: "تم بدء التغيير الجديد",
+        },
         mergePr: {
           squash: "دمج PR (squash)",
           merge: "دمج PR (merge)",
@@ -897,6 +902,7 @@ export const ar: TranslationResources = {
         },
         toasts: {
           failedCommit: "فشل في الالتزام",
+          failedNewChange: "فشل بدء تغيير جديد",
           failedPull: "فشل في السحب",
           failedPush: "فشل في الدفع",
           failedPullAndPush: "فشل في السحب والدفع",

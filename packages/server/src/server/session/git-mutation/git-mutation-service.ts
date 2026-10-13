@@ -1,11 +1,13 @@
 import type pino from "pino";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
-import {
-  checkoutResolvedBranch,
-  type CheckoutExistingBranchResult,
-  type GitMutationRefreshReason,
+import type {
+  CheckoutExistingBranchResult,
+  GitMutationRefreshReason,
 } from "../../../utils/checkout-git.js";
-import { runGitCommand } from "../../../utils/run-git-command.js";
+import {
+  dispatchExecuteBranchCheckout,
+  dispatchExecuteCreateBranchFromBase,
+} from "../../../utils/checkout-dispatch.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-session.js";
 
@@ -98,7 +100,7 @@ export function createGitMutationService(deps: {
         throw new Error(`Branch not found: ${branch}`);
       }
       await ensureCleanWorkingTree(cwd);
-      const result = await checkoutResolvedBranch({ cwd, resolution });
+      const result = await dispatchExecuteBranchCheckout(cwd, resolution);
       await notifyGitMutation(cwd, "switch-branch", { invalidateForge: true });
       return result;
     },
@@ -122,11 +124,10 @@ export function createGitMutationService(deps: {
       // upstream. Without it git hands the new branch `origin/<base>` whenever the base is a
       // remote-tracking ref or branch.autoSetupMerge asks for inheritance, and every later
       // push then reads that upstream and lands the work on the default branch. The worktree
-      // path makes the same promise with `git worktree add -b <branch> --no-track <base>`.
-      await runGitCommand(["checkout", "-b", newBranchName, "--no-track", baseBranch], {
-        cwd,
-        timeout: 120_000,
-      });
+      // path makes the same promise with `git worktree add -b <branch> --no-track <base>`;
+      // the jj arm creates a new change on the base and bookmarks it, never moving the
+      // base bookmark.
+      await dispatchExecuteCreateBranchFromBase(cwd, { baseBranch, newBranchName });
       await notifyGitMutation(cwd, "create-branch");
     },
 

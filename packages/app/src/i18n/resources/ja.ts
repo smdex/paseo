@@ -840,6 +840,11 @@ export const ja: TranslationResources = {
           pending: "アーカイブ中...",
           success: "アーカイブしました",
         },
+        newChange: {
+          label: "新しいチェンジ",
+          pending: "新しいチェンジを開始中...",
+          success: "新しいチェンジを開始しました",
+        },
         mergePr: {
           squash: "PRをマージ（スカッシュ）",
           merge: "PRをマージ（マージ）",
@@ -910,6 +915,7 @@ export const ja: TranslationResources = {
         },
         toasts: {
           failedCommit: "コミットに失敗しました",
+          failedNewChange: "新しいチェンジの開始に失敗しました",
           failedPull: "プルに失敗しました",
           failedPush: "プッシュに失敗しました",
           failedPullAndPush: "プル＆プッシュに失敗しました",

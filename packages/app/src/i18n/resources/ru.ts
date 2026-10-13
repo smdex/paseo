@@ -844,6 +844,11 @@ export const ru: TranslationResources = {
           pending: "Архивирование...",
           success: "В архиве",
         },
+        newChange: {
+          label: "Новая правка",
+          pending: "Создание новой правки...",
+          success: "Новая правка создана",
+        },
         mergePr: {
           squash: "Выполнить слияние PR (squash)",
           merge: "Выполнить слияние PR (merge)",
@@ -914,6 +919,7 @@ export const ru: TranslationResources = {
         },
         toasts: {
           failedCommit: "Не удалось создать коммит",
+          failedNewChange: "Не удалось создать новую правку",
           failedPull: "Не удалось получить изменения",
           failedPush: "Не удалось отправить изменения",
           failedPullAndPush: "Не удалось получить и отправить изменения",
