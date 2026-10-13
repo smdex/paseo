@@ -262,7 +262,11 @@ import {
   handleWorkspaceSetupStatusRequest as handleWorkspaceSetupStatusRequestMessage,
   handleWorkspaceSetupRunRequest as handleWorkspaceSetupRunRequestMessage,
 } from "./worktree-session.js";
-import { archiveByScope, type ActiveWorkspaceRef } from "./workspace-archive-service.js";
+import {
+  archiveByScope,
+  createWorkspaceArchiveAuthorityPorts,
+  type ActiveWorkspaceRef,
+} from "./workspace-archive-service.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { SessionAuthorization, type DaemonPermission } from "./authorization/index.js";
 
@@ -914,6 +918,8 @@ export class Session {
     });
     this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
+      paseoHome: this.paseoHome,
+      worktreesRoot: this.worktreesRoot,
       lifecycle: this.pluginRuntime,
       serverId,
       workspaceRegistry: this.workspaceRegistry,
@@ -941,8 +947,8 @@ export class Session {
           { recoveryBookmark, err: error },
           "Retained jj recovery reference after successful restore",
         ),
-      clearRecoveryPin: (workspaceId, expectedPin) =>
-        clearWorkspaceRecoveryReference(this.workspaceRegistry, workspaceId, expectedPin),
+      clearRecoveryPin: (workspaceId, expectedPin, expected) =>
+        clearWorkspaceRecoveryReference(this.workspaceRegistry, workspaceId, expectedPin, expected),
     });
     this.checkoutSession = new CheckoutSession({
       host: {
@@ -1154,6 +1160,7 @@ export class Session {
         this.createPaseoWorktreeWorkflow(input, workflowOptions),
       archiveAgentForClose: (agentId) => this.archiveAgentForClose(agentId),
       findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
+      ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
       listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
       archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
       emit: (message) => this.emit(message),
@@ -5221,14 +5228,9 @@ export class Session {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
+        ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
         listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
         archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
-        setWorkspaceRecoveryPin: async (workspaceId, pin) => {
-          await this.workspaceRegistry.update(workspaceId, (record) => ({
-            ...record,
-            recoveryBookmark: pin,
-          }));
-        },
         findWorkspaceIdsForBackingPath: (backingPath) =>
           this.findWorkspaceIdsForBackingPath(backingPath),
         emit: (message) => this.emit(message),
@@ -5802,10 +5804,7 @@ export class Session {
     const matchesBacking = createRealpathAwarePathMatcher(backingPath);
     return workspaces
       .filter(
-        (record) =>
-          record.isPaseoOwnedWorktree &&
-          typeof record.worktreeRoot === "string" &&
-          matchesBacking(record.worktreeRoot),
+        (record) => typeof record.worktreeRoot === "string" && matchesBacking(record.worktreeRoot),
       )
       .map((record) => record.workspaceId);
   }
@@ -6007,6 +6006,9 @@ export class Session {
         worktreeRoot: workspace.worktreeRoot,
         isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
         mainRepoRoot: workspace.mainRepoRoot,
+        jjWorkspaceManagement: workspace.jjWorkspaceManagement,
+        jjWorkspaceId: workspace.jjWorkspaceId,
+        recoveryBookmark: workspace.recoveryBookmark,
       }));
   }
 
@@ -7499,14 +7501,9 @@ export class Session {
           agentStorage: this.agentStorage,
           findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
           getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
+          ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
           listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
           archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
-          setWorkspaceRecoveryPin: async (workspaceId, pin) => {
-            await this.workspaceRegistry.update(workspaceId, (record) => ({
-              ...record,
-              recoveryBookmark: pin,
-            }));
-          },
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
             this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>

@@ -1,3 +1,12 @@
+import { setWorkspaceRecoveryReference } from "./workspace-registry.js";
+import {
+  type JjWorkspaceAuthority,
+  jjWorkspaceAuthority,
+  jjWorkspaceBackingRoot,
+  hasDurableJjAuthority,
+  validatePresentJjWorkspace,
+} from "./workspace-jj-authority.js";
+import { detectVcsBackend } from "../utils/vcs-backend.js";
 import { resolve } from "node:path";
 
 import type { Logger } from "pino";
@@ -23,17 +32,17 @@ import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import { withWorkspaceLifecycle, workspaceLifecycleKey } from "../utils/workspace-lifecycle.js";
 import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
-import {
-  assertJjWorkspaceIncarnation,
-  readJjWorkspaceIncarnation,
-} from "../utils/worktree-metadata.js";
+import { readJjWorkspaceIncarnation } from "../utils/worktree-metadata.js";
 import { deleteJjPaseoWorktree } from "../utils/worktree-jj.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
 
 export type ActiveWorkspaceRef = Pick<
   PersistedWorkspaceRecord,
   "workspaceId" | "cwd" | "kind" | "worktreeRoot" | "isPaseoOwnedWorktree" | "mainRepoRoot"
->;
+> &
+  Partial<
+    Pick<PersistedWorkspaceRecord, "jjWorkspaceManagement" | "jjWorkspaceId" | "recoveryBookmark">
+  >;
 
 export interface ArchiveDependencies {
   paseoHome?: string;
@@ -57,7 +66,11 @@ export interface ArchiveDependencies {
   // jj only: persists the workspace's recovery bookmark into its registry
   // record BEFORE the workspace is forgotten, so archive-then-restore can
   // re-create the workspace at its pinned change. Aborts jj deletion on failure.
-  setWorkspaceRecoveryPin?: (workspaceId: string, pin: string) => Promise<void>;
+  setWorkspaceRecoveryPin?: (
+    workspaceId: string,
+    pin: string,
+    expected: PersistedWorkspaceRecord,
+  ) => Promise<void>;
   // jj only: ALL registry records (any archive state) whose backing checkout
   // is the given worktree path — used so every sibling record over a removed
   // directory receives recovery authority, not just this request's ids.
@@ -69,6 +82,27 @@ export interface ArchiveDependencies {
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
   sessionLogger?: Logger;
+}
+
+export type WorkspaceArchiveAuthorityPorts = Pick<
+  ArchiveDependencies,
+  "getWorkspace" | "setWorkspaceRecoveryPin" | "findWorkspaceIdsForBackingPath"
+>;
+
+export function createWorkspaceArchiveAuthorityPorts(
+  registry: Pick<WorkspaceRegistry, "get" | "list" | "update">,
+): WorkspaceArchiveAuthorityPorts {
+  return {
+    getWorkspace: (workspaceId) => registry.get(workspaceId),
+    setWorkspaceRecoveryPin: (workspaceId, pin, expected) =>
+      setWorkspaceRecoveryReference(registry, workspaceId, pin, expected),
+    findWorkspaceIdsForBackingPath: async (backingPath) => {
+      const matches = createRealpathAwarePathMatcher(backingPath);
+      return (await registry.list())
+        .filter((record) => matches(record.worktreeRoot ?? record.cwd))
+        .map((record) => record.workspaceId);
+    },
+  };
 }
 
 export interface KillTerminalsForWorkspaceDependencies {
@@ -110,6 +144,7 @@ interface BackingDirectory {
   isPaseoOwnedWorktree: boolean;
   mainRepoRoot: string | null;
   paseoWorktreesRoot: string | null;
+  jjManaged?: boolean;
 }
 
 interface ArchiveTarget {
@@ -268,7 +303,11 @@ async function resolveArchiveTarget(
   const targetWorkspaces = (
     await Promise.all(
       activeWorkspaces.map(async (workspace) => {
-        const backingDirectory = await resolveWorkspaceBackingDirectory(workspace, dependencies);
+        const current = await dependencies.getWorkspace?.(workspace.workspaceId);
+        const backingDirectory = await resolveWorkspaceBackingDirectory(
+          current ?? workspace,
+          dependencies,
+        );
         return matchesBackingDirectory(backingDirectory.path) ? workspace : null;
       }),
     )
@@ -299,16 +338,44 @@ async function validateJjArchiveIncarnations(
   scope: ArchiveScope,
 ): Promise<void> {
   const backing = target.backing;
-  if (!backing?.isPaseoOwnedWorktree) return;
-  const source = backing.mainRepoRoot ?? backing.path;
-  if ((await resolveEffectiveBackend(source)) !== "jj") return;
-  if (!dependencies.getWorkspace)
-    throw new Error("Cannot validate jj archive incarnation without workspace records");
+  if (!backing) return;
   const ids = scope.kind === "workspace" ? [scope.workspaceId] : target.workspaceIds;
+  const liveJj =
+    detectVcsBackend(backing.path) === "jj" ||
+    Boolean(readJjWorkspaceIncarnation(backing.path)) ||
+    Boolean(backing.mainRepoRoot && detectVcsBackend(backing.mainRepoRoot) === "jj");
+  if (!dependencies.getWorkspace) {
+    const refs = await dependencies.listActiveWorkspaces();
+    const protectedRecord = refs.some(
+      (record) => ids.includes(record.workspaceId) && hasDurableJjAuthority(record),
+    );
+    if (liveJj || protectedRecord)
+      throw new Error("Cannot validate jj archive authority without workspace records");
+    return;
+  }
+  if (ids.length === 0 && liveJj)
+    throw new Error("No workspace record authorizes jj archive by path; directory retained");
+  const authorities = new Set<JjWorkspaceAuthority>();
   for (const id of ids) {
     const record = await dependencies.getWorkspace(id);
-    assertJjWorkspaceIncarnation(backing.path, record?.jjWorkspaceId ?? record?.recoveryBookmark);
+    if (!record) throw new Error("Workspace disappeared before archive authority validation");
+    if (
+      (hasDurableJjAuthority(record) || liveJj) &&
+      workspaceLifecycleKey(jjWorkspaceBackingRoot(record)) !== workspaceLifecycleKey(backing.path)
+    )
+      throw new Error("Workspace backing authority changed before archive; retry");
+    const authority = await validatePresentJjWorkspace(record);
+    authorities.add(authority);
   }
+  const managed = authorities.has("managed");
+  const external = authorities.has("external");
+  if (managed && external)
+    throw new Error("External sibling contradicts managed archive authority");
+  if (managed) {
+    backing.jjManaged = true;
+    backing.isPaseoOwnedWorktree = true;
+  }
+  if (external) backing.isPaseoOwnedWorktree = false;
 }
 
 async function stopWorkspaceSetups(
@@ -336,6 +403,27 @@ async function resolveWorkspaceBackingDirectory(
   workspace: ActiveWorkspaceRef,
   dependencies: Pick<ArchiveDependencies, "paseoHome" | "paseoWorktreesBaseRoot">,
 ): Promise<BackingDirectory> {
+  if (workspace.jjWorkspaceManagement === "external") {
+    return {
+      path: resolve(workspace.worktreeRoot ?? workspace.cwd),
+      isPaseoOwnedWorktree: false,
+      mainRepoRoot: workspace.mainRepoRoot,
+      paseoWorktreesRoot: null,
+    };
+  }
+  if (
+    workspace.jjWorkspaceManagement === "managed" ||
+    workspace.jjWorkspaceId ||
+    workspace.recoveryBookmark
+  ) {
+    return {
+      path: resolve(workspace.worktreeRoot ?? workspace.cwd),
+      isPaseoOwnedWorktree: true,
+      mainRepoRoot: workspace.mainRepoRoot,
+      paseoWorktreesRoot: null,
+      jjManaged: true,
+    };
+  }
   if (workspace.isPaseoOwnedWorktree && workspace.worktreeRoot && workspace.mainRepoRoot) {
     return {
       path: resolve(workspace.worktreeRoot),
@@ -493,7 +581,9 @@ async function deleteBackingWorktreeForBackend(
   backing: BackingDirectory,
   archivedWorkspaceIds: string[],
 ): Promise<void> {
-  const backingBackend = await resolveEffectiveBackend(backing.path);
+  if (backing.jjManaged && detectVcsBackend(backing.mainRepoRoot ?? backing.path) !== "jj")
+    throw new Error("Managed jj source unavailable; refusing Git deletion");
+  const backingBackend = backing.jjManaged ? "jj" : await resolveEffectiveBackend(backing.path);
   const sourceRepoRoot =
     backingBackend === "jj"
       ? (resolveJjRepoIdentity(backing.path)?.primaryRoot ?? backing.mainRepoRoot)
@@ -522,10 +612,10 @@ async function deleteBackingWorktreeForBackend(
     if (pinTargets.size === 0)
       throw new Error("No workspace record can retain jj recovery authority; directory retained");
     if (dependencies.setWorkspaceRecoveryPin) {
-      const targets = [...pinTargets];
+      const targets = [...pinTargets.values()];
       persistRecoveryPin = async (pin) => {
-        for (const workspaceId of targets) {
-          await dependencies.setWorkspaceRecoveryPin!(workspaceId, pin);
+        for (const record of targets) {
+          await dependencies.setWorkspaceRecoveryPin!(record.workspaceId, pin, record);
         }
       };
     }
@@ -542,7 +632,7 @@ async function deleteBackingWorktreeForBackend(
           { quarantinePath, backingRoot: backing.path },
           "Preserved archived jj workspace directory",
         ),
-      pinKey: pinTargets.size === 1 ? [...pinTargets][0] : (byPath ?? undefined),
+      pinKey: pinTargets.size === 1 ? [...pinTargets.keys()][0] : (byPath ?? undefined),
     });
     return;
   }
@@ -560,20 +650,19 @@ async function resolveJjRecoveryPinTargets(
   dependencies: ArchiveDependencies,
   backingPath: string,
   archivedWorkspaceIds: string[],
-): Promise<Set<string>> {
+): Promise<Map<string, PersistedWorkspaceRecord>> {
   if (!dependencies.getWorkspace || !dependencies.findWorkspaceIdsForBackingPath)
     throw new Error("Cannot validate jj sibling recovery authority");
   const candidates = new Set(archivedWorkspaceIds);
   for (const id of await dependencies.findWorkspaceIdsForBackingPath(backingPath))
     candidates.add(id);
   const incarnation = readJjWorkspaceIncarnation(backingPath);
-  const targets = new Set<string>();
+  const targets = new Map<string, PersistedWorkspaceRecord>();
   for (const id of candidates) {
     const record = await dependencies.getWorkspace(id);
-    const expected = record?.jjWorkspaceId ?? record?.recoveryBookmark;
-    if (!expected)
-      throw new Error("Unknown jj sibling incarnation; directory retained for reconciliation");
-    if (incarnation && expected === incarnation) targets.add(id);
+    if (!record || jjWorkspaceAuthority(record) !== "managed") continue;
+    const expected = record.jjWorkspaceId ?? record.recoveryBookmark;
+    if (incarnation && expected === incarnation) targets.set(id, record);
   }
   return targets;
 }

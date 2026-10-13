@@ -241,6 +241,73 @@ describe("WorkspaceReconciliationService", () => {
     tempDirs.length = 0;
   });
 
+  test.each(["managed", "external"] as const)(
+    "queued reconciliation cannot clobber newly established %s jj provenance",
+    async (management) => {
+      const root = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-jj-authority-")));
+      tempDirs.push(root);
+      const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+      projects.set(
+        "p1",
+        createPersistedProjectRecord({
+          projectId: "p1",
+          rootPath: root,
+          kind: "git",
+          displayName: "project",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      workspaces.set(
+        "w1",
+        createPersistedWorkspaceRecord({
+          workspaceId: "w1",
+          projectId: "p1",
+          cwd: root,
+          worktreeRoot: root,
+          mainRepoRoot: root,
+          kind: "worktree",
+          displayName: "workspace",
+          branch: "before",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      const atCommit = deferred();
+      const commit = deferred();
+      const update = workspaceRegistry.update;
+      workspaceRegistry.update = async (id, updater) => {
+        atCommit.resolve();
+        await commit.promise;
+        return update(id, updater);
+      };
+      const changes: ReconciliationChange[] = [];
+      const service = new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        workspaceGitService: { getCheckout: async (cwd) => createCheckout(cwd, { isGit: false }) },
+        onChanges: (change) => {
+          changes.push(...change);
+        },
+      });
+      const reconciliation = service.reconcileGitMetadata();
+      await atCommit.promise;
+      const established: PersistedWorkspaceRecord = {
+        ...workspaces.get("w1")!,
+        jjWorkspaceManagement: management,
+        ...(management === "managed"
+          ? { jjWorkspaceId: "established", recoveryBookmark: "paseo/recovery/established" }
+          : {}),
+      };
+      workspaces.set("w1", established);
+      commit.resolve();
+      await reconciliation;
+      expect(workspaces.get("w1")).toEqual(established);
+      expect(changes.filter((change) => change.kind === "workspace_updated")).toEqual([]);
+    },
+  );
+
   test("preserves workspace archival that lands during boot reconciliation", async () => {
     const workspaceRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-archive-race-")));
     tempDirs.push(workspaceRoot);
@@ -760,6 +827,7 @@ describe("WorkspaceReconciliationService", () => {
       updatedAt: expect.any(String),
       archivedAt: expect.any(String),
       autoArchivedChangeRequestUrl: null,
+      recoveryBookmark: null,
     });
     expect(projects.get("p1")).toEqual(project);
   });

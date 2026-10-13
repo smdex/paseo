@@ -1,3 +1,6 @@
+import { hasDurableJjAuthority, validatePresentJjWorkspace } from "./workspace-jj-authority.js";
+import { detectVcsBackend } from "../utils/vcs-backend.js";
+import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
 import path from "node:path";
 import { statSync } from "node:fs";
 
@@ -74,7 +77,15 @@ export async function bootstrapWorkspaceRegistries(options: {
       continue;
     }
     try {
-      pinPaseoWorktreeBranchIdentityIfMissing(workspace.worktreeRoot, workspace.branch);
+      await withWorkspaceLifecycle(workspace.worktreeRoot, async () => {
+        const current = await options.workspaceRegistry.get(workspace.workspaceId);
+        if (!current || current.archivedAt || !current.worktreeRoot || !current.branch) return;
+        if (hasDurableJjAuthority(current) || detectVcsBackend(current.worktreeRoot) === "jj") {
+          await validatePresentJjWorkspace(current);
+          if (current.jjWorkspaceManagement === "external") return;
+        }
+        pinPaseoWorktreeBranchIdentityIfMissing(current.worktreeRoot, current.branch);
+      });
     } catch (error) {
       options.logger.warn(
         { err: error, workspaceId: workspace.workspaceId },
@@ -171,14 +182,16 @@ export async function bootstrapWorkspaceRegistries(options: {
   }
 
   await Promise.all(
-    workspaceUpsertInputs.flatMap(
-      ({ workspaceId, membership, workspaceCwd, createdAt, updatedAt }) => {
+    workspaceUpsertInputs.map(
+      async ({ workspaceId, membership, workspaceCwd, createdAt, updatedAt }) => {
         const projectRange = projectRanges.get(membership.projectKey) ?? {
           createdAt: null,
           updatedAt: null,
         };
-        return [
-          options.workspaceRegistry.upsert(
+        const existing = await options.workspaceRegistry.get(workspaceId);
+        // Partial registry bootstrap cannot reconstruct the incarnation of an existing record.
+        if (!existing) {
+          await options.workspaceRegistry.upsert(
             createPersistedWorkspaceRecord({
               workspaceId,
               projectId: membership.projectId,
@@ -188,10 +201,14 @@ export async function bootstrapWorkspaceRegistries(options: {
               createdAt,
               updatedAt,
             }),
-          ),
-          options.projectRegistry.upsert(
+            { requireAbsent: true },
+          );
+        }
+        const projectId = existing?.projectId ?? membership.projectId;
+        if (!(await options.projectRegistry.get(projectId))) {
+          await options.projectRegistry.upsert(
             createPersistedProjectRecord({
-              projectId: membership.projectId,
+              projectId,
               rootPath: membership.projectRootPath,
               kind: membership.projectKind,
               displayName: membership.projectName,
@@ -199,8 +216,8 @@ export async function bootstrapWorkspaceRegistries(options: {
               createdAt: projectRange.createdAt ?? createdAt,
               updatedAt: projectRange.updatedAt ?? updatedAt,
             }),
-          ),
-        ];
+          );
+        }
       },
     ),
   );
