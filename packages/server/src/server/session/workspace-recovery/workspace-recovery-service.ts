@@ -78,6 +78,12 @@ type RecoveryPlan =
       sourceRepoRoot: string;
     };
 
+interface JjRestoreBackingInput {
+  workspace: PersistedWorkspaceRecord;
+  sourceRepoRoot: string;
+  backingRoot: string;
+}
+
 type UnavailableRecoveryState = Extract<WorkspaceRecoveryState, { kind: "unavailable" }>;
 
 function assertRecoveryPin(pin: string): void {
@@ -182,8 +188,9 @@ export function createWorkspaceRecoveryService(deps: {
     const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
     const sourceRepoRoot =
       workspace.mainRepoRoot ?? resolveJjRepoIdentity(backingRoot)?.primaryRoot ?? project.rootPath;
-    const directoryPresent = await deps.isDirectory(workspace.cwd);
-    if (directoryPresent) return resolveSurvivingRecovery(workspace, sourceRepoRoot);
+    const backingPresent = await deps.isDirectory(backingRoot);
+    if (backingPresent || existsSync(backingRoot))
+      return resolveSurvivingRecovery(workspace, sourceRepoRoot);
     if (authority === "external")
       return unavailableWorkspace(
         workspaceId,
@@ -232,28 +239,54 @@ export function createWorkspaceRecoveryService(deps: {
     const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
     try {
       if (jjWorkspaceAuthority(workspace) === "managed") {
-        if (detectVcsBackend(sourceRepoRoot) !== "jj")
-          throw new Error("Managed jj source repository is unavailable; refusing Git recovery");
-        const registered = await jjWorkspaceRootRegistered(sourceRepoRoot, backingRoot);
-        // An exact-pin restore may preserve a forgotten partial non-checkout in quarantine.
-        // A real checkout (including a replacement Git repo) must prove its incarnation.
-        const partialDirectory =
-          !registered &&
-          detectVcsBackend(backingRoot) === "none" &&
-          Boolean(workspace.recoveryBookmark);
-        if (!partialDirectory)
-          assertJjWorkspaceIncarnation(
-            backingRoot,
-            workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
-          );
+        const registered = await validateJjRestoreBacking({
+          workspace,
+          sourceRepoRoot,
+          backingRoot,
+        });
         if (!registered)
           return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
       }
       await validatePresentJjWorkspace(workspace);
+      if (!(await deps.isDirectory(workspace.cwd)))
+        return unavailableWorkspace(
+          workspace.workspaceId,
+          "The selected project directory is missing from the surviving backing checkout; refusing recreation.",
+        );
     } catch (error) {
       return unavailableWorkspace(workspace.workspaceId, String(error));
     }
     return createRecoveryPlan({ action: "unarchive", workspace });
+  }
+
+  async function validateJjRestoreBacking(input: JjRestoreBackingInput): Promise<boolean> {
+    const { workspace, sourceRepoRoot, backingRoot } = input;
+    if (detectVcsBackend(sourceRepoRoot) !== "jj")
+      throw new Error("Managed jj source repository is unavailable; refusing Git recovery");
+    const registered = await jjWorkspaceRootRegistered(sourceRepoRoot, backingRoot);
+    if (!existsSync(backingRoot)) return registered;
+    if (!(await deps.isDirectory(backingRoot)))
+      throw new Error("The surviving backing root is not a directory; refusing recreation");
+    // Retained exact pins may reconstruct forgotten plain partial directories, never replacement checkouts.
+    const plainPartial =
+      !registered &&
+      detectVcsBackend(backingRoot) === "none" &&
+      Boolean(workspace.recoveryBookmark);
+    if (plainPartial) return registered;
+    assertJjWorkspaceIncarnation(
+      backingRoot,
+      workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
+    );
+    const backingIdentity = resolveJjRepoIdentity(backingRoot);
+    const sourceIdentity = resolveJjRepoIdentity(sourceRepoRoot);
+    if (
+      !backingIdentity ||
+      !sourceIdentity ||
+      backingIdentity.sharedStorePath !== sourceIdentity.sharedStorePath ||
+      workspaceLifecycleKey(backingIdentity.workspaceRoot) !== workspaceLifecycleKey(backingRoot)
+    )
+      throw new Error("The surviving jj backing repository changed; refusing recreation");
+    return registered;
   }
 
   async function inspect(workspaceId: string): Promise<WorkspaceRecoveryState> {
@@ -442,7 +475,7 @@ export function createWorkspaceRecoveryService(deps: {
     const worktreePath = previousWorktreePath;
     // Recheck immediately before renaming too: external jj is not excluded by
     // the daemon lifecycle guard, and a registered live root is never an orphan.
-    if (await jjWorkspaceRootRegistered(sourceRepoRoot, worktreePath)) {
+    if (await validateJjRestoreBacking({ workspace, sourceRepoRoot, backingRoot: worktreePath })) {
       throw new WorktreeRequestError({
         code: "unknown",
         message:
