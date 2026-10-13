@@ -1,3 +1,9 @@
+import {
+  withWorkspaceLifecycle,
+  workspaceLifecycleKey,
+} from "../../../utils/workspace-lifecycle.js";
+import { resolveJjRepoIdentity, detectVcsBackend } from "../../../utils/vcs-backend.js";
+import { listJjWorkspaces } from "../../../utils/worktree-jj.js";
 import { resolveEffectiveBackend } from "../../../utils/checkout-dispatch.js";
 import {
   readJjWorkspaceIncarnation,
@@ -12,6 +18,7 @@ import {
   generateWorkspaceId,
   initialWorkspacePlacement,
   reconcileWorkspacePlacement,
+  type MutableWorkspacePlacement,
 } from "../../workspace-registry-model.js";
 import {
   createPersistedWorkspaceRecord,
@@ -104,19 +111,91 @@ export class WorkspaceProvisioningError extends Error {
   }
 }
 
-async function validateArchivedJjIncarnation(workspace: PersistedWorkspaceRecord): Promise<void> {
-  if (!workspace.archivedAt) return;
-  const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
+type ProvisioningWorkspaceFields = Partial<MutableWorkspacePlacement> &
+  Partial<
+    Pick<PersistedWorkspaceRecord, "archivedAt" | "autoArchivedChangeRequestUrl" | "updatedAt">
+  >;
+
+interface CheckoutRootObservation {
+  backingKey: string;
+  cwd: string;
+  checkout: ProjectCheckoutLitePayload;
+}
+
+interface WorkspaceCheckoutObservation {
+  workspace: PersistedWorkspaceRecord;
+  checkout: ProjectCheckoutLitePayload;
+  backingKey: string;
+}
+
+interface WorkspaceFieldUpdate {
+  workspace: PersistedWorkspaceRecord;
+  fields: ProvisioningWorkspaceFields;
+  backingKey: string;
+}
+
+function workspaceBackingRoot(workspace: PersistedWorkspaceRecord): string {
+  // COMPAT(provisioningMissingWorktreeRoot): pre-v0.1.110 records lack backing placement; remove after 2027-01-17.
+  return (
+    workspace.worktreeRoot ?? resolveJjRepoIdentity(workspace.cwd)?.workspaceRoot ?? workspace.cwd
+  );
+}
+
+function assertWorkspaceAuthority(
+  planned: PersistedWorkspaceRecord,
+  current: PersistedWorkspaceRecord,
+): void {
+  const sameRoot =
+    workspaceLifecycleKey(workspaceBackingRoot(planned)) ===
+    workspaceLifecycleKey(workspaceBackingRoot(current));
+  const samePlacement =
+    sameRoot &&
+    areEquivalentPaths(planned.cwd, current.cwd) &&
+    planned.projectId === current.projectId &&
+    planned.kind === current.kind &&
+    planned.mainRepoRoot === current.mainRepoRoot;
+  if (!samePlacement || planned.jjWorkspaceId !== current.jjWorkspaceId)
+    throw new Error("Workspace placement or incarnation changed while provisioning; retry");
+}
+
+async function validateJjWorkspaceIncarnation(workspace: PersistedWorkspaceRecord): Promise<void> {
+  const backingRoot = workspaceBackingRoot(workspace);
   const expected = workspace.jjWorkspaceId ?? workspace.recoveryBookmark;
-  if (expected) {
-    assertJjWorkspaceIncarnation(backingRoot, expected);
-    return;
-  }
-  if (workspace.kind !== "worktree") return;
-  const sourceBackend = await resolveEffectiveBackend(workspace.mainRepoRoot ?? backingRoot);
+  if (!expected && (workspace.kind !== "worktree" || !workspace.isPaseoOwnedWorktree)) return;
+  const sourceRoot = workspace.mainRepoRoot ?? backingRoot;
+  const sourceBackend = await resolveEffectiveBackend(sourceRoot);
   const backingBackend = await resolveEffectiveBackend(backingRoot);
-  if (sourceBackend === "jj" || backingBackend === "jj")
-    assertJjWorkspaceIncarnation(backingRoot, null);
+  if (!expected && sourceBackend !== "jj" && backingBackend !== "jj") return;
+  assertJjWorkspaceIncarnation(backingRoot, expected);
+  const matchesBacking = createRealpathAwarePathMatcher(backingRoot);
+  const registered = (await listJjWorkspaces(sourceRoot)).some((entry) =>
+    matchesBacking(entry.root),
+  );
+  if (!registered)
+    throw new Error(
+      "The backing jj workspace is no longer registered; use workspace recovery before reopening it",
+    );
+}
+
+function assertCheckoutRoot(observation: CheckoutRootObservation): void {
+  const { backingKey, cwd, checkout } = observation;
+  const observedRoot = checkout.worktreeRoot ?? cwd;
+  if (backingKey !== workspaceLifecycleKey(observedRoot))
+    throw new Error("Checkout placement changed while provisioning; retry");
+}
+
+function assertWorkspaceCheckout(observation: WorkspaceCheckoutObservation): void {
+  const { workspace, checkout, backingKey } = observation;
+  assertCheckoutRoot({ backingKey, cwd: workspace.cwd, checkout });
+  if (
+    workspace.jjWorkspaceId &&
+    (!checkout.isGit ||
+      !checkout.isPaseoOwnedWorktree ||
+      !checkout.mainRepoRoot ||
+      workspaceLifecycleKey(checkout.mainRepoRoot) !==
+        workspaceLifecycleKey(workspace.mainRepoRoot ?? workspace.cwd))
+  )
+    throw new Error("Managed jj checkout ownership changed during observation; retry");
 }
 
 export function createWorkspaceProvisioningService(deps: {
@@ -143,6 +222,59 @@ export function createWorkspaceProvisioningService(deps: {
     const checkout = await workspaceGitService.getCheckout(cwd);
     if (!checkout.isGit && !(await deps.isDirectory(cwd))) return null;
     return checkout;
+  }
+
+  async function withCurrentWorkspace<T>(
+    planned: PersistedWorkspaceRecord,
+    operation: (current: PersistedWorkspaceRecord, backingKey: string) => Promise<T>,
+  ): Promise<T> {
+    const backingRoot = workspaceBackingRoot(planned);
+    const backingKey = workspaceLifecycleKey(backingRoot);
+    return withWorkspaceLifecycle(backingRoot, async () => {
+      const current = await workspaceRegistry.get(planned.workspaceId);
+      if (!current) throw new Error(`Workspace not found: ${planned.workspaceId}`);
+      assertWorkspaceAuthority(planned, current);
+      if (workspaceLifecycleKey(workspaceBackingRoot(current)) !== backingKey)
+        throw new Error("Workspace backing root changed during provisioning; retry");
+      await validateJjWorkspaceIncarnation(current);
+      return operation(current, backingKey);
+    });
+  }
+
+  async function rereadObservedWorkspace(
+    workspace: PersistedWorkspaceRecord,
+    backingKey: string,
+  ): Promise<PersistedWorkspaceRecord> {
+    const current = await workspaceRegistry.get(workspace.workspaceId);
+    if (!current) throw new Error(`Workspace not found: ${workspace.workspaceId}`);
+    assertWorkspaceAuthority(workspace, current);
+    if (workspaceLifecycleKey(workspaceBackingRoot(current)) !== backingKey)
+      throw new Error("Workspace backing root changed during provisioning; retry");
+    if (
+      current.archivedAt !== workspace.archivedAt ||
+      current.recoveryBookmark !== workspace.recoveryBookmark
+    )
+      throw new Error("Workspace recovery authority changed while provisioning; retry");
+    return current;
+  }
+
+  async function updateWorkspaceFields(
+    input: WorkspaceFieldUpdate,
+  ): Promise<PersistedWorkspaceRecord> {
+    const { workspace, fields, backingKey } = input;
+    const updated = await workspaceRegistry.update(workspace.workspaceId, (current) => {
+      assertWorkspaceAuthority(workspace, current);
+      if (workspaceLifecycleKey(workspaceBackingRoot(current)) !== backingKey)
+        throw new Error("Workspace backing root changed during provisioning; retry");
+      if (
+        current.archivedAt !== workspace.archivedAt ||
+        current.recoveryBookmark !== workspace.recoveryBookmark
+      )
+        throw new Error("Workspace recovery authority changed while provisioning; retry");
+      return { ...current, ...fields };
+    });
+    if (!updated) throw new Error(`Workspace not found: ${workspace.workspaceId}`);
+    return updated;
   }
 
   async function runInImportWorkspace<T>(
@@ -267,28 +399,44 @@ export function createWorkspaceProvisioningService(deps: {
     },
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
-    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    const project = projectId
-      ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
-      : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
-        await findOrCreateProjectForDirectory(normalizedCwd);
-    const timestamp = new Date().toISOString();
-    const workspace = createPersistedWorkspaceRecord({
-      workspaceId: context?.workspaceId ?? generateWorkspaceId(),
-      projectId: project.projectId,
-      ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
-      jjWorkspaceId:
-        readJjWorkspaceIncarnation(checkout.worktreeRoot ?? normalizedCwd) ?? undefined,
-      title: title?.trim() || null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      background: await resolveBackground(context),
+    const plannedBackend = detectVcsBackend(normalizedCwd);
+    const plannedJjRoot = resolveJjRepoIdentity(normalizedCwd)?.workspaceRoot;
+    const plannedIncarnation = readJjWorkspaceIncarnation(plannedJjRoot ?? normalizedCwd);
+    const plannedCheckout = await workspaceGitService.getCheckout(normalizedCwd);
+    const backingRoot = plannedCheckout.worktreeRoot ?? normalizedCwd;
+    const backingKey = workspaceLifecycleKey(backingRoot);
+    return withWorkspaceLifecycle(backingRoot, async () => {
+      if (
+        detectVcsBackend(normalizedCwd) !== plannedBackend ||
+        readJjWorkspaceIncarnation(backingRoot) !== plannedIncarnation
+      )
+        throw new Error("Directory backend or incarnation changed during provisioning; retry");
+      const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+      assertCheckoutRoot({ backingKey, cwd: normalizedCwd, checkout });
+      const project = projectId
+        ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
+        : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
+          await findOrCreateProjectForDirectory(normalizedCwd);
+      const timestamp = new Date().toISOString();
+      const workspace = createPersistedWorkspaceRecord({
+        workspaceId: context?.workspaceId ?? generateWorkspaceId(),
+        projectId: project.projectId,
+        ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
+        jjWorkspaceId:
+          readJjWorkspaceIncarnation(checkout.worktreeRoot ?? normalizedCwd) ?? undefined,
+        title: title?.trim() || null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        background: await resolveBackground(context),
+      });
+      await validateJjWorkspaceIncarnation(workspace);
+      await workspaceRegistry.upsert(workspace, {
+        expectsInitialAgent: context?.expectsInitialAgent,
+        requireAbsent: true,
+      });
+      emitWorkspaceCreated(workspace);
+      return workspace;
     });
-    await workspaceRegistry.upsert(workspace, {
-      expectsInitialAgent: context?.expectsInitialAgent,
-    });
-    emitWorkspaceCreated(workspace);
-    return workspace;
   }
 
   async function createWorkspaceForWorktree(
@@ -298,35 +446,46 @@ export function createWorkspaceProvisioningService(deps: {
     const repoRoot = resolve(input.repoRoot);
     const cwd = resolve(input.cwd);
     const worktreeRoot = resolve(input.worktreeRoot);
-    const project = await resolveSourceProjectForWorktree({
-      sourceCwd,
-      projectId: input.projectId,
-      repoRoot,
+    const plannedBackend = detectVcsBackend(worktreeRoot);
+    const plannedIncarnation = readJjWorkspaceIncarnation(worktreeRoot);
+    return withWorkspaceLifecycle(worktreeRoot, async () => {
+      if (
+        detectVcsBackend(worktreeRoot) !== plannedBackend ||
+        readJjWorkspaceIncarnation(worktreeRoot) !== plannedIncarnation
+      )
+        throw new Error("Worktree backend or incarnation changed during provisioning; retry");
+      const project = await resolveSourceProjectForWorktree({
+        sourceCwd,
+        projectId: input.projectId,
+        repoRoot,
+      });
+      const timestamp = new Date().toISOString();
+      const workspace = createPersistedWorkspaceRecord({
+        workspaceId: input.workspaceId ?? generateWorkspaceId(),
+        projectId: project.projectId,
+        ...initialWorkspacePlacement({
+          source: "created_worktree",
+          cwd,
+          worktreeRoot,
+          branch: input.branch,
+          baseBranch: input.baseBranch,
+          mainRepoRoot: repoRoot,
+        }),
+        jjWorkspaceId: readJjWorkspaceIncarnation(worktreeRoot) ?? undefined,
+        title: input.title,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        ...(input.untrustedSource ? { untrustedSource: input.untrustedSource } : {}),
+        background: await resolveBackground(input),
+      });
+      await validateJjWorkspaceIncarnation(workspace);
+      await workspaceRegistry.upsert(workspace, {
+        expectsInitialAgent: input.expectsInitialAgent,
+        requireAbsent: true,
+      });
+      emitWorkspaceCreated(workspace);
+      return workspace;
     });
-    const timestamp = new Date().toISOString();
-    const workspace = createPersistedWorkspaceRecord({
-      workspaceId: input.workspaceId ?? generateWorkspaceId(),
-      projectId: project.projectId,
-      ...initialWorkspacePlacement({
-        source: "created_worktree",
-        cwd,
-        worktreeRoot,
-        branch: input.branch,
-        baseBranch: input.baseBranch,
-        mainRepoRoot: repoRoot,
-      }),
-      jjWorkspaceId: readJjWorkspaceIncarnation(worktreeRoot) ?? undefined,
-      title: input.title,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      ...(input.untrustedSource ? { untrustedSource: input.untrustedSource } : {}),
-      background: await resolveBackground(input),
-    });
-    await workspaceRegistry.upsert(workspace, {
-      expectsInitialAgent: input.expectsInitialAgent,
-    });
-    emitWorkspaceCreated(workspace);
-    return workspace;
   }
 
   function emitWorkspaceCreated(workspace: PersistedWorkspaceRecord): void {
@@ -376,26 +535,48 @@ export function createWorkspaceProvisioningService(deps: {
     return refreshProjectKind(project);
   }
 
-  async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
-    const normalizedCwd = resolve(cwd);
-    // Path-based discovery selects public work; explicit-ID recovery bypasses this selector.
-    const workspaces = (await workspaceRegistry.list())
-      .filter(
-        (workspace) => !workspace.background && areEquivalentPaths(workspace.cwd, normalizedCwd),
-      )
+  async function publicDirectoryWorkspaces(cwd: string): Promise<PersistedWorkspaceRecord[]> {
+    return (await workspaceRegistry.list())
+      .filter((workspace) => !workspace.background && areEquivalentPaths(workspace.cwd, cwd))
       .sort(
         (left, right) =>
           Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
           left.workspaceId.localeCompare(right.workspaceId),
       );
-    const active = workspaces.find((workspace) => !workspace.archivedAt);
-    if (active) return refreshWorkspaceRecord(active);
-    const archived = workspaces.find((workspace) => workspace.archivedAt);
-    if (archived) {
-      const project = await projectRegistry.get(archived.projectId);
-      if (project && !project.archivedAt) return ensureWorkspaceRecordUnarchived(archived);
-    }
-    return createWorkspaceForDirectory(normalizedCwd);
+  }
+
+  async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
+    const normalizedCwd = resolve(cwd);
+    const plannedRecords = await publicDirectoryWorkspaces(normalizedCwd);
+    const planned = plannedRecords.find((workspace) => !workspace.archivedAt) ?? plannedRecords[0];
+    const plannedRoot =
+      planned?.worktreeRoot ?? resolveJjRepoIdentity(normalizedCwd)?.workspaceRoot;
+    const backingRoot =
+      plannedRoot ??
+      (await workspaceGitService.getCheckout(normalizedCwd)).worktreeRoot ??
+      normalizedCwd;
+    const backingKey = workspaceLifecycleKey(backingRoot);
+    return withWorkspaceLifecycle(backingRoot, async () => {
+      // A discovered record is reread by id after acquisition, never resurrected from its snapshot.
+      const current = planned ? await workspaceRegistry.get(planned.workspaceId) : null;
+      if (planned && !current)
+        throw new Error("Workspace disappeared during directory discovery; retry");
+      if (planned && current) assertWorkspaceAuthority(planned, current);
+      const workspaces = current ? [current] : await publicDirectoryWorkspaces(normalizedCwd);
+      const active = workspaces.find((workspace) => !workspace.archivedAt);
+      const archived = workspaces.find((workspace) => workspace.archivedAt);
+      const selected = active ?? archived;
+      if (selected && workspaceLifecycleKey(workspaceBackingRoot(selected)) !== backingKey)
+        throw new Error("Workspace placement changed during directory discovery; retry");
+      if (active) return refreshWorkspaceRecord(active);
+      if (archived) {
+        const project = await projectRegistry.get(archived.projectId);
+        if (project && !project.archivedAt) return ensureWorkspaceRecordUnarchived(archived);
+      }
+      const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+      assertCheckoutRoot({ backingKey, cwd: normalizedCwd, checkout });
+      return createWorkspaceForDirectory(normalizedCwd);
+    });
   }
 
   async function resolveOrCreateWorkspaceIdForCreateAgent(
@@ -431,7 +612,13 @@ export function createWorkspaceProvisioningService(deps: {
   async function ensureWorkspaceRecordUnarchived(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
-    await validateArchivedJjIncarnation(workspace);
+    return withCurrentWorkspace(workspace, unarchiveWorkspaceUnderLifecycle);
+  }
+
+  async function unarchiveWorkspaceUnderLifecycle(
+    workspace: PersistedWorkspaceRecord,
+    backingKey: string,
+  ): Promise<PersistedWorkspaceRecord> {
     const project = await projectRegistry.get(workspace.projectId);
     if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
     const timestamp = new Date().toISOString();
@@ -441,15 +628,16 @@ export function createWorkspaceProvisioningService(deps: {
         : null;
     const autoArchivedChangeRequestUrl =
       await resolveRestoredAutoArchiveChangeRequestUrl(workspace);
-    let next: PersistedWorkspaceRecord | null = null;
+    let fields: ProvisioningWorkspaceFields | null = null;
+    if (checkout) assertWorkspaceCheckout({ workspace, checkout, backingKey });
     if (workspace.archivedAt) {
       const placementUpdate = reconcileWorkspacePlacement({
         workspace,
         checkout,
         updatedAt: timestamp,
       });
-      next = {
-        ...(placementUpdate?.workspace ?? workspace),
+      fields = {
+        ...placementUpdate?.fields,
         archivedAt: null,
         autoArchivedChangeRequestUrl,
         updatedAt: timestamp,
@@ -469,36 +657,39 @@ export function createWorkspaceProvisioningService(deps: {
         serverId,
       });
       if (project.archivedAt || project.kind !== kind || project.projectKey !== projectKey) {
-        await projectRegistry.upsert({
-          ...project,
+        await projectRegistry.update(project.projectId, (current) => ({
+          ...current,
           kind,
           projectKey,
           archivedAt: null,
           updatedAt: timestamp,
-        });
+        }));
       }
     }
-    if (!next) return workspace;
-    await workspaceRegistry.upsert(next);
-    return next;
+    if (!fields) return rereadObservedWorkspace(workspace, backingKey);
+    return updateWorkspaceFields({ workspace, fields, backingKey });
   }
 
   async function refreshWorkspaceRecord(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
-    const checkout = await observeWorkspaceCheckout(workspace.cwd);
-    const project = await projectRegistry.get(workspace.projectId);
-    if (project && !project.archivedAt) {
-      await refreshProjectKind(project, workspace.cwd, checkout ?? undefined);
-    }
-    const update = reconcileWorkspacePlacement({
-      workspace,
-      checkout,
-      updatedAt: new Date().toISOString(),
+    return withCurrentWorkspace(workspace, async (current, backingKey) => {
+      if (current.archivedAt)
+        throw new Error("Workspace was archived before refresh; retry directory discovery");
+      const checkout = await observeWorkspaceCheckout(current.cwd);
+      if (checkout) assertWorkspaceCheckout({ workspace: current, checkout, backingKey });
+      const project = await projectRegistry.get(current.projectId);
+      if (project && !project.archivedAt)
+        await refreshProjectKind(project, current.cwd, checkout ?? undefined);
+      const updatedAt = new Date().toISOString();
+      const update = reconcileWorkspacePlacement({ workspace: current, checkout, updatedAt });
+      if (!update) return rereadObservedWorkspace(current, backingKey);
+      return updateWorkspaceFields({
+        workspace: current,
+        fields: { ...update.fields, updatedAt },
+        backingKey,
+      });
     });
-    if (!update) return workspace;
-    await workspaceRegistry.upsert(update.workspace);
-    return update.workspace;
   }
 
   async function refreshProjectKind(
@@ -519,13 +710,14 @@ export function createWorkspaceProvisioningService(deps: {
       serverId,
     });
     if (project.kind === kind && project.projectKey === projectKey) return project;
-    const refreshed = {
-      ...project,
+    const updatedAt = new Date().toISOString();
+    const refreshed = await projectRegistry.update(project.projectId, (current) => ({
+      ...current,
       kind,
       projectKey,
-      updatedAt: new Date().toISOString(),
-    };
-    await projectRegistry.upsert(refreshed);
+      updatedAt,
+    }));
+    if (!refreshed) throw new Error(`Unknown project: ${project.projectId}`);
     return refreshed;
   }
 

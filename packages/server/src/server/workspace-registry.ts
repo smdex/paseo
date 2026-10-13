@@ -127,6 +127,8 @@ export interface WorkspaceMutation {
 
 export interface WorkspaceMutationContext {
   expectsInitialAgent?: boolean;
+  // Creation must not overwrite a recovery record whose id was allocated earlier.
+  requireAbsent?: boolean;
 }
 
 export interface WorkspaceArchiveContext {
@@ -251,10 +253,13 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     return this.cache.get(id) ?? null;
   }
 
-  async upsert(record: TRecord): Promise<void> {
+  async upsert(record: TRecord, options?: { requireAbsent?: boolean }): Promise<void> {
     const parsed = this.schema.parse(record);
     await this.mutateCache((records) => {
-      records.set(this.getId(parsed), parsed);
+      const id = this.getId(parsed);
+      if (options?.requireAbsent && records.has(id))
+        throw new Error(`Record already exists: ${id}`);
+      records.set(id, parsed);
       return undefined;
     });
   }
@@ -564,7 +569,7 @@ export class FileBackedWorkspaceRegistry
     record: PersistedWorkspaceRecord,
     context?: WorkspaceMutationContext,
   ): Promise<void> {
-    await super.upsert(record);
+    await super.upsert(record, { requireAbsent: context?.requireAbsent });
     await this.notifyMutation({
       kind: "upsert",
       workspaceId: record.workspaceId,
