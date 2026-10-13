@@ -1514,7 +1514,7 @@ export async function jjRenameBookmark(
       worktreesRoot: context?.worktreesRoot,
     });
     if (owned.allowed) {
-      updatePaseoWorktreeJjBookmark(identity.workspaceRoot, {
+      await updatePaseoWorktreeJjBookmark(identity.workspaceRoot, {
         from: bookmark,
         to: newName,
       });

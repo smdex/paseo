@@ -1245,6 +1245,7 @@ export async function createPaseoDaemon(
         createPaseoWorktree: async (workflowInput, workflowOptions) => {
           return createRegisteredPaseoWorktree(workflowInput, {
             lifecycle: pluginRuntime,
+            logger,
             github,
             ...(workflowOptions?.resolveDefaultBranch
               ? {

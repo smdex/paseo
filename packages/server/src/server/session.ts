@@ -151,6 +151,7 @@ import {
 } from "./workspace-registry-model.js";
 import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 import {
+  clearWorkspaceRecoveryReference,
   resolveProjectDisplayName,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
@@ -974,14 +975,13 @@ export class Session {
           { orphanPath },
           "Preserved surviving jj workspace directory during recovery",
         ),
-      clearRecoveryPin: async (workspaceId) => {
-        const pin = (await this.workspaceRegistry.get(workspaceId))?.recoveryBookmark ?? null;
-        await this.workspaceRegistry.update(workspaceId, (record) => ({
-          ...record,
-          recoveryBookmark: null,
-        }));
-        return pin ? this.countRecoveryPinReferences(pin, workspaceId) : 0;
-      },
+      reportRetainedPin: (recoveryBookmark, error) =>
+        this.sessionLogger.warn(
+          { recoveryBookmark, err: error },
+          "Retained jj recovery reference after successful restore",
+        ),
+      clearRecoveryPin: (workspaceId, expectedPin) =>
+        clearWorkspaceRecoveryReference(this.workspaceRegistry, workspaceId, expectedPin),
     });
     this.checkoutSession = new CheckoutSession({
       host: {
@@ -5908,17 +5908,6 @@ export class Session {
       .map((record) => record.workspaceId);
   }
 
-  /** How many records OTHER than the cleared one still hold this recovery pin. */
-  private async countRecoveryPinReferences(
-    pin: string,
-    excludeWorkspaceId: string,
-  ): Promise<number> {
-    const workspaces = await this.workspaceRegistry.list();
-    return workspaces.filter(
-      (record) => record.workspaceId !== excludeWorkspaceId && record.recoveryBookmark === pin,
-    ).length;
-  }
-
   private matchesWorkspaceFilter(input: {
     workspace: WorkspaceDescriptorPayload;
     filter: FetchWorkspacesRequestFilter | undefined;
@@ -6086,6 +6075,7 @@ export class Session {
   ): Promise<CreatePaseoWorktreeResult> {
     const result = await createPaseoWorktree(input, {
       lifecycle: this.pluginRuntime,
+      logger: this.sessionLogger,
       github: this.github,
       ...(options?.resolveDefaultBranch
         ? { resolveDefaultBranch: options.resolveDefaultBranch }

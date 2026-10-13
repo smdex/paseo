@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -11,12 +20,13 @@ import {
   jjRevisionResolves,
   listJjPaseoWorktrees,
   PrimaryWorkspaceDeleteError,
-  recoveryPinName,
   restoreJjWorkspace,
   rollbackJjWorkspace,
   runJjWorkspaceSafe,
 } from "./worktree-jj.js";
 import { readPaseoWorktreeMetadata } from "./worktree-metadata.js";
+import { withWorkspaceLifecycle, workspaceLifecycleKey } from "./workspace-lifecycle.js";
+import { isPlatform } from "../test-utils/platform.js";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
 
 const describeIfJj = describe.skipIf(!isJjAvailable());
@@ -238,7 +248,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       },
     });
 
-    expect(persistedPins).toEqual([recoveryPinName("doomed")]);
+    expect(persistedPins).toEqual([expect.stringMatching(/^paseo\/recovery\/doomed-[a-f0-9-]+$/)]);
     expect(existsSync(created.worktreePath)).toBe(false);
     expect(workspaceEntries(fixture).map((entry) => entry.name)).not.toContain("doomed");
     expect(await jjRevisionResolves(fixture.repoDir, persistedPins[0] ?? "")).toBe(true);
@@ -251,14 +261,14 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       revision: persistedPins[0] ?? "",
     });
     const restoredParent = fixture
-      .jj(["log", "--no-graph", "-r", "paseo/recovery/doomed", "-T", "commit_id"])
+      .jj(["log", "--no-graph", "-r", persistedPins[0]!, "-T", "commit_id"])
       .stdout.trim();
     const wsParent = fixture
       .jj(["log", "--no-graph", "-r", "doomed@-", "-T", "commit_id"])
       .stdout.trim();
     expect(wsParent).toBe(restoredParent);
     const description = fixture
-      .jj(["log", "--no-graph", "-r", "paseo/recovery/doomed", "-T", "description"])
+      .jj(["log", "--no-graph", "-r", persistedPins[0]!, "-T", "description"])
       .stdout.trim();
     expect(description).toBe("precious work");
   });
@@ -313,8 +323,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       workspaceName: "repin",
       revision: pins[0] ?? "",
     });
-    // New work in the restored workspace must become the pin target on the
-    // second archive (strict move, review fix 3).
+    // A later archive gets its own pin; the previous generation stays intact.
     writeFileSync(join(created.worktreePath, "second-round.txt"), "work\n");
     fixture.jj(["describe", "-m", "second round", "-r", "repin@"]);
 
@@ -322,10 +331,14 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       cwd: fixture.repoDir,
       worktreePath: created.worktreePath,
       worktreesRoot: fixture.worktreesRoot,
-      persistRecoveryPin: async () => {},
+      persistRecoveryPin: async (pin) => {
+        pins.push(pin);
+      },
     });
+    expect(pins).toHaveLength(2);
+    expect(pins[1]).not.toBe(pins[0]);
     const pinnedHead = fixture
-      .jj(["log", "--no-graph", "-r", "paseo/recovery/repin", "-T", "description.first_line()"])
+      .jj(["log", "--no-graph", "-r", pins[1]!, "-T", "description.first_line()"])
       .stdout.trim();
     expect(pinnedHead).toBe("second round");
   });
@@ -469,10 +482,14 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       worktreesRoot: fixture.worktreesRoot,
     });
 
+    let reportedQuarantine = "";
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: created.worktreePath,
       worktreesRoot: fixture.worktreesRoot,
+      reportQuarantine: (path) => {
+        reportedQuarantine = path;
+      },
       persistRecoveryPin: async () => {
         // This write is deliberately AFTER the final snapshot and pin.
         writeFileSync(join(created.worktreePath, "racing-write.txt"), "written after snapshot\n");
@@ -485,6 +502,9 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     const files = readdirSync(quarantineRoot, { recursive: true }).map(String);
     const preserved = files.filter((path) => path.endsWith("racing-write.txt"));
     expect(preserved).toHaveLength(1);
+    expect(readFileSync(join(reportedQuarantine, "racing-write.txt"), "utf8")).toBe(
+      "written after snapshot\n",
+    );
     expect(readFileSync(join(quarantineRoot, preserved[0]!), "utf8")).toBe(
       "written after snapshot\n",
     );
@@ -550,7 +570,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     await runJjCommand(["describe", "-m", "after"], { cwd: created.worktreePath });
   });
 
-  it("rollback forgets the workspace AND deletes the owned bookmark it created", async () => {
+  it("rollback forgets the workspace but retains and reports the created bookmark", async () => {
     const fixture = createFixture();
     const created = await createJjWorktree({
       cwd: fixture.repoDir,
@@ -559,13 +579,20 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       worktreesRoot: fixture.worktreesRoot,
     });
 
+    const retained: string[] = [];
     await rollbackJjWorkspace(fixture.repoDir, "rolled-back", created.worktreePath, {
       createdBookmark: created.jjCreatedBookmark,
+      logger: {
+        warn: (info: { retainedBookmark: string }) => {
+          retained.push(info.retainedBookmark);
+        },
+      },
     });
+    expect(retained).toEqual(["feat/rolled-back"]);
 
     expect(workspaceEntries(fixture).map((entry) => entry.name)).not.toContain("rolled-back");
     expect(existsSync(created.worktreePath)).toBe(false);
-    expect(await jjRevisionResolves(fixture.repoDir, "feat/rolled-back")).toBe(false);
+    expect(await jjRevisionResolves(fixture.repoDir, "feat/rolled-back")).toBe(true);
   });
 });
 
@@ -586,6 +613,143 @@ describeIfJj("jj rollback ownership guard", () => {
     expect(workspaceEntries(fixture).map((entry) => entry.name)).not.toContain("moved");
     expect(existsSync(created.worktreePath)).toBe(false);
   });
+});
+
+describeIfJj("jj retained rollback artifacts and lifecycle aliases", () => {
+  it("preserves an externally moved bookmark at the rollback cleanup boundary", async () => {
+    const fixture = createFixture();
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "late-move",
+      worktreesRoot: fixture.worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/late-move" },
+    });
+    const remote = join(fixture.dir, "local-origin.git");
+    execFileSync("git", ["init", "--bare", "--initial-branch=main", remote], { stdio: "ignore" });
+    expect(fixture.jj(["git", "remote", "add", "origin", remote]).status).toBe(0);
+    expect(fixture.jj(["describe", "-m", "owned work"], created.worktreePath).status).toBe(0);
+    expect(
+      fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "feat/late-move"]).status,
+    ).toBe(0);
+    let adoptedRemoteState = "";
+    const userTarget = fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    expect(userTarget).not.toBe(created.jjCreatedBookmark!.target);
+    const retained: string[] = [];
+    await rollbackJjWorkspace(fixture.repoDir, "late-move", created.worktreePath, {
+      createdBookmark: created.jjCreatedBookmark,
+      logger: {
+        warn: (info: { retainedBookmark: string }) => {
+          retained.push(info.retainedBookmark);
+          // External jj adopts the ref after forget, immediately before cleanup.
+          fixture.jj([
+            "bookmark",
+            "move",
+            "--allow-backwards",
+            "feat/late-move",
+            "--to",
+            userTarget,
+          ]);
+          adoptedRemoteState = fixture.jj(["bookmark", "list", "--all-remotes"]).stdout;
+        },
+      },
+    });
+    expect(retained).toEqual(["feat/late-move"]);
+    expect(adoptedRemoteState).toContain("@origin");
+    expect(fixture.jj(["bookmark", "list", "--all-remotes"]).stdout).toBe(adoptedRemoteState);
+    expect(
+      fixture
+        .jj(["log", "--no-graph", "-r", 'bookmarks(exact:"feat/late-move")', "-T", "commit_id"])
+        .stdout.trim(),
+    ).toBe(userTarget);
+    expect(existsSync(created.worktreePath)).toBe(false);
+  });
+
+  it("retains both targets of an externally conflicted created bookmark", async () => {
+    const fixture = createFixture();
+    writeFileSync(join(fixture.repoDir, "user.txt"), "user work\n");
+    fixture.jj(["describe", "-m", "user work"]);
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "conflicted-ref",
+      worktreesRoot: fixture.worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feat/conflicted" },
+    });
+    const originalTarget = created.jjCreatedBookmark!.target;
+    const userTarget = fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    fixture.jj(["bookmark", "delete", "feat/conflicted"]);
+    const fork = fixture.jj(["op", "log", "--no-graph", "-n", "1", "-T", "id"]).stdout.trim();
+    fixture.jj(["bookmark", "create", "feat/conflicted", "--revision", originalTarget]);
+    fixture.jj([
+      "bookmark",
+      "create",
+      "feat/conflicted",
+      "--revision",
+      userTarget,
+      "--at-operation",
+      fork,
+    ]);
+    const targets = () =>
+      fixture
+        .jj([
+          "log",
+          "--no-graph",
+          "-r",
+          'bookmarks(exact:"feat/conflicted")',
+          "-T",
+          'commit_id ++ "\\n"',
+        ])
+        .stdout.trim()
+        .split("\n")
+        .sort();
+    expect(targets()).toEqual([originalTarget, userTarget].sort());
+    const refState = fixture.jj(["bookmark", "list", "--all-remotes"]).stdout;
+    await rollbackJjWorkspace(fixture.repoDir, "conflicted-ref", created.worktreePath, {
+      createdBookmark: created.jjCreatedBookmark,
+    });
+    expect(targets()).toEqual([originalTarget, userTarget].sort());
+    expect(fixture.jj(["bookmark", "list", "--all-remotes"]).stdout).toBe(refState);
+    expect(existsSync(created.worktreePath)).toBe(false);
+  });
+
+  it.skipIf(isPlatform("win32"))(
+    "canonicalizes absent backing roots through parent aliases and releases failure",
+    async () => {
+      const fixture = createFixture();
+      const alias = join(fixture.dir, "alias");
+      symlinkSync(fixture.dir, alias, "dir");
+      const root = join(fixture.dir, "absent", "workspace");
+      const aliasRoot = join(alias, "absent", "workspace");
+      expect(workspaceLifecycleKey(root)).toBe(workspaceLifecycleKey(aliasRoot));
+      const entered = Promise.withResolvers<void>();
+      const finishFirst = Promise.withResolvers<void>();
+      const events: string[] = [];
+      async function nestedOperation() {
+        events.push("nested");
+      }
+      const first = withWorkspaceLifecycle(root, async () => {
+        events.push("first");
+        entered.resolve();
+        await finishFirst.promise;
+        // Re-entry must not deadlock behind a waiter queued by another caller.
+        await withWorkspaceLifecycle(aliasRoot, nestedOperation);
+        throw new Error("failed lifecycle");
+      });
+      const rejected = expect(first).rejects.toThrow("failed lifecycle");
+      await entered.promise;
+      const second = withWorkspaceLifecycle(aliasRoot, async () => {
+        events.push("second");
+      });
+      expect(events).toEqual(["first"]);
+      finishFirst.resolve();
+      await rejected;
+      await second;
+      expect(events).toEqual(["first", "nested", "second"]);
+    },
+  );
 });
 
 describe("jj workspace name from path", () => {

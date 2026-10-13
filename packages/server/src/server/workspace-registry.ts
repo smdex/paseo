@@ -183,6 +183,17 @@ export interface WorkspaceRegistry {
   ): () => void;
 }
 
+/** Retirement must not clear a later archive generation installed while recovery waited. */
+export async function clearWorkspaceRecoveryReference(
+  registry: Pick<WorkspaceRegistry, "update">,
+  workspaceId: string,
+  expectedPin: string,
+): Promise<void> {
+  await registry.update(workspaceId, (record) =>
+    record.recoveryBookmark === expectedPin ? { ...record, recoveryBookmark: null } : record,
+  );
+}
+
 type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord;
 
 class FileBackedRegistry<TRecord extends RegistryRecord> {

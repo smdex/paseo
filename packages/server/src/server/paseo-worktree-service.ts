@@ -28,6 +28,7 @@ import type { WorktreeCreationIntent } from "./resolve-worktree-creation-intent.
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import { buildAgentBranchNameSeed } from "./agent/prompt-attachments.js";
 import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
 import { rollbackJjWorkspace } from "../utils/worktree-jj.js";
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
@@ -104,70 +105,87 @@ async function createPaseoWorktreeWithPriority(
       await seedPaseoConfigFile({
         sourceCwd: workspaceCwdPlan.inputCwd,
         targetCwd: workspaceCwd,
+  return withWorkspaceLifecycle(createdWorktree.worktree.worktreePath, async () => {
+    try {
+      await maybeMarkFirstAgentBranchAutoNameEligible({ createdWorktree });
+      const workspaceCwd = mapWorkspaceRelativeCwdToWorktree({
+        relativeWorkspaceCwd: workspaceCwdPlan.relativeWorkspaceCwd,
+        targetWorktreePath: createdWorktree.worktree.worktreePath,
+
       });
-    }
-    const workspace = await deps.workspaceProvisioning.createWorkspaceForWorktree({
-      sourceCwd: workspaceCwdPlan.inputCwd,
-      projectId: input.projectId,
-      workspaceId: input.workspaceId,
-      repoRoot: createdWorktree.repoRoot,
-      cwd: workspaceCwd,
-      worktreeRoot: createdWorktree.worktree.worktreePath,
-      branch: createdWorktree.worktree.branchName || null,
-      baseBranch: createdWorktree.worktree.comparisonBaseRef,
-      title: input.title?.trim() || resolveFirstAgentPromptTitle(input.firstAgentContext),
-      expectsInitialAgent: Boolean(input.firstAgentContext),
-      background: input.background,
-      callerWorkspaceId: input.callerWorkspaceId,
-      ...(createdWorktree.intent.kind === "checkout-change-request" &&
-      createdWorktree.intent.headRepository
-        ? {
-            untrustedSource: {
-              kind: "change_request" as const,
-              forge: createdWorktree.intent.forge,
-              number: createdWorktree.intent.changeRequestNumber,
-              headRepository: createdWorktree.intent.headRepository,
-            },
-          }
-        : {}),
-    });
+      if (!(await isDirectory(workspaceCwd))) {
+        throw new Error(`Selected project directory is missing from the worktree: ${workspaceCwd}`);
+      }
 
-    deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+      if (createdWorktree.created) {
+        await seedPaseoConfigFile({
+          sourceCwd: workspaceCwdPlan.inputCwd,
+          targetCwd: workspaceCwd,
+        });
+      }
+      const workspace = await deps.workspaceProvisioning.createWorkspaceForWorktree({
+        sourceCwd: workspaceCwdPlan.inputCwd,
+        projectId: input.projectId,
+        workspaceId: input.workspaceId,
+        repoRoot: createdWorktree.repoRoot,
+        cwd: workspaceCwd,
+        worktreeRoot: createdWorktree.worktree.worktreePath,
+        branch: createdWorktree.worktree.branchName || null,
+        baseBranch: createdWorktree.worktree.comparisonBaseRef,
+        title: input.title?.trim() || resolveFirstAgentPromptTitle(input.firstAgentContext),
+        expectsInitialAgent: Boolean(input.firstAgentContext),
+        background: input.background,
+        callerWorkspaceId: input.callerWorkspaceId,
+        ...(createdWorktree.intent.kind === "checkout-change-request" &&
+        createdWorktree.intent.headRepository
+          ? {
+              untrustedSource: {
+                kind: "change_request" as const,
+                forge: createdWorktree.intent.forge,
+                number: createdWorktree.intent.changeRequestNumber,
+                headRepository: createdWorktree.intent.headRepository,
+              },
+            }
+          : {}),
+      });
 
-    return {
-      worktree: createdWorktree.worktree,
-      intent: createdWorktree.intent,
-      workspace,
-      repoRoot: createdWorktree.repoRoot,
-      created: createdWorktree.created,
-    };
-  } catch (error) {
-    if (!createdWorktree.created) {
-      throw error;
-    }
-    // Rollback routes by the backend that CREATED the worktree: the git-only
-    // rollback would fail its `git worktree remove` and leave a jj workspace
-    // registered (and its owned bookmark blocking the name forever).
-    if (creationBackend === "jj") {
-      await rollbackJjWorkspace(
-        createdWorktree.repoRoot,
-        basename(createdWorktree.worktree.worktreePath),
-        createdWorktree.worktree.worktreePath,
-        { createdBookmark: createdWorktree.worktree.jjCreatedBookmark },
+      deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+
+      return {
+        worktree: createdWorktree.worktree,
+        intent: createdWorktree.intent,
+        workspace,
+        repoRoot: createdWorktree.repoRoot,
+        created: createdWorktree.created,
+      };
+    } catch (error) {
+      if (!createdWorktree.created) {
+        throw error;
+      }
+      // Rollback routes by the backend that CREATED the worktree: the git-only
+      // rollback would fail its `git worktree remove` and leave a jj workspace
+      // registered. Created bookmarks are deliberately retained and reported.
+      if (creationBackend === "jj") {
+        await rollbackJjWorkspace(
+          createdWorktree.repoRoot,
+          basename(createdWorktree.worktree.worktreePath),
+          createdWorktree.worktree.worktreePath,
+          { createdBookmark: createdWorktree.worktree.jjCreatedBookmark, logger: deps.logger },
+        );
+        throw error;
+      }
+      return rollbackCreatedPaseoWorktree(
+        {
+          cwd: createdWorktree.repoRoot,
+          worktreePath: createdWorktree.worktree.worktreePath,
+          teardownCwds: [],
+          paseoHome: input.paseoHome,
+          worktreesBaseRoot: input.worktreesRoot,
+        },
+        error,
       );
-      throw error;
     }
-    return rollbackCreatedPaseoWorktree(
-      {
-        cwd: createdWorktree.repoRoot,
-        worktreePath: createdWorktree.worktree.worktreePath,
-        teardownCwds: [],
-        paseoHome: input.paseoHome,
-        worktreesBaseRoot: input.worktreesRoot,
-      },
-      error,
-    );
-  }
+  });
 }
 
 async function isDirectory(targetPath: string): Promise<boolean> {
