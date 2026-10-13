@@ -81,8 +81,8 @@ import {
  * Backend routing for the checkout surface — one policy point deciding whether
  * an operation runs against git or jj. Rules (jj plan §4):
  *
- * - Dispatch disabled (PASEO_JJ_DISPATCH=0) or a git/plain directory keeps
- *   today's behavior exactly: the git implementation's own detection applies.
+ * - Git/plain directories keep the git implementation's own detection.
+ * - Detected jj never falls back to Git, including when dispatch is disabled.
  * - A jj repository with dispatch enabled routes to the jj implementation —
  *   never to git. When the jj runtime is unavailable (missing/old binary,
  *   PASEO_DISABLE_JJ), the operation fails with {@link JjUnavailableError}
@@ -122,11 +122,11 @@ export class NotSupportedOnJjError extends Error {
  * select an unrelated enclosing repository.
  */
 export async function resolveEffectiveBackend(cwd: string): Promise<VcsBackend | "git-default"> {
-  if (!isJjDispatchEnabled()) {
-    return "git-default";
-  }
   if (detectVcsBackend(cwd) !== "jj") {
     return "git-default";
+  }
+  if (!isJjDispatchEnabled()) {
+    throw new JjUnavailableError(null, "jj dispatch is disabled; set PASEO_JJ_DISPATCH=1");
   }
   const runtime = await resolveJjRuntime();
   if (!runtime.ok) {

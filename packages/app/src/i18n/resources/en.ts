@@ -799,6 +799,11 @@ export const en = {
           pending: "Committing...",
           success: "Committed",
         },
+        fetch: {
+          label: "Fetch",
+          pending: "Fetching...",
+          success: "Fetched",
+        },
         pull: {
           label: "Pull",
           pending: "Pulling...",
@@ -1383,6 +1388,7 @@ export const en = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Current change",
       startingRef: "Starting ref",
       intoBase: "into {{baseRef}}",
       searching: "Searching...",

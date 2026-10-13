@@ -759,3 +759,24 @@ describe("jj workspace name from path", () => {
     expect(await workspaceNameFromPath("/tmp/worktrees/hash/feat-one-1")).toBe("feat-one-1");
   });
 });
+
+describeIfJj("jj exact base cardinality", () => {
+  it("refuses multi-result bases without allocating a checkout or bookmark", async () => {
+    const fixture = createFixture({ colocate: false });
+    const before = workspaceEntries(fixture);
+    await expect(
+      createJjWorktree({
+        cwd: fixture.repoDir,
+        worktreeSlug: "ambiguous",
+        source: { kind: "branch-off", baseBranch: "all()", branchName: "ambiguous" },
+        worktreesRoot: fixture.worktreesRoot,
+        runSetup: false,
+      }),
+    ).rejects.toThrow("Cannot resolve jj revision for base");
+    expect(workspaceEntries(fixture)).toEqual(before);
+    expect(
+      fixture.jj(["log", "--no-graph", "-r", 'bookmarks(exact:"ambiguous")', "-T", "commit_id"])
+        .stdout,
+    ).toBe("");
+  });
+});

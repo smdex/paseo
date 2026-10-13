@@ -33,9 +33,12 @@ import {
   dispatchResolveCheckoutWatchRoot,
   dispatchResolveRepositoryDefaultBranch,
   dispatchRunStashList,
+  resolveEffectiveBackend,
 } from "../utils/checkout-dispatch.js";
-import { runJjCommand } from "../utils/run-jj-command.js";
+import { jjPull } from "../utils/checkout-jj.js";
+import { runJjCommand, runWithJjCommandPriority } from "../utils/run-jj-command.js";
 import {
+  detectVcsBackend,
   isJjDispatchEnabled,
   isJjFeatureAvailable,
   resolveJjRepoIdentity,
@@ -186,6 +189,10 @@ export interface WorkspaceGitRuntimeSnapshot {
     vcs?: "git" | "jj";
     /** jj change id of the working-copy commit (jj only). */
     changeId?: string | null;
+    defaultWorkspaceBase?: Extract<
+      Awaited<ReturnType<typeof dispatchGetCheckoutStatus>>,
+      { isGit: true }
+    >["defaultWorkspaceBase"];
   };
   forge: {
     featuresEnabled: boolean;
@@ -403,6 +410,7 @@ interface WorkspaceGitServiceDependencies {
     runGitCommand: RunGitCommand,
   ) => Promise<WorkspaceGitFetchResult>;
   runGitCommand: typeof runGitCommand;
+  runJjFetch: typeof jjPull;
   /**
    * jj repo identity for observation routing, gated by the same dispatch
    * enablement as the rest of the jj surface. Null for git checkouts and
@@ -505,6 +513,8 @@ interface RepoGitTarget {
   recovery: WatchRecoveryState;
   intervalId: NodeJS.Timeout | null;
   fetchInFlight: boolean;
+  jjFetchController: AbortController | null;
+  jjFetchPromise: Promise<void> | null;
   bufferedFetchMetadataEvents: FileChange[];
   recentFetchRemoteRefChanges: Map<
     string,
@@ -624,6 +634,7 @@ function buildDefaultWorkspaceGitServiceDeps(
     hasOriginRemote,
     runGitFetch: fetchWorkspaceGitRemote,
     runGitCommand,
+    runJjFetch: jjPull,
     resolveJjRepoIdentity: resolveDispatchedJjRepoIdentity,
     readJjHeadOpId: readJjHeadOpIdViaCli,
     getWorkspaceGitSelfHealPhaseMs: getWorkspaceGitObservationReensurePhaseMs,
@@ -738,8 +749,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     });
   }
 
-  resolveForge(cwd: string): Promise<ForgeResolution | null> {
+  async resolveForge(cwd: string): Promise<ForgeResolution | null> {
     this.assertNotDisposed();
+    if ((await resolveEffectiveBackend(cwd)) === "jj") return null;
     return this.forgeResolver.resolve(resolve(cwd));
   }
 
@@ -1129,7 +1141,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
     this.workspaceTargets.clear();
 
+    const fetches: Promise<void>[] = [];
     for (const target of this.repoTargets.values()) {
+      if (target.jjFetchPromise) fetches.push(target.jjFetchPromise);
       this.closeRepoTarget(target);
     }
     this.repoTargets.clear();
@@ -1143,7 +1157,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.workingTreeWatchResolutions.clear();
     this.workingTreeWatchAliases.clear();
     this.snapshotUpdatedListeners.clear();
-    this.disposePromise = this.fileObserver.close();
+    this.disposePromise = Promise.all([this.fileObserver.close(), ...fetches]).then(
+      () => undefined,
+    );
     return this.disposePromise;
   }
 
@@ -1367,6 +1383,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async setupWorkspaceObservation(target: WorkspaceGitTarget): Promise<void> {
+    await resolveEffectiveBackend(target.cwd);
     const facts = await this.getFactsForObservation(target);
     if (!this.isActiveObservedWorkspaceTarget(target)) {
       return;
@@ -2282,6 +2299,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       recovery: { attemptCount: 0, timer: null, establishedAt: null },
       intervalId: null,
       fetchInFlight: false,
+      jjFetchController: null,
+      jjFetchPromise: null,
       bufferedFetchMetadataEvents: [],
       recentFetchRemoteRefChanges: new Map(),
       knownRemoteRefs: null,
@@ -2300,9 +2319,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     if (repoTarget.vcs === "jj") {
-      // The git fetch cadence must not run against a jj repo (it would spawn
-      // git, and on colocated repos actually mutate refs). ponytail(jj-fetch):
-      // replace with a jj fetch cadence in the remote phase.
+      repoTarget.intervalId = setInterval(() => {
+        void this.runRepoFetch(repoTarget);
+      }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
+      void this.runRepoFetch(repoTarget);
       return;
     }
     const fetchWorkspaceTarget = Array.from(repoTarget.workspaceKeys)
@@ -3047,7 +3067,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private updateForgePrStatusPollForTarget(target: WorkspaceGitTarget): void {
-    if (target.listeners.size === 0) {
+    if (
+      target.listeners.size === 0 ||
+      target.latestGit?.vcs === "jj" ||
+      detectVcsBackend(target.cwd) === "jj"
+    ) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
@@ -3092,7 +3116,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
           : {}),
         onStatus: (status) => {
-          if (!this.isActiveObservedWorkspaceTarget(target)) {
+          if (
+            !this.isActiveObservedWorkspaceTarget(target) ||
+            target.latestGit?.vcs === "jj" ||
+            detectVcsBackend(target.cwd) === "jj"
+          ) {
             return;
           }
           this.rememberForgePrStatusSnapshot(
@@ -3156,7 +3184,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     };
 
     const poll = async () => {
-      if (closed || !this.isActiveObservedWorkspaceTarget(target)) {
+      if (
+        closed ||
+        !this.isActiveObservedWorkspaceTarget(target) ||
+        detectVcsBackend(target.cwd) === "jj"
+      ) {
         return;
       }
       try {
@@ -3261,8 +3293,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   ): Promise<{ ignored: Set<string>; failed: boolean }> {
     const ignored = new Set<string>();
     // Never ask Git about jj's working tree (including colocated repos).
-    const jjIdentity = this.deps.resolveJjRepoIdentity(rootPath);
-    if (jjIdentity) {
+    const backend = await resolveEffectiveBackend(rootPath);
+    if (backend === "jj") {
       return this.loadJjIgnoredDirs(rootPath);
     }
     try {
@@ -3716,6 +3748,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       diffStat,
       vcs: checkoutStatus.vcs,
       changeId: checkoutStatus.changeId ?? null,
+      defaultWorkspaceBase: checkoutStatus.defaultWorkspaceBase,
     };
     const loadedAtMs = this.deps.now().getTime();
     target.latestGitLoadedAtMs = loadedAtMs;
@@ -3736,6 +3769,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     facts: CheckoutSnapshotFacts,
     runRefreshGitCommand: RunGitCommand,
   ): Promise<void> {
+    if (target.latestGit?.vcs === "jj" || detectVcsBackend(target.cwd) === "jj") {
+      this.stopForgePrStatusPollForTarget(target);
+      target.latestForge = buildForgeUnavailableSnapshot();
+      target.latestForgeLoadedAtMs = this.deps.now().getTime();
+      return;
+    }
     const remoteUrl = target.latestGit?.remoteUrl ?? null;
     const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
     // Every forge gates on the resolver alone: a cloud host matches synchronously
@@ -3783,7 +3822,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private getForgePrStatusPollKey(target: WorkspaceGitTarget): string | null {
     const git = target.latestGit;
-    if (!git?.currentBranch || !git.remoteUrl) {
+    if (
+      !git?.currentBranch ||
+      !git.remoteUrl ||
+      git.vcs === "jj" ||
+      detectVcsBackend(target.cwd) === "jj"
+    ) {
       return null;
     }
 
@@ -3808,7 +3852,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target: WorkspaceGitTarget,
     github: WorkspaceGitRuntimeSnapshot["forge"],
   ): void {
-    if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
+    if (
+      target.closed ||
+      this.workspaceTargets.get(target.cwd) !== target ||
+      target.latestGit?.vcs === "jj" ||
+      detectVcsBackend(target.cwd) === "jj"
+    ) {
       return;
     }
 
@@ -3853,7 +3902,48 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async runRepoFetch(target: RepoGitTarget): Promise<void> {
-    if (target.fetchInFlight) {
+    if (
+      this.disposed ||
+      target.closed ||
+      this.repoTargets.get(target.repoGitRoot) !== target ||
+      target.fetchInFlight
+    ) {
+      return;
+    }
+    if (target.vcs === "jj") {
+      const workspace = [...target.workspaceKeys]
+        .map((cwd) => this.workspaceTargets.get(cwd))
+        .find((candidate) => candidate && this.isActiveObservedWorkspaceTarget(candidate));
+      if (!workspace || !workspace.latestFacts?.isGit) return;
+      const hasRemote = workspace.latestGit
+        ? workspace.latestGit.hasRemote
+        : workspace.latestFacts.remoteUrl !== null;
+      if (!hasRemote) return;
+      target.cwd = workspace.cwd;
+      target.fetchInFlight = true;
+      const controller = new AbortController();
+      const fetchCwd = target.cwd;
+      target.jjFetchController = controller;
+      const fetchPromise = runWithJjCommandPriority("normal", async () => {
+        await resolveEffectiveBackend(fetchCwd);
+        await this.deps.runJjFetch(fetchCwd, { signal: controller.signal });
+      })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            this.logger.warn(
+              { err: error, cwd: fetchCwd, sharedStorePath: target.repoGitRoot },
+              "Background jj fetch failed; local observation remains active",
+            );
+          }
+        })
+        .finally(async () => {
+          target.fetchInFlight = false;
+          target.jjFetchController = null;
+          await this.scheduleJjStoreMetadataRefresh(target);
+        });
+      target.jjFetchPromise = fetchPromise;
+      await fetchPromise;
+      if (target.jjFetchPromise === fetchPromise) target.jjFetchPromise = null;
       return;
     }
 
@@ -4091,6 +4181,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private closeRepoTarget(target: RepoGitTarget): void {
     target.closed = true;
+    target.jjFetchController?.abort(new WorkspaceGitServiceDisposedError());
     if (target.intervalId) {
       clearInterval(target.intervalId);
       target.intervalId = null;

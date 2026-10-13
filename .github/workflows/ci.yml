@@ -323,14 +323,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
 
-      - &server_build
-        name: Build server dependencies
+      - name: Build server dependencies
         run: npm run build:server-deps
 
       - name: Run file observation tests

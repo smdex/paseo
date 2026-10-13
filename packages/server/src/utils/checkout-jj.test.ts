@@ -1073,3 +1073,95 @@ describeIfJj("checkout-jj rename preserves metadata", () => {
     expect(updated?.runtime?.worktreePort).toBe(4242);
   });
 });
+
+describeIfJj("jj local core parity", () => {
+  it("lists bounded bookmarkless ancestry and preserves a dirty current change on Fetch", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+    const remote = scratchBareGitOrigin();
+    fixture.jj(["git", "remote", "add", "upstream", remote]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty\n");
+    fixture.jj(["describe", "-m", "dirty current"]);
+    const before = changeIdOf(fixture, "@");
+    await jjPull(fixture.repoDir);
+    expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe("dirty\n");
+    expect(changeIdOf(fixture, "@")).toBe(before);
+    const history = await listJjCommits({ cwd: fixture.repoDir });
+    expect(history.baseRef).toBeNull();
+    expect(history.commits.map((commit) => commit.subject)).toEqual(["dirty current", "initial"]);
+    expect(history.commits.every((commit) => !commit.isOnBase)).toBe(true);
+    await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
+      defaultWorkspaceBase: { refName: "@", displayName: "Current change" },
+      hasRemote: true,
+    });
+  });
+
+  it("lists exact selected non-origin remote-only/local targets in seconds and hides private pins", async () => {
+    const source = scratch({ files: { "a.txt": "base\n" } });
+    const remote = scratchBareGitOrigin();
+    source.jj(["bookmark", "create", "remote-only", "-r", "@-"]);
+    source.jj(["git", "remote", "add", "upstream", remote]);
+    source.jj(["git", "push", "--remote", "upstream", "--bookmark", "remote-only"]);
+    const target = scratch({ colocate: false, files: { "b.txt": "local\n" } });
+    target.jj(["git", "remote", "add", "upstream", remote]);
+    target.jj(["git", "fetch", "--remote", "upstream"]);
+    target.jj(["bookmark", "create", "local", "-r", "@-"]);
+    target.jj(["bookmark", "create", "paseo/recovery/private", "-r", "@-"]);
+    const suggestions = await listJjBookmarkSuggestions(target.repoDir);
+    const localId = target
+      .jj(["log", "--no-graph", "-r", "local", "-T", "commit_id"])
+      .stdout.trim();
+    const remoteId = source
+      .jj(["log", "--no-graph", "-r", "remote-only", "-T", "commit_id"])
+      .stdout.trim();
+    expect(suggestions.map((row) => row.name).sort()).toEqual(["local", "remote-only"]);
+    expect(suggestions.find((row) => row.name === "local")).toMatchObject({
+      localRef: localId,
+      hasLocal: true,
+      hasRemote: false,
+    });
+    expect(suggestions.find((row) => row.name === "remote-only")).toMatchObject({
+      remoteRef: remoteId,
+      remoteName: "upstream",
+      hasLocal: false,
+      hasRemote: true,
+    });
+    expect(suggestions.every((row) => row.committerDate < 100_000_000_000)).toBe(true);
+    const { createJjWorktree } = await import("./worktree-jj.js");
+    const created = await createJjWorktree({
+      cwd: target.repoDir,
+      worktreeSlug: "from-picker",
+      source: { kind: "branch-off", baseBranch: remoteId, branchName: "from-picker" },
+      worktreesRoot: join(target.dir, "worktrees"),
+      runSetup: false,
+    });
+    expect(readPaseoWorktreeMetadata(created.worktreePath)?.baseRef).toBe(remoteId);
+  });
+
+  it("keeps dirty unreachable work when fetch prunes a remote bookmark", async () => {
+    const fixture = scratch({ files: { "a.txt": "base\n" } });
+    const remote = scratchBareGitOrigin();
+    fixture.jj(["bookmark", "create", "feature", "-r", "@-"]);
+    fixture.jj(["git", "remote", "add", "origin", remote]);
+    fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "feature"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "keep\n");
+    fixture.jj(["describe", "-m", "keep"]);
+    const before = changeIdOf(fixture, "@");
+    expect(
+      spawnSync("git", ["--git-dir", remote, "update-ref", "-d", "refs/heads/feature"]).status,
+    ).toBe(0);
+    await jjPull(fixture.repoDir);
+    expect(changeIdOf(fixture, "@")).toBe(before);
+    expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe("keep\n");
+  });
+
+  it("reports configured ambiguous remotes without choosing one and Fetch names the candidates", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+    fixture.jj(["git", "remote", "add", "upstream", scratchBareGitOrigin()]);
+    fixture.jj(["git", "remote", "add", "fork", scratchBareGitOrigin()]);
+    await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
+      hasRemote: true,
+      remoteUrl: null,
+    });
+    await expect(jjPull(fixture.repoDir)).rejects.toThrow(/Multiple git remotes.*fork.*upstream/);
+  });
+});

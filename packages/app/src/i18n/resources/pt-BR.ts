@@ -808,6 +808,11 @@ export const ptBR: TranslationResources = {
           pending: "Fazendo commit...",
           success: "Commit concluído",
         },
+        fetch: {
+          label: "Buscar",
+          pending: "Buscando...",
+          success: "Buscado",
+        },
         pull: {
           label: "Pull",
           pending: "Fazendo pull...",
@@ -1401,6 +1406,7 @@ export const ptBR: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Alteração atual",
       startingRef: "Ref inicial",
       intoBase: "em {{baseRef}}",
       searching: "Buscando...",

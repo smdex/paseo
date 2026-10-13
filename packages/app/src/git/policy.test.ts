@@ -193,7 +193,6 @@ describe("git-actions-policy", () => {
     expect(jjActions.secondary.map((action) => action.id)).toEqual([
       "pull",
       "push",
-      "pull-and-push",
       "new-change",
       "archive-workspace",
     ]);
@@ -1171,4 +1170,20 @@ describe("git-actions-policy", () => {
       "merge-pr-rebase",
     ]);
   });
+});
+
+it("offers Fetch on dirty jj with unknown or zero behind without promoting Sync", () => {
+  for (const behindOfOrigin of [null, 0, 3]) {
+    const actions = buildGitActions(
+      createInput({ isJj: true, hasRemote: true, hasUncommittedChanges: true, behindOfOrigin }),
+    );
+    expect(actions.primary?.id).toBe("commit");
+    expect(actions.secondary.find((action) => action.id === "pull")).toMatchObject({
+      label: "Fetch",
+      pendingLabel: "Fetching...",
+      successLabel: "Fetched",
+      unavailableMessage: undefined,
+    });
+    expect(actions.secondary.map((action) => action.id)).not.toContain("pull-and-push");
+  }
 });

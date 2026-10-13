@@ -812,6 +812,11 @@ export const es: TranslationResources = {
           pending: "Comprometiéndose...",
           success: "Comprometido",
         },
+        fetch: {
+          label: "Obtener",
+          pending: "Obteniendo...",
+          success: "Obtenido",
+        },
         pull: {
           label: "Jalar",
           pending: "Tracción...",
@@ -1411,6 +1416,7 @@ export const es: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Cambio actual",
       startingRef: "Árbitro inicial",
       intoBase: "en {{baseRef}}",
       searching: "Búsqueda...",

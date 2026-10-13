@@ -808,6 +808,11 @@ export const ja: TranslationResources = {
           pending: "コミット中...",
           success: "コミットしました",
         },
+        fetch: {
+          label: "フェッチ",
+          pending: "フェッチ中...",
+          success: "フェッチ済み",
+        },
         pull: {
           label: "プル",
           pending: "プル中...",
@@ -1389,6 +1394,7 @@ export const ja: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "現在の変更",
       startingRef: "開始Ref",
       intoBase: "{{baseRef}}に",
       searching: "検索中...",

@@ -180,6 +180,7 @@ export class CheckoutSession {
   private async resolveForgeService(
     cwd: string,
   ): Promise<{ forge: string; service: ForgeService } | null> {
+    if ((await resolveEffectiveBackend(cwd)) === "jj") return null;
     const resolution = await this.workspaceGitService.resolveForge(cwd);
     if (!resolution) {
       return null;
@@ -230,7 +231,7 @@ export class CheckoutSession {
       return { forge: await this.resolveForgeIdForError(cwd), authState: error.authState };
     }
     try {
-      const resolution = await this.workspaceGitService.resolveForge(cwd);
+      const resolution = await this.resolveForgeService(cwd);
       return {
         forge: resolution?.forge ?? "github",
         authState: resolution ? "error" : "no_remote",
@@ -494,7 +495,9 @@ export class CheckoutSession {
     const resolvedCwd = expandTilde(cwd);
 
     try {
-      (await this.resolveForgeService(resolvedCwd))?.service.invalidate({ cwd: resolvedCwd });
+      if ((await resolveEffectiveBackend(resolvedCwd)) !== "jj") {
+        (await this.resolveForgeService(resolvedCwd))?.service.invalidate({ cwd: resolvedCwd });
+      }
       await this.workspaceGitService.getSnapshot(resolvedCwd, {
         force: true,
         includeForge: true,
@@ -1455,6 +1458,9 @@ export class CheckoutSession {
 
     try {
       const resolvedCwd = expandTilde(cwd);
+      if ((await resolveEffectiveBackend(resolvedCwd)) === "jj") {
+        throw new NotSupportedOnJjError("Forge search");
+      }
       // COMPAT(githubSearchRpc): the legacy github_search RPC is GitHub by
       // definition; forge.search.* shipped in v0.2.0-beta.1 and resolves the
       // cwd's forge. Remove after 2027-01-17 once the supported client floor

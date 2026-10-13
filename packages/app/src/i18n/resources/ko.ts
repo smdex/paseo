@@ -804,6 +804,11 @@ export const ko: TranslationResources = {
           pending: "커밋하는 중...",
           success: "커밋됨",
         },
+        fetch: {
+          label: "가져오기",
+          pending: "가져오는 중...",
+          success: "가져옴",
+        },
         pull: {
           label: "풀",
           pending: "가져오는 중...",
@@ -1382,6 +1387,7 @@ export const ko: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "현재 변경",
       startingRef: "시작 ref",
       intoBase: "{{baseRef}}(으)로",
       searching: "검색 중...",

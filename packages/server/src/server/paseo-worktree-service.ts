@@ -148,7 +148,9 @@ async function provisionCreatedWorktree(
         : {}),
     });
 
-    deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+    if (creationBackend !== "jj") {
+      deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+    }
 
     return {
       worktree: createdWorktree.worktree,

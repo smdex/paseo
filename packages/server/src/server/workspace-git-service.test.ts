@@ -1,4 +1,6 @@
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { createTestLogger } from "../test-utils/test-logger.js";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import os from "node:os";
 import path, { join } from "node:path";
@@ -47,6 +49,10 @@ function createSnapshot(
       isDirty: false,
       baseRef: "main",
       aheadBehind: { ahead: 0, behind: 0 },
+      upstreamRef: null,
+      changeId: null,
+      vcs: undefined,
+      defaultWorkspaceBase: undefined,
       aheadOfOrigin: 0,
       behindOfOrigin: 0,
       hasRemote: true,
@@ -137,6 +143,7 @@ function createCheckoutStatus(
     isDirty: false,
     baseRef: "main",
     aheadBehind: { ahead: 0, behind: 0 },
+    upstreamRef: null,
     aheadOfOrigin: 0,
     behindOfOrigin: 0,
     hasRemote: true,
@@ -1376,7 +1383,7 @@ describe("WorkspaceGitServiceImpl", () => {
     expect(subscription.repoRoot).toBe(REPO_CWD);
     expect(subscribe).toHaveBeenCalledTimes(1);
     expect(subscribe).toHaveBeenCalledWith(REPO_CWD, expect.any(Function), {
-      ignore: [join(REPO_CWD, ".git")],
+      ignore: [join(REPO_CWD, ".git"), join(REPO_CWD, ".jj")],
     });
 
     subscription.unsubscribe();
@@ -1441,7 +1448,7 @@ describe("WorkspaceGitServiceImpl", () => {
 
     expect(subscription.repoRoot).toBeNull();
     expect(subscribe).toHaveBeenCalledWith(plainCwd, expect.any(Function), {
-      ignore: [join(plainCwd, ".git")],
+      ignore: [join(plainCwd, ".git"), join(plainCwd, ".jj")],
     });
     expect(vi.getTimerCount()).toBe(1);
 
@@ -1553,3 +1560,56 @@ describe("WorkspaceGitServiceImpl", () => {
     service.dispose();
   });
 });
+
+test.skipIf(!isJjAvailable())(
+  "native jj blocks forge lookup, retained polls, and manual forge invalidation even with a forge-shaped remote",
+  async () => {
+    const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(
+      repo.jj(["git", "remote", "add", "origin", "https://github.com/acme/repo.git"]).status,
+    ).toBe(0);
+    const forge = createGitHubServiceStub();
+    const retain = vi.fn(() => ({ unsubscribe() {} }));
+    forge.retainCurrentPullRequestStatusPoll = retain;
+    const lookups: string[] = [];
+    const service = new WorkspaceGitServiceImpl({
+      logger: createTestLogger(),
+      paseoHome: repo.dir,
+      deps: {
+        forgeOverrides: { github: forge },
+        subscribe: async () => ({ unsubscribe: async () => {}, updateIgnore: async () => {} }),
+        createWatcherLivenessCanary: () => ({
+          path: "",
+          filterEvents: (events) => events,
+          verify: async () => {},
+        }),
+        runJjFetch: async () => {},
+        getPullRequestStatus: async (cwd) => {
+          lookups.push(cwd);
+          throw new Error("forge must not run");
+        },
+      },
+    });
+    const subscription = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    try {
+      await expect(service.resolveForge(repo.repoDir)).resolves.toBeNull();
+      const snapshot = await service.getSnapshot(repo.repoDir, {
+        force: true,
+        includeForge: true,
+        reason: "manual-refresh",
+      });
+      expect(snapshot.git.vcs).toBe("jj");
+      expect(snapshot.forge.featuresEnabled).toBe(false);
+      expect(snapshot.forge.pullRequest).toBeNull();
+      expect(lookups).toEqual([]);
+      expect(retain).not.toHaveBeenCalled();
+      expect(forge.isAuthenticated).not.toHaveBeenCalled();
+      expect(forge.invalidate).not.toHaveBeenCalled();
+    } finally {
+      subscription.unsubscribe();
+      await service.dispose();
+      repo.dispose();
+    }
+  },
+);

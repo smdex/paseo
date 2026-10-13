@@ -800,6 +800,11 @@ export const zhCN: TranslationResources = {
           pending: "正在 commit...",
           success: "已 commit",
         },
+        fetch: {
+          label: "获取",
+          pending: "正在获取...",
+          success: "已获取",
+        },
         pull: {
           label: "Pull",
           pending: "正在 pull...",
@@ -1364,6 +1369,7 @@ export const zhCN: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "当前变更",
       startingRef: "起始 ref",
       intoBase: "进入 {{baseRef}}",
       searching: "正在搜索...",

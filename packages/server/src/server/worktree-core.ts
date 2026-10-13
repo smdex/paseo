@@ -8,6 +8,8 @@ import {
   validateBranchSlug,
   type CreatedWorktree,
 } from "../utils/worktree.js";
+import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
+import { getJjStatus } from "../utils/checkout-jj.js";
 import { createJjWorktree } from "../utils/worktree-jj.js";
 import { NotSupportedOnJjError, resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import {
@@ -62,6 +64,7 @@ async function createWorktreeCoreWithPriority(
   input: CreateWorktreeCoreInput,
   deps: CreateWorktreeCoreDeps,
 ): Promise<CreateWorktreeCoreResult> {
+  const backend = await resolveEffectiveBackend(input.cwd);
   const repoRoot = await resolveWorktreeRepoRoot(input, deps.workspaceGitService);
   const requestedWorktreeSlug = input.worktreeSlug
     ? normalizeWorktreeSlug(input.worktreeSlug)
@@ -94,24 +97,14 @@ async function createWorktreeCoreWithPriority(
     };
   }
 
-  const forge = await resolveForge(repoRoot, deps, intentInput);
+  const forge =
+    backend === "jj"
+      ? { forge: "github", service: deps.github }
+      : await resolveForge(repoRoot, deps, intentInput);
   const intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
     forge: forge.forge,
     forgeService: forge.service,
-    resolveDefaultBranch: async (root) => {
-      const base = await resolveDefaultBranch(root, deps).catch(() => null);
-      if (base) {
-        return base;
-      }
-      // jj-only fresh-repo fallback (review fix 16): a repository without
-      // main/master bookmarks still has a base — the working copy, pinned to
-      // its stable commit id by createJjWorktree. Git keeps failing exactly
-      // as before.
-      if ((await resolveEffectiveBackend(root)) === "jj") {
-        return "@";
-      }
-      throw new Error("Unable to resolve repository default branch");
-    },
+    resolveDefaultBranch: (root) => resolveDefaultBranch(input, deps, root),
   });
   let normalizedSlug: string;
 
@@ -135,7 +128,7 @@ async function createWorktreeCoreWithPriority(
   const onJjWorktreeCreated = deps.onJjWorktreeCreated;
   return {
     worktree: await createWorktreeForBackend({
-      cwd: repoRoot,
+      cwd: backend === "jj" ? input.cwd : repoRoot,
       worktreeSlug: normalizedSlug,
       source: intent,
       paseoHome: input.paseoHome,
@@ -174,7 +167,9 @@ async function createWorktreeForBackend(input: {
         `Worktree source "${input.source.kind}" is not supported on jj repositories yet`,
       );
     }
-    return createJjWorktree(input);
+    const identity = resolveJjRepoIdentity(input.cwd);
+    if (!identity) throw new Error("Unable to resolve jj repository identity");
+    return createJjWorktree({ ...input, cwd: identity.workspaceRoot });
   }
   return createWorktree(input);
 }
@@ -196,26 +191,43 @@ async function resolveForge(
 }
 
 async function resolveDefaultBranch(
-  repoRoot: string,
+  input: CreateWorktreeCoreInput,
   deps: CreateWorktreeCoreDeps,
+  repoRoot: string,
 ): Promise<string> {
-  const baseBranch = deps.resolveDefaultBranch
-    ? await deps.resolveDefaultBranch(repoRoot)
-    : await deps.workspaceGitService?.resolveDefaultBranch(repoRoot);
-  if (!baseBranch) {
-    throw new Error("Unable to resolve repository default branch");
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    const status = await getJjStatus(input.cwd, {
+      paseoHome: input.paseoHome,
+      worktreesRoot: input.worktreesRoot,
+    });
+    if (!status.isGit || !status.defaultWorkspaceBase)
+      throw new Error("Unable to resolve jj workspace base");
+    return status.defaultWorkspaceBase.refName;
   }
+  const baseBranchPromise = deps.resolveDefaultBranch
+    ? deps.resolveDefaultBranch(repoRoot)
+    : deps.workspaceGitService?.resolveDefaultBranch(repoRoot);
+  const baseBranch = await baseBranchPromise?.catch(() => null);
+  if (!baseBranch) throw new Error("Unable to resolve repository default branch");
   return baseBranch;
 }
 
 export async function resolveWorktreeRepoRoot(
-  input: Pick<CreateWorktreeCoreInput, "cwd" | "paseoHome">,
+  input: CreateWorktreeCoreInput,
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">,
 ): Promise<string> {
   if (!workspaceGitService) {
     throw new Error("Create worktree requires WorkspaceGitService");
   }
 
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    if (input.checkoutSource !== undefined || input.githubPrNumber !== undefined) {
+      throw new NotSupportedOnJjError("Change-request checkout");
+    }
+    const identity = resolveJjRepoIdentity(input.cwd);
+    if (!identity) throw new Error("Unable to resolve jj repository identity");
+    return identity.primaryRoot;
+  }
   return workspaceGitService.resolveRepoRoot(input.cwd);
 }
 

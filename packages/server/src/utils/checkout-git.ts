@@ -265,6 +265,9 @@ export interface BranchSuggestion {
   hasRemote: boolean;
   localAhead?: number;
   localBehind?: number;
+  localRef?: string;
+  remoteRef?: string;
+  remoteName?: string;
 }
 
 async function listGitRefs(cwd: string, refPrefix: string): Promise<GitRef[]> {
@@ -902,6 +905,7 @@ export interface CheckoutStatusGitNonPaseo {
   vcs?: "git" | "jj";
   /** jj change id of the working-copy commit (jj only). */
   changeId?: string | null;
+  defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
 export interface CheckoutStatusGitPaseo {
@@ -922,6 +926,7 @@ export interface CheckoutStatusGitPaseo {
   vcs?: "git" | "jj";
   /** jj change id of the working-copy commit (jj only). */
   changeId?: string | null;
+  defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
 export type CheckoutStatusGit = CheckoutStatusGitNonPaseo | CheckoutStatusGitPaseo;
