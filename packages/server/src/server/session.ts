@@ -200,7 +200,9 @@ import {
   archiveWorkspaceContents,
 } from "./workspace-archive-service.js";
 import type { ServiceProxySubsystem } from "./service-proxy.js";
-import { renameCurrentBranch as renameCurrentBranchDefault } from "../utils/checkout-git.js";
+import { dispatchRenameCurrentBranch } from "../utils/checkout-dispatch.js";
+
+const renameCurrentBranchDefault = dispatchRenameCurrentBranch;
 import {
   createGitMutationService,
   type GitMutationService,

@@ -44,10 +44,6 @@ import {
   createPullRequest,
   forgeAuthStateFromError,
   isForgeAuthError,
-  mergeFromBase,
-  mergeToBase,
-  pullCurrentBranch,
-  pushCurrentBranch,
   listCheckoutCommits,
   getCommitFileDiff,
 } from "../../../utils/checkout-git.js";
@@ -55,7 +51,11 @@ import {
   dispatchCommitChanges,
   dispatchDescribeChange,
   dispatchDiscardChanges,
+  dispatchMergeFromBase,
+  dispatchMergeToBase,
   dispatchNewChange,
+  dispatchPullCurrentBranch,
+  dispatchPushCurrentBranch,
   dispatchStashPop,
   dispatchStashSave,
 } from "../../../utils/checkout-dispatch.js";
@@ -866,7 +866,7 @@ export class CheckoutSession {
         baseRef = baseRef.slice("origin/".length);
       }
 
-      const mutatedCwd = await mergeToBase(
+      const mutatedCwd = await dispatchMergeToBase(
         cwd,
         {
           baseRef,
@@ -915,7 +915,7 @@ export class CheckoutSession {
         }
       }
 
-      await mergeFromBase(
+      await dispatchMergeFromBase(
         cwd,
         {
           baseRef: msg.baseRef,
@@ -954,7 +954,7 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await pullCurrentBranch(cwd);
+      await dispatchPullCurrentBranch(cwd);
       await this.gitMutation.notifyGitMutation(cwd, "pull", { invalidateForge: true });
       this.scheduleDiffRefresh(cwd);
 
@@ -986,7 +986,7 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await pushCurrentBranch(cwd);
+      await dispatchPushCurrentBranch(cwd);
       await this.gitMutation.notifyGitMutation(cwd, "push", { invalidateForge: true });
       this.host.emit({
         type: "checkout_push_response",
