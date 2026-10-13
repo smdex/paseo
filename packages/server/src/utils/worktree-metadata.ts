@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { isAbsolute, join, resolve } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
 import { z } from "zod";
 
 const ChangeRequestLookupTargetSchema = z.object({
@@ -157,9 +157,37 @@ function getGitDirForWorktreeRoot(worktreeRoot: string): string {
   return gitPath;
 }
 
+/**
+ * jj workspaces carry only a `.jj` directory (verified on 0.45.1: even
+ * workspaces of colocated repositories have no `.git`), so their metadata
+ * lives under `.jj/paseo/` with the same shape and filename. jj tolerates the
+ * extra directory and never rewrites it.
+ */
+function getJjDirForWorkspaceRoot(worktreeRoot: string): string {
+  const jjPath = join(worktreeRoot, ".jj");
+  if (!existsSync(jjPath)) {
+    throw new Error(`Not a jj workspace: ${worktreeRoot}`);
+  }
+  return jjPath;
+}
+
+function getPaseoMetadataDirForRoot(worktreeRoot: string): string {
+  if (existsSync(join(worktreeRoot, ".git"))) {
+    return getGitDirForWorktreeRoot(worktreeRoot);
+  }
+  return getJjDirForWorkspaceRoot(worktreeRoot);
+}
+
 export function getPaseoWorktreeMetadataPath(worktreeRoot: string): string {
-  const gitDir = getGitDirForWorktreeRoot(worktreeRoot);
-  return join(gitDir, "paseo", "worktree.json");
+  // Prefer an existing metadata file in the jj location when present so a
+  // colocated repo whose git dir also exists never shadows jj metadata for a
+  // workspace that recorded it under `.jj`.
+  const jjMetadataPath = join(worktreeRoot, ".jj", "paseo", "worktree.json");
+  if (existsSync(jjMetadataPath)) {
+    return jjMetadataPath;
+  }
+  const metadataDir = getPaseoMetadataDirForRoot(worktreeRoot);
+  return join(metadataDir, "paseo", "worktree.json");
 }
 
 export function isQualifiedRef(ref: string): boolean {
@@ -341,7 +369,7 @@ function writePaseoWorktreeMetadataFile(
   metadata: PaseoWorktreeMetadata,
 ): void {
   const metadataPath = getPaseoWorktreeMetadataPath(worktreeRoot);
-  mkdirSync(join(getGitDirForWorktreeRoot(worktreeRoot), "paseo"), { recursive: true });
+  mkdirSync(dirname(metadataPath), { recursive: true });
   const tempPath = `${metadataPath}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tempPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   renameSync(tempPath, metadataPath);
