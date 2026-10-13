@@ -1632,6 +1632,11 @@ async function reconcileJjMutationFailure(
   }
 }
 
+function jjMutationMessage(intent: ChangeMutationIntent, target: JjChangeMeta): string {
+  if (intent.kind === "describe") return intent.message ?? "";
+  return intent.message?.trim() ? intent.message : target.description;
+}
+
 function completedJjCheckpoint(
   checkpoint: JjCheckpoint,
   kind: ChangeMutationIntent["kind"],
@@ -1678,8 +1683,7 @@ async function mutateJjChange(
       throw new JjCheckpointError(
         "A previous jj operation requires reconciliation. Inspect the retained checkpoint and recovery pins on the host before another mutation or publication.",
       );
-    const hasExplicitMessage = Boolean(intent.message?.trim());
-    const message = hasExplicitMessage ? intent.message! : target.description;
+    const message = jjMutationMessage(intent, target);
     if ((intent.kind === "describe" || intent.kind === "finish") && !message.trim())
       throw new JjCheckpointError("Description is required.");
     const id = randomUUID();
