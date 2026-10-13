@@ -27,6 +27,7 @@ import {
 import { afterEach, beforeEach, expect, test } from "vitest";
 
 import { getCheckoutStatus } from "../../../utils/checkout-git.js";
+import { dispatchGetCheckoutStatus } from "../../../utils/checkout-dispatch.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import {
   createNoGitWorkspaceRuntimeSnapshot,
@@ -1147,11 +1148,34 @@ test("a directory that goes away while the git read is in flight keeps its place
   });
 });
 
+function realJjProvisioning(worktreesRoot: string): WorkspaceProvisioningService {
+  return createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    isDirectory,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd) => {
+        const status = await dispatchGetCheckoutStatus(cwd, { paseoHome: tmpDir, worktreesRoot });
+        if (!status.isGit) throw new Error(`Missing jj checkout: ${cwd}`);
+        return checkoutLiteFromGitSnapshot(cwd, status);
+      },
+    }),
+  });
+}
+
 for (const savedAuthority of [true, false]) {
-  test.skipIf(!isJjAvailable())(
-    `directory provisioning refuses an archived jj record at a replacement incarnation (saved authority=${savedAuthority})`,
-    async () => {
-      const fixture = createScratchJjRepo({ files: { "base.txt": "base\n" } });
+  test.skipIf(!isJjAvailable()).each([
+    ["root", "missing"],
+    ["root", "owned"],
+    ["subproject", "missing"],
+    ["subproject", "owned"],
+  ] as const)(
+    `directory provisioning refuses archived and active jj %s records with %s ownership at a replacement incarnation (saved authority=${savedAuthority})`,
+    async (placement, ownership) => {
+      const fixture = createScratchJjRepo({
+        files: { "base.txt": "base\n", "sub/file.txt": "replacement subproject\n" },
+      });
       try {
         fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
         const created = await createJjWorktree({
@@ -1166,41 +1190,152 @@ for (const savedAuthority of [true, false]) {
           displayName: "project",
           timestamp: ARCHIVED_AT,
         });
+        const cwd =
+          placement === "subproject"
+            ? path.join(created.worktreePath, "sub")
+            : created.worktreePath;
+        const service = realJjProvisioning(path.join(tmpDir, "worktrees"));
         const saved = createPersistedWorkspaceRecord({
           workspaceId: "old",
           projectId: project.projectId,
-          cwd: created.worktreePath,
+          cwd,
           kind: "worktree",
           worktreeRoot: created.worktreePath,
           ...(savedAuthority
             ? { jjWorkspaceId: "old-incarnation", recoveryBookmark: "paseo/recovery/old" }
             : {}),
           displayName: "old",
-          isPaseoOwnedWorktree: true,
+          ...(ownership === "owned" ? { isPaseoOwnedWorktree: true } : {}),
           mainRepoRoot: fixture.repoDir,
           createdAt: ARCHIVED_AT,
           updatedAt: ARCHIVED_AT,
           archivedAt: ARCHIVED_AT,
         });
         await workspaceRegistry.upsert(saved);
+        expect(saved.isPaseoOwnedWorktree).toBe(ownership === "owned");
+        fixture.jj(["bookmark", "create", "paseo/recovery/old", "-r", "main"]);
         const head = fixture.jj(
           ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
           created.worktreePath,
         ).stdout;
-        await expect(
-          provisioning.findOrCreateWorkspaceForDirectory(created.worktreePath),
-        ).rejects.toThrow("different incarnation");
+        const incarnation = readJjWorkspaceIncarnation(created.worktreePath);
+        const recoveryHead = fixture.jj([
+          "log",
+          "--no-graph",
+          "-r",
+          "paseo/recovery/old",
+          "-T",
+          "commit_id",
+        ]).stdout;
+        const recovery = createWorkspaceRecoveryService({
+          paseoHome: tmpDir,
+          worktreesRoot: path.join(tmpDir, "worktrees"),
+          getWorkspace: (id) => workspaceRegistry.get(id),
+          getProject: (id) => projectRegistry.get(id),
+          isDirectory,
+          unarchiveWorkspace: async (workspace) => {
+            await service.ensureWorkspaceRecordUnarchived(workspace);
+          },
+        });
+        expect(await recovery.inspect(saved.workspaceId)).toMatchObject({
+          kind: "unavailable",
+          message: expect.stringContaining("different incarnation"),
+        });
+        await expect(recovery.restore(saved.workspaceId)).rejects.toThrow("different incarnation");
+        await expect(service.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "different incarnation",
+        );
+        await expect(service.ensureWorkspaceRecordUnarchived(saved)).rejects.toThrow(
+          "different incarnation",
+        );
         expect(await workspaceRegistry.get("old")).toEqual(saved);
+        expect(await projectRegistry.get(project.projectId)).toEqual(project);
+        expect(await workspaceRegistry.list()).toEqual([saved]);
+        expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
+          "replacement subproject\n",
+        );
+        expect(readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
         expect(
           fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
             .stdout,
         ).toBe(head);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "paseo/recovery/old", "-T", "commit_id"]).stdout,
+        ).toBe(recoveryHead);
+
+        const active = { ...saved, archivedAt: null };
+        await workspaceRegistry.upsert(active);
+        await expect(service.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "different incarnation",
+        );
+        await expect(service.ensureWorkspaceRecordUnarchived(active)).rejects.toThrow(
+          "different incarnation",
+        );
+        expect(await workspaceRegistry.get(saved.workspaceId)).toEqual(active);
+        expect(await projectRegistry.get(project.projectId)).toEqual(project);
+        expect(readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
+        expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
+          "replacement subproject\n",
+        );
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
+            .stdout,
+        ).toBe(head);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "paseo/recovery/old", "-T", "commit_id"]).stdout,
+        ).toBe(recoveryHead);
       } finally {
         fixture.dispose();
       }
     },
   );
 }
+
+test.skipIf(!isJjAvailable()).each(["root", "subproject"] as const)(
+  "ordinary jj %s directory open, refresh and unarchive do not require managed incarnation authority",
+  async (placement) => {
+    const fixture = createScratchJjRepo({
+      colocate: false,
+      files: { "sub/file.txt": "ordinary jj work\n" },
+    });
+    try {
+      const cwd = placement === "subproject" ? path.join(fixture.repoDir, "sub") : fixture.repoDir;
+      const service = realJjProvisioning(path.join(tmpDir, "worktrees"));
+      const opened = await service.findOrCreateWorkspaceForDirectory(cwd);
+      expect(opened).toMatchObject({
+        cwd,
+        kind: "local_checkout",
+        worktreeRoot: fixture.repoDir,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+        recoveryBookmark: null,
+      });
+      expect(opened.jjWorkspaceId).toBeUndefined();
+      expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+        opened.workspaceId,
+      );
+      await workspaceRegistry.archive(opened.workspaceId, ARCHIVED_AT);
+      const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+      expect(reopened).toMatchObject({
+        workspaceId: opened.workspaceId,
+        projectId: opened.projectId,
+        cwd,
+        kind: "local_checkout",
+        archivedAt: null,
+        isPaseoOwnedWorktree: false,
+        recoveryBookmark: null,
+      });
+      expect(reopened.jjWorkspaceId).toBeUndefined();
+      expect(await workspaceRegistry.list()).toEqual([reopened]);
+      expect(readJjWorkspaceIncarnation(fixture.repoDir)).toBeNull();
+      expect(readFileSync(path.join(fixture.repoDir, "sub/file.txt"), "utf8")).toBe(
+        "ordinary jj work\n",
+      );
+    } finally {
+      fixture.dispose();
+    }
+  },
+);
 
 interface JjOpenRaceFixture {
   fixture: ReturnType<typeof createScratchJjRepo>;
