@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  watch,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -19,7 +27,13 @@ import {
   createPaseoWorktree,
   type CreatePaseoWorktreeDeps,
 } from "./paseo-worktree-service.js";
-import { readPaseoWorktreeMetadata } from "../utils/worktree-metadata.js";
+import { archiveByScope, type ArchiveDependencies } from "./workspace-archive-service.js";
+import { createWorkspaceRecoveryService } from "./session/workspace-recovery/workspace-recovery-service.js";
+import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
+import {
+  readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
+} from "../utils/worktree-metadata.js";
 import { createWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../utils/path.js";
@@ -1413,3 +1427,246 @@ test.skipIf(!isJjAvailable())(
     ).toBe(false);
   },
 );
+
+interface JjLifecycleTestFixture {
+  fixture: ReturnType<typeof createScratchJjRepo>;
+  deps: TestDeps;
+  worktreesRoot: string;
+  archiveDeps: ArchiveDependencies;
+  recovery: ReturnType<typeof createWorkspaceRecoveryService>;
+  create: (
+    branchName: string,
+    runSetup?: boolean,
+  ) => Promise<Awaited<ReturnType<typeof createPaseoWorktree>>>;
+}
+
+function jjLifecycleTestFixture(colocate: boolean): JjLifecycleTestFixture {
+  const fixture = createScratchJjRepo({ colocate, files: { "base.txt": "base\n" } });
+  cleanupPaths.push(fixture.dir);
+  fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+  const deps = createDeps();
+  const project = createPersistedProjectRecordForTest({
+    projectId: "project",
+    rootPath: fixture.repoDir,
+    displayName: "project",
+  });
+  deps.projects.set(project.projectId, project);
+  deps.workspaceGitService.resolveRepoRoot = async () => fixture.repoDir;
+  deps.workspaceGitService.getCheckout = async (cwd) => ({
+    cwd,
+    isGit: true,
+    currentBranch: null,
+    remoteUrl: null,
+    worktreeRoot: cwd,
+    mainRepoRoot: cwd === fixture.repoDir ? null : fixture.repoDir,
+    isPaseoOwnedWorktree: cwd !== fixture.repoDir,
+  });
+  deps.workspaceGitService.getSnapshot = async () => null;
+  const worktreesRoot = path.join(fixture.dir, "custom-worktrees");
+  const archiveDeps: ArchiveDependencies = {
+    paseoHome: fixture.dir,
+    paseoWorktreesBaseRoot: worktreesRoot,
+    github: deps.github,
+    workspaceGitService: deps.workspaceGitService,
+    agentManager: {
+      listAgents: () => [],
+      getAgent: () => null,
+      archiveAgent: async () => null,
+      archiveSnapshot: async () => ({}),
+    },
+    agentStorage: { listByWorkspace: async () => [] },
+    getWorkspace: async (id) => deps.workspaces.get(id) ?? null,
+    findWorkspaceIdForCwd: async (cwd) =>
+      [...deps.workspaces.values()].find((r) => r.cwd === cwd && !r.archivedAt)?.workspaceId ??
+      null,
+    findWorkspaceIdsForBackingPath: async (root) =>
+      [...deps.workspaces.values()]
+        .filter((r) => r.worktreeRoot === root)
+        .map((r) => r.workspaceId),
+    listActiveWorkspaces: async () => [...deps.workspaces.values()].filter((r) => !r.archivedAt),
+    archiveWorkspaceRecord: async (id) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, archivedAt: "archived" });
+    },
+    setWorkspaceRecoveryPin: async (id, pin) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, recoveryBookmark: pin });
+    },
+    emitWorkspaceUpdatesForWorkspaceIds: async () => {},
+    markWorkspaceArchiving: () => {},
+    clearWorkspaceArchiving: () => {},
+    killTerminalsForWorkspace: async () => {},
+  };
+  const recovery = createWorkspaceRecoveryService({
+    paseoHome: fixture.dir,
+    worktreesRoot,
+    getWorkspace: archiveDeps.getWorkspace!,
+    getProject: async () => project,
+    isDirectory: async (cwd) => existsSync(cwd),
+    unarchiveWorkspace: async (r) => {
+      deps.workspaces.set(r.workspaceId, { ...r, archivedAt: null });
+    },
+    clearRecoveryPin: async (id) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, recoveryBookmark: null });
+    },
+  });
+  const create = (branchName: string, runSetup = false) =>
+    createPaseoWorktree(
+      {
+        cwd: fixture.repoDir,
+        worktreeSlug: "reused",
+        branchName,
+        refName: "main",
+        runSetup,
+        worktreesRoot,
+        projectId: "project",
+      },
+      deps,
+    );
+  return { fixture, deps, worktreesRoot, archiveDeps, recovery, create };
+}
+
+for (const colocate of [false, true]) {
+  test.skipIf(!isJjAvailable())(
+    `jj refuses old recovery/archive at a new incarnation of the same path (colocate=${colocate})`,
+    async () => {
+      const h = jjLifecycleTestFixture(colocate);
+      const old = await h.create("old-feature");
+      writeFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "saved old work\n");
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: old.workspace.workspaceId },
+        requestId: "old",
+      });
+      const saved = h.deps.workspaces.get(old.workspace.workspaceId)!;
+      const fresh = await h.create("new-feature");
+      expect(fresh.worktree.worktreePath).toBe(old.worktree.worktreePath);
+      expect(fresh.workspace.jjWorkspaceId).not.toBe(saved.jjWorkspaceId);
+      const freshHead = h.fixture.jj(
+        ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+        fresh.worktree.worktreePath,
+      ).stdout;
+      await expect(h.recovery.restore(saved.workspaceId)).rejects.toThrow("different incarnation");
+      await expect(
+        archiveByScope(h.archiveDeps, {
+          scope: { kind: "workspace", workspaceId: saved.workspaceId },
+          requestId: "replay",
+        }),
+      ).rejects.toThrow("different incarnation");
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      expect(h.deps.workspaces.get(fresh.workspace.workspaceId)?.archivedAt).toBeNull();
+      expect(
+        h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+      ).toBe("saved old work\n");
+      expect(
+        h.fixture.jj(
+          ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+          fresh.worktree.worktreePath,
+        ).stdout,
+      ).toBe(freshHead);
+      expect(existsSync(path.join(fresh.worktree.worktreePath, "old-work.txt"))).toBe(false);
+      // Removing the new checkout must not repin an unrelated older record at this pathname.
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: fresh.workspace.workspaceId },
+        requestId: "new",
+      });
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      expect(h.deps.workspaces.get(fresh.workspace.workspaceId)?.recoveryBookmark).not.toBe(
+        saved.recoveryBookmark,
+      );
+      await expect(h.recovery.restore(saved.workspaceId)).resolves.toEqual({
+        workspaceId: saved.workspaceId,
+        action: "restore",
+      });
+      expect(readFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+      await expect(h.recovery.restore(fresh.workspace.workspaceId)).rejects.toThrow(
+        "different incarnation",
+      );
+    },
+  );
+}
+
+for (const failProvisioning of [false, true]) {
+  test.skipIf(!isJjAvailable())(
+    `jj keeps creation ownership through provisioning/rollback before a queued archive (failure=${failProvisioning})`,
+    async () => {
+      const h = jjLifecycleTestFixture(false);
+      const old = await h.create("old-feature");
+      writeFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "old contents\n");
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: old.workspace.workspaceId },
+        requestId: "old",
+      });
+      const saved = h.deps.workspaces.get(old.workspace.workspaceId)!;
+      const ready = path.join(h.fixture.dir, "ready");
+      const release = path.join(h.fixture.dir, "release");
+      const script = path.join(h.fixture.dir, "setup.cjs");
+      writeFileSync(
+        script,
+        `const fs = require("node:fs"); const release = ${JSON.stringify(release)}; const watcher = fs.watch(${JSON.stringify(h.fixture.dir)}, () => { if (fs.existsSync(release)) watcher.close(); }); fs.writeFileSync(${JSON.stringify(ready)}, "ready");`,
+      );
+      writeFileSync(
+        path.join(h.fixture.repoDir, "paseo.json"),
+        JSON.stringify({
+          worktree: { setup: [`${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`] },
+        }),
+      );
+      const reachedSetup = Promise.withResolvers<void>();
+      const readyWatcher = watch(h.fixture.dir, () => {
+        if (existsSync(ready)) reachedSetup.resolve();
+      });
+      const provision = h.deps.workspaceProvisioning.createWorkspaceForWorktree;
+      let provisionFinished = false;
+      h.deps.workspaceProvisioning.createWorkspaceForWorktree = async (input) => {
+        if (failProvisioning) {
+          provisionFinished = true;
+          throw new Error("provision failure");
+        }
+        const result = await provision(input);
+        provisionFinished = true;
+        return result;
+      };
+      const creating = h.create("new-feature", true);
+      const creationResult = creating.then(
+        (value) => ({ value, error: null }),
+        (error: unknown) => ({ value: null, error }),
+      );
+      await reachedSetup.promise;
+      readyWatcher.close();
+      // Enqueue the real archive under the shared guard while low-level setup still owns it.
+      const archiving = withWorkspaceLifecycle(old.worktree.worktreePath, async () => {
+        expect(provisionFinished).toBe(true);
+        expect(existsSync(old.worktree.worktreePath)).toBe(!failProvisioning);
+        return archiveByScope(h.archiveDeps, {
+          scope: { kind: "workspace", workspaceId: saved.workspaceId },
+          requestId: "queued",
+        });
+      });
+      const archiveResult = archiving.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      writeFileSync(release, "release");
+      const result = await creationResult;
+      const archiveError = await archiveResult;
+      expect(archiveError).toBeInstanceOf(Error);
+      expect(String(archiveError)).toContain("incarnation");
+      expect(provisionFinished).toBe(true);
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      if (failProvisioning) {
+        expect(String(result.error)).toContain("provision failure");
+        expect((await listJjWorkspaces(h.fixture.repoDir)).map((e) => e.name)).toEqual(["default"]);
+      } else {
+        expect(result.error).toBeNull();
+        expect(result.value?.workspace.jjWorkspaceId).toBe(
+          readJjWorkspaceIncarnation(old.worktree.worktreePath),
+        );
+      }
+      expect(
+        h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+      ).toBe("old contents\n");
+    },
+  );
+}

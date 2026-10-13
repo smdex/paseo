@@ -85,9 +85,10 @@ const PersistedWorkspaceRecordSchema = z.object({
     .transform((value) => value ?? null),
   isPaseoOwnedWorktree: z.boolean().default(false),
   mainRepoRoot: z.string().nullable().default(null),
-  // jj only: private recovery bookmark (`paseo/recovery/<workspace>`) pinned
-  // at the workspace head before the workspace was forgotten on archive. Null
-  // on git workspaces and on jj workspaces that were never archived.
+  // Persisted separately from the pathname, which can be reused after archive.
+  jjWorkspaceId: z.string().min(1).optional(),
+  // jj only: private recovery bookmark pinned before the workspace was forgotten.
+  // Null on git workspaces and on jj workspaces that were never archived.
   recoveryBookmark: z
     .string()
     .nullable()
@@ -190,7 +191,9 @@ export async function clearWorkspaceRecoveryReference(
   expectedPin: string,
 ): Promise<void> {
   await registry.update(workspaceId, (record) =>
-    record.recoveryBookmark === expectedPin ? { ...record, recoveryBookmark: null } : record,
+    record.recoveryBookmark === expectedPin
+      ? { ...record, jjWorkspaceId: record.jjWorkspaceId ?? expectedPin, recoveryBookmark: null }
+      : record,
   );
 }
 
@@ -699,6 +702,7 @@ export function createPersistedWorkspaceRecord(input: {
   isPaseoOwnedWorktree?: boolean;
   mainRepoRoot?: string | null;
   recoveryBookmark?: string | null;
+  jjWorkspaceId?: string;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -719,6 +723,7 @@ export function createPersistedWorkspaceRecord(input: {
     isPaseoOwnedWorktree: input.isPaseoOwnedWorktree ?? false,
     mainRepoRoot: input.mainRepoRoot ?? null,
     recoveryBookmark: input.recoveryBookmark ?? null,
+    ...(input.jjWorkspaceId ? { jjWorkspaceId: input.jjWorkspaceId } : {}),
     archivedAt: input.archivedAt ?? null,
     autoArchivedChangeRequestUrl: input.autoArchivedChangeRequestUrl ?? null,
     pinnedAt: input.pinnedAt ?? null,

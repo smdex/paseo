@@ -1,3 +1,7 @@
+import {
+  readJjWorkspaceIncarnation,
+  writeJjWorkspaceIncarnation,
+} from "../../../utils/worktree-metadata.js";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -556,6 +560,7 @@ describeIfJj("workspace recovery on jj", () => {
     fixture.jj(["bookmark", "create", "paseo/recovery/subproject", "-r", "root-name@"]);
     const record = createWorkspace({
       workspaceId: "wks_subproject",
+      jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
       projectId: project.projectId,
       cwd,
       worktreeRoot: created.worktreePath,
@@ -855,13 +860,42 @@ describeIfJj("workspace recovery on jj", () => {
     ]);
     expect(harness.records.get("restore-a")?.archivedAt).toBeNull();
     expect(harness.records.get("restore-b")?.archivedAt).toBeNull();
+    expect(harness.records.get("restore-a")?.jjWorkspaceId).toBe(pin);
+    expect(harness.records.get("restore-b")?.jjWorkspaceId).toBe(pin);
+  });
+  it("refuses legacy unarchive when a surviving registered root has no incarnation proof", async () => {
+    const { fixture, project } = jjProjectFixture();
+    const pin = "paseo/recovery/unknown-incarnation";
+    fixture.jj(["bookmark", "create", pin, "--revision", "main"]);
+    const record = createWorkspace({
+      workspaceId: "legacy-unknown",
+      projectId: project.projectId,
+      cwd: fixture.repoDir,
+      worktreeRoot: fixture.repoDir,
+      mainRepoRoot: fixture.repoDir,
+      recoveryBookmark: pin,
+    });
+    const h = jjHarness({ project, records: [record] });
+    await expect(h.service.inspect(record.workspaceId)).resolves.toMatchObject({
+      kind: "unavailable",
+    });
+    await expect(h.service.restore(record.workspaceId)).rejects.toThrow(
+      "unknown or different incarnation",
+    );
+    expect(h.records.get(record.workspaceId)).toEqual(record);
+    expect(h.cleared).toEqual([]);
+    const { jjRevisionResolves } = await import("../../../utils/worktree-jj.js");
+    expect(await jjRevisionResolves(fixture.repoDir, pin)).toBe(true);
+    expect(readFileSync(join(fixture.repoDir, "readme.md"), "utf8")).toBe("hello\n");
   });
   it("reports retained reference cleanup failure without rejecting an already successful unarchive", async () => {
     const { fixture, project } = jjProjectFixture();
     const pin = "paseo/recovery/retained-cleanup";
+    writeJjWorkspaceIncarnation(fixture.repoDir, "retained-cleanup");
     fixture.jj(["bookmark", "create", pin, "--revision", "main"]);
     const record = createWorkspace({
       workspaceId: "retained-cleanup",
+      jjWorkspaceId: "retained-cleanup",
       projectId: project.projectId,
       cwd: fixture.repoDir,
       worktreeRoot: fixture.repoDir,
