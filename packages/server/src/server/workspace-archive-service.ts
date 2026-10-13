@@ -21,6 +21,7 @@ import type {
 import { createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
 import { deleteJjPaseoWorktree } from "../utils/worktree-jj.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
 
@@ -52,6 +53,10 @@ export interface ArchiveDependencies {
   // record BEFORE the workspace is forgotten, so archive-then-restore can
   // re-create the workspace at its pinned change. Aborts jj deletion on failure.
   setWorkspaceRecoveryPin?: (workspaceId: string, pin: string) => Promise<void>;
+  // jj only: ALL registry records (any archive state) whose backing checkout
+  // is the given worktree path — used so every sibling record over a removed
+  // directory receives recovery authority, not just this request's ids.
+  findWorkspaceIdsForBackingPath?: (backingPath: string) => Promise<string[]>;
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
@@ -344,13 +349,18 @@ async function resolveBackingDirectory(
     paseoHome: dependencies.paseoHome,
     worktreesRoot: dependencies.paseoWorktreesBaseRoot,
   };
-  const ownership = await isPaseoOwnedWorktreeCwd(cwd, options);
+  const backend = await resolveEffectiveBackend(cwd);
+  const jjIdentity = backend === "jj" ? resolveJjRepoIdentity(cwd) : null;
+  const ownership = await isPaseoOwnedWorktreeCwd(cwd, {
+    ...options,
+    ...(backend === "jj" ? { knownGitCommonDir: null } : {}),
+  });
   return {
     path: resolve(ownership.allowed && ownership.worktreePath ? ownership.worktreePath : cwd),
     isPaseoOwnedWorktree: ownership.allowed,
     expectsPaseoOwnership: true,
     registryProven: false,
-    mainRepoRoot: ownership.repoRoot ?? null,
+    mainRepoRoot: jjIdentity?.primaryRoot ?? ownership.repoRoot ?? null,
     paseoWorktreesRoot: ownership.worktreeRoot ?? null,
   };
 }
@@ -482,19 +492,39 @@ async function deleteBackingWorktreeForBackend(
   backing: BackingDirectory,
   archivedWorkspaceIds: string[],
 ): Promise<void> {
-  const sourceRepoRoot = backing.mainRepoRoot;
-  if (sourceRepoRoot && (await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+  const backingBackend = await resolveEffectiveBackend(backing.path);
+  const sourceRepoRoot =
+    backingBackend === "jj"
+      ? (resolveJjRepoIdentity(backing.path)?.primaryRoot ?? backing.mainRepoRoot)
+      : backing.mainRepoRoot;
+  if (
+    backingBackend === "jj" ||
+    (sourceRepoRoot && (await resolveEffectiveBackend(sourceRepoRoot)) === "jj")
+  ) {
+    if (!sourceRepoRoot)
+      throw new Error("Cannot resolve the jj repository for workspace archive; directory retained");
     // Persist the pin for EVERY registry record whose backing checkout is
-    // being removed: exact subproject records have cwd below this root, and
-    // same-backing records all need recovery authority (review fix 4). A
-    // stable pin key (workspaceId) keeps pins unique per record.
+    // being removed — not only the ids archived in this request: records
+    // archived EARLIER over the same directory still need recovery authority
+    // or they become unrestorable the moment the disk goes. Exact subproject
+    // records resolve through the by-backing-path lookup.
+    if (!dependencies.findWorkspaceIdsForBackingPath || !dependencies.setWorkspaceRecoveryPin) {
+      throw new Error("Cannot archive a jj workspace without durable sibling recovery authority");
+    }
     let persistRecoveryPin: ((pin: string) => Promise<void>) | undefined;
     const pinTargets = new Set(archivedWorkspaceIds);
     const byPath = await dependencies.findWorkspaceIdForCwd(backing.path);
     if (byPath) {
       pinTargets.add(byPath);
     }
-    if (pinTargets.size > 0 && dependencies.setWorkspaceRecoveryPin) {
+    if (dependencies.findWorkspaceIdsForBackingPath) {
+      for (const id of await dependencies.findWorkspaceIdsForBackingPath(backing.path)) {
+        pinTargets.add(id);
+      }
+    }
+    if (pinTargets.size === 0)
+      throw new Error("No workspace record can retain jj recovery authority; directory retained");
+    if (dependencies.setWorkspaceRecoveryPin) {
       const targets = [...pinTargets];
       persistRecoveryPin = async (pin) => {
         for (const workspaceId of targets) {
@@ -506,7 +536,7 @@ async function deleteBackingWorktreeForBackend(
       cwd: sourceRepoRoot,
       worktreePath: backing.path,
       teardownCwds: [],
-      worktreesRoot: backing.paseoWorktreesRoot ?? undefined,
+      worktreesRoot: dependencies.paseoWorktreesBaseRoot,
       paseoHome: dependencies.paseoHome,
       worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
       persistRecoveryPin,

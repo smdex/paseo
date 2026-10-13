@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 
 import { resolveRepositoryDefaultBranch } from "../../../utils/checkout-git.js";
 import { resolveEffectiveBackend } from "../../../utils/checkout-dispatch.js";
@@ -8,6 +9,7 @@ import { runGitCommand } from "../../../utils/run-git-command.js";
 import {
   deleteJjBookmark,
   jjRevisionResolves,
+  listJjWorkspaces,
   resolveJjPinnedRevision,
   restoreJjWorkspace,
   rollbackJjWorkspace,
@@ -70,6 +72,50 @@ type RecoveryPlan =
 
 type UnavailableRecoveryState = Extract<WorkspaceRecoveryState, { kind: "unavailable" }>;
 
+function assertRecoveryPin(pin: string): void {
+  if (!/^paseo\/recovery\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(pin)) {
+    throw new WorktreeRequestError({
+      code: "unknown",
+      message: `The stored recovery reference ${pin} is not a Paseo recovery pin; refusing to restore or delete it.`,
+    });
+  }
+}
+
+/** True when `jj workspace list` still registers a workspace at this root. */
+async function jjWorkspaceRootRegistered(
+  sourceRepoRoot: string,
+  worktreeRoot: string,
+): Promise<boolean> {
+  const matchesRoot = createRealpathAwarePathMatcher(worktreeRoot);
+  // Unknown registration cannot authorize unarchive or pin consumption.
+  const entries = await listJjWorkspaces(sourceRepoRoot);
+  return entries.some((entry) => matchesRoot(entry.root));
+}
+
+/**
+ * Move a surviving directory aside so `jj workspace add` can recreate the
+ * workspace at the original path. All directories are retained; any failure
+ * throws (the restore aborts with the directory intact).
+ */
+async function quarantineSurvivingDirectory(worktreePath: string): Promise<string | null> {
+  if (!existsSync(worktreePath)) {
+    return null;
+  }
+  // Preserve even an apparently empty directory: an external write can race
+  // an emptiness check. A unique sibling avoids overwriting an earlier orphan.
+  const orphanPath = `${worktreePath}.orphan-${randomUUID()}`;
+  try {
+    mkdirSync(dirname(orphanPath), { recursive: true });
+    renameSync(worktreePath, orphanPath);
+    return orphanPath;
+  } catch (error) {
+    throw new WorktreeRequestError({
+      code: "unknown",
+      message: `The restored workspace directory still exists and could not be moved aside (${worktreePath} → ${orphanPath}): ${String(error)}`,
+    });
+  }
+}
+
 export function createWorkspaceRecoveryService(deps: {
   paseoHome: string;
   worktreesRoot?: string;
@@ -78,8 +124,10 @@ export function createWorkspaceRecoveryService(deps: {
   isDirectory: (path: string) => Promise<boolean>;
   unarchiveWorkspace: (workspace: PersistedWorkspaceRecord) => Promise<void>;
   // jj only: clears the persisted recovery bookmark after a successful
-  // restore (the pin bookmark itself is deleted in the repo).
-  clearRecoveryPin?: (workspaceId: string) => Promise<void>;
+  // restore and returns how many OTHER records still reference the same pin
+  // (the pin bookmark itself is deleted only when that count is zero).
+  clearRecoveryPin?: (workspaceId: string) => Promise<number>;
+  reportOrphan?: (path: string) => void;
 }): WorkspaceRecoveryService {
   async function resolveRecovery(
     workspaceId: string,
@@ -114,16 +162,21 @@ export function createWorkspaceRecoveryService(deps: {
 
     if (await deps.isDirectory(workspace.cwd)) {
       // A jj workspace whose directory survived a partial deletion (forget
-      // succeeded, removal failed) still needs recreation: jj reports "No
-      // working copy" there (review fix 6). Only records WITHOUT a recovery
-      // pin can plain-unarchive.
+      // succeeded, quarantine/remove failed) still needs recreation: jj no
+      // longer registers it. Registration is checked by the record's backing
+      // WORKTREE ROOT against `jj workspace list` — never by basename(cwd),
+      // which is wrong for subproject records and can falsely classify a
+      // still-registered checkout.
       if (workspace.recoveryBookmark && workspace.kind === "worktree") {
         const sourceRepoRoot = workspace.mainRepoRoot ?? project.rootPath;
-        if (
-          (await resolveEffectiveBackend(sourceRepoRoot)) === "jj" &&
-          !(await jjRevisionResolves(sourceRepoRoot, `${basename(workspace.cwd)}@`))
-        ) {
-          return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+        if ((await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+          const registered = await jjWorkspaceRootRegistered(
+            sourceRepoRoot,
+            workspace.worktreeRoot ?? workspace.cwd,
+          );
+          if (!registered) {
+            return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+          }
         }
       }
       return createRecoveryPlan({ action: "unarchive", workspace });
@@ -165,16 +218,21 @@ export function createWorkspaceRecoveryService(deps: {
       throw new Error(resolved.message);
     }
 
+    if (resolved.workspace.recoveryBookmark) assertRecoveryPin(resolved.workspace.recoveryBookmark);
     if (resolved.kind === "restore") {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
     }
     await deps.unarchiveWorkspace(resolved.workspace);
-    if (
-      resolved.kind === "restore" &&
-      resolved.workspace.recoveryBookmark &&
-      deps.clearRecoveryPin
-    ) {
-      await deps.clearRecoveryPin(resolved.workspace.workspaceId);
+    if (resolved.workspace.recoveryBookmark && deps.clearRecoveryPin) {
+      // Refcount the pin across sibling records sharing it: clear THIS
+      // record's reference first, then delete the bookmark only when no other
+      // record still needs it.
+      const remainingReferences = await deps.clearRecoveryPin(resolved.workspace.workspaceId);
+      const sourceRepoRoot =
+        resolved.kind === "restore" ? resolved.sourceRepoRoot : resolved.workspace.mainRepoRoot;
+      if (remainingReferences === 0 && sourceRepoRoot) {
+        await deleteJjBookmark(sourceRepoRoot, resolved.workspace.recoveryBookmark);
+      }
     }
     return { workspaceId, action: resolved.kind };
   }
@@ -275,18 +333,7 @@ export function createWorkspaceRecoveryService(deps: {
     sourceRepoRoot: string,
   ): Promise<void> {
     const pin = workspace.recoveryBookmark;
-    // Full private-pin shape: namespace + one safe path segment. A revset like
-    // "paseo/recovery/fake+" must be refused, not resolved (review fix 5).
-    const PIN_PATTERN = /^paseo\/recovery\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
-    if (pin !== null && !PIN_PATTERN.test(pin)) {
-      // Trust boundary (review fix 5): a stored value outside the private pin
-      // namespace is not a recovery handle — refuse instead of resolving or
-      // deleting an arbitrary bookmark.
-      throw new WorktreeRequestError({
-        code: "unknown",
-        message: `The stored recovery reference ${pin} is not a Paseo recovery pin; refusing to restore or delete it.`,
-      });
-    }
+    if (pin) assertRecoveryPin(pin);
     if (!pin) {
       throw new WorktreeRequestError({
         code: "unknown",
@@ -316,6 +363,11 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     const worktreePath = previousWorktreePath;
+    // A surviving nonempty directory blocks `jj workspace add`. Move it aside
+    // (never delete — it may hold files the pin does not cover); the orphan
+    // name records what happened for manual inspection.
+    const orphanPath = await quarantineSurvivingDirectory(worktreePath);
+    if (orphanPath) deps.reportOrphan?.(orphanPath);
     try {
       await restoreJjWorkspace({
         cwd: sourceRepoRoot,
@@ -368,11 +420,6 @@ export function createWorkspaceRecoveryService(deps: {
       await rollbackJjWorkspace(sourceRepoRoot, basename(worktreePath), worktreePath);
       throw toWorktreeRequestError(error);
     }
-
-    // Restore succeeded: consume the pin bookmark so the workspace name is
-    // free and the pin does not linger. The registry field is cleared by the
-    // caller after unarchive (clearRecoveryPin dep).
-    await deleteJjBookmark(sourceRepoRoot, pin);
   }
 
   return { inspect, restore };

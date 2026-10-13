@@ -1,6 +1,6 @@
 import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
 import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { getRealpathAwareRelativePath } from "../utils/path.js";
@@ -27,6 +27,8 @@ import {
 import type { WorktreeCreationIntent } from "./resolve-worktree-creation-intent.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import { buildAgentBranchNameSeed } from "./agent/prompt-attachments.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { rollbackJjWorkspace } from "../utils/worktree-jj.js";
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 
@@ -77,6 +79,7 @@ async function createPaseoWorktreeWithPriority(
   deps: CreatePaseoWorktreeDeps,
 ): Promise<CreatePaseoWorktreeResult> {
   const workspaceCwdPlan = await planWorkspaceCwdForWorktree(input.cwd, deps.workspaceGitService);
+  const creationBackend = await resolveEffectiveBackend(input.cwd);
   const createdWorktree = await createWorktreeCore(input, deps);
   try {
     if (createdWorktree.created) {
@@ -140,6 +143,18 @@ async function createPaseoWorktreeWithPriority(
     };
   } catch (error) {
     if (!createdWorktree.created) {
+      throw error;
+    }
+    // Rollback routes by the backend that CREATED the worktree: the git-only
+    // rollback would fail its `git worktree remove` and leave a jj workspace
+    // registered (and its owned bookmark blocking the name forever).
+    if (creationBackend === "jj") {
+      await rollbackJjWorkspace(
+        createdWorktree.repoRoot,
+        basename(createdWorktree.worktree.worktreePath),
+        createdWorktree.worktree.worktreePath,
+        { createdBookmark: createdWorktree.worktree.jjCreatedBookmark },
+      );
       throw error;
     }
     return rollbackCreatedPaseoWorktree(

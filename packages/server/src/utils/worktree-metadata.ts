@@ -268,6 +268,17 @@ export async function writePaseoWorktreeMetadata(
   });
 }
 
+export async function updatePaseoWorktreeJjBookmark(
+  worktreeRoot: string,
+  rename: { from: string; to: string },
+): Promise<void> {
+  return mutateMetadata(worktreeRoot, async (root) => {
+    const current = await readMetadataFile(root);
+    if (!current || current.version !== 2 || current.jjBookmark !== rename.from) return;
+    await writePaseoWorktreeMetadataFile(root, { ...current, jjBookmark: rename.to });
+  });
+}
+
 export async function writePaseoWorktreeRuntimeMetadata(
   worktreeRoot: string,
   options: { worktreePort: number },

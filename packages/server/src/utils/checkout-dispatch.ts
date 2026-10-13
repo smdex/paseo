@@ -58,7 +58,6 @@ import {
   jjCreateBookmark,
   jjDescribe,
   jjDiscard,
-  jjEditBookmark,
   jjFactsToCheckoutSnapshotFacts,
   jjNew,
   jjPull,
@@ -251,12 +250,13 @@ const READ_ONLY_ENV = { GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" };
 export async function dispatchCommitChanges(
   cwd: string,
   options: { message: string; addAll?: boolean },
+  context?: CheckoutContext,
 ): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return commitChanges(cwd, options);
   }
   // addAll is meaningless for jj: the working copy is always snapshotted in full.
-  await jjCommit(cwd, { message: options.message });
+  await jjCommit(cwd, { message: options.message }, toJjContext(context));
 }
 
 export async function dispatchDiscardChanges(cwd: string, paths: string[]): Promise<void> {
@@ -274,27 +274,34 @@ export async function dispatchDiscardChanges(cwd: string, paths: string[]): Prom
 export async function dispatchNewChange(
   cwd: string,
   options?: { message?: string },
+  context?: CheckoutContext,
 ): Promise<JjMutationResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     throw new NotSupportedOnJjError("New change (jj-only operation) requested on a git checkout");
   }
-  return jjNew(cwd, options);
+  return jjNew(cwd, options, toJjContext(context));
 }
 
 /** Describe (retitle) the current working-copy change. jj-only surface. */
 export async function dispatchDescribeChange(
   cwd: string,
   options: { message: string },
+  context?: CheckoutContext,
 ): Promise<JjMutationResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     throw new NotSupportedOnJjError(
       "Describe change (jj-only operation) requested on a git checkout",
     );
   }
-  return jjDescribe(cwd, options);
+  return jjDescribe(cwd, options, toJjContext(context));
 }
 
-/** Execute a validated branch checkout. Validation/clean-tree gates stay upstream. */
+/**
+ * Execute a validated branch checkout. DEFERRED on jj: `jj edit` would make
+ * the working copy rewrite the selected mutable change and leave managed
+ * ownership stale, so the surface fails typed until a `jj new`-based flow
+ * with an ownership transition lands (tracked in the jj plan).
+ */
 export async function dispatchExecuteBranchCheckout(
   cwd: string,
   resolution: BranchCheckoutResolution,
@@ -302,11 +309,9 @@ export async function dispatchExecuteBranchCheckout(
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return checkoutResolvedBranch({ cwd, resolution });
   }
-  if (resolution.kind !== "local") {
-    throw new Error(`Only local bookmarks can be checked out, got: ${resolution.kind}`);
-  }
-  await jjEditBookmark(cwd, resolution.name);
-  return { source: "local" };
+  throw new NotSupportedOnJjError(
+    "Switching bookmarks is not supported on jj repositories yet; use jj new in a terminal",
+  );
 }
 
 /** Execute branch creation from a base on the current working copy. Gates stay upstream. */
@@ -458,33 +463,36 @@ export async function dispatchGetCommitFileDiff(
 export async function dispatchPushCurrentBranch(
   cwd: string,
   forgeService?: Parameters<typeof pushCurrentBranch>[1],
+  context?: CheckoutContext,
 ): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return pushCurrentBranch(cwd, forgeService);
   }
-  return jjPush(cwd);
+  return jjPush(cwd, toJjContext(context));
 }
 
 /** Pull/fetch; jj fetches the selected remote (tracked bookmark import). */
 export async function dispatchPullCurrentBranch(
   cwd: string,
   forgeService?: Parameters<typeof pullCurrentBranch>[1],
+  context?: CheckoutContext,
 ): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return pullCurrentBranch(cwd, forgeService);
   }
-  return jjPull(cwd);
+  return jjPull(cwd, toJjContext(context));
 }
 
 /** Rename the current line of work (branch on git, bookmark on jj). */
 export async function dispatchRenameCurrentBranch(
   cwd: string,
   branch: string,
+  context?: CheckoutContext,
 ): Promise<{ previousBranch: string | null; currentBranch: string | null }> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return renameCurrentBranch(cwd, branch);
   }
-  return jjRenameBookmark(cwd, branch);
+  return jjRenameBookmark(cwd, branch, toJjContext(context));
 }
 
 /** Merge the workspace into its base — deferred on jj (plan §7). */

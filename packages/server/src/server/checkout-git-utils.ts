@@ -3,6 +3,7 @@ import {
   MergeFromBaseConflictError,
   NotGitRepoError,
 } from "../utils/checkout-git.js";
+import { NotSupportedOnJjError } from "../utils/checkout-dispatch.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 
 export const READ_ONLY_GIT_ENV = {
@@ -30,6 +31,9 @@ export async function resolveCheckoutGitDir(cwd: string): Promise<string | null>
 }
 
 export function toCheckoutError(error: unknown): CheckoutErrorPayload {
+  if (error instanceof NotSupportedOnJjError) {
+    return { code: "NOT_ALLOWED", message: error.message };
+  }
   if (error instanceof NotGitRepoError) {
     return { code: "NOT_GIT_REPO", message: error.message };
   }

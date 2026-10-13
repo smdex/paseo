@@ -930,6 +930,94 @@ describe("CheckoutSession", () => {
     });
   });
 
+  describe("pull request deferral on jj", () => {
+    itIfJj("rejects PR creation with the typed deferral before any forge or git work", async () => {
+      const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const forgeCalls: string[] = [];
+      const { checkout, emitted, generatorCalls } = makeCheckoutSession({
+        git: {
+          resolveForge: async () => {
+            forgeCalls.push("resolveForge");
+            return { forge: "github", host: "github.com", service: null };
+          },
+        },
+      });
+
+      await checkout.handleCheckoutPrCreateRequest({
+        type: "checkout_pr_create_request",
+        cwd: fixture.repoDir,
+        baseRef: "main",
+        title: "Feature",
+        body: "Description",
+        requestId: "pr1",
+      });
+
+      expect(forgeCalls).toEqual([]);
+      expect(generatorCalls.generatePullRequestText).toEqual([]);
+      expect(emitted.at(-1)).toMatchObject({
+        type: "checkout_pr_create_response",
+        payload: {
+          cwd: fixture.repoDir,
+          url: null,
+          number: null,
+          requestId: "pr1",
+          error: { code: "NOT_ALLOWED", message: expect.stringContaining("not supported on jj") },
+        },
+      });
+    });
+
+    itIfJj("rejects PR merge with the typed deferral", async () => {
+      const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutPrMergeRequest({
+        type: "checkout_pr_merge_request",
+        cwd: fixture.repoDir,
+        mergeMethod: "merge",
+        requestId: "prm1",
+      });
+
+      expect(emitted.at(-1)).toMatchObject({
+        type: "checkout_pr_merge_response",
+        payload: {
+          requestId: "prm1",
+          success: false,
+          error: expect.objectContaining({
+            message: expect.stringContaining("not supported on jj"),
+          }),
+        },
+      });
+    });
+  });
+
+  itIfJj("rejects jj auto-merge before forge resolution", async () => {
+    const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+    sessionDisposables.push(fixture.dispose);
+    const forgeCalls: string[] = [];
+    const { checkout, emitted } = makeCheckoutSession({
+      git: {
+        resolveForge: async () => {
+          forgeCalls.push("resolveForge");
+          return { forge: "github", host: "github.com", service: null };
+        },
+      },
+    });
+    await checkout.handleCheckoutForgeSetAutoMergeRequest({
+      type: "checkout.forge.set_auto_merge.request",
+      cwd: fixture.repoDir,
+      enabled: true,
+      mergeMethod: "merge",
+      requestId: "jj-auto",
+    });
+    expect(forgeCalls).toEqual([]);
+    expect(emitted.at(-1)).toMatchObject({
+      type: "checkout.forge.set_auto_merge.response",
+      payload: { success: false, error: { code: "NOT_ALLOWED" } },
+    });
+  });
+
   describe("commit", () => {
     it("fails when no message is supplied and none can be generated", async () => {
       const { checkout, emitted, generatorCalls } = makeCheckoutSession();

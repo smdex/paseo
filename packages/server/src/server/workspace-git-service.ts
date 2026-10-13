@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { LRUCache } from "lru-cache";
@@ -93,35 +92,6 @@ import { createWatcherLivenessCanary } from "./watcher-liveness-canary.js";
 const WORKSPACE_GIT_WATCH_DEBOUNCE_MS = 1_000;
 const BACKGROUND_GIT_FETCH_INTERVAL_MS = 180_000;
 
-/**
- * Static ignore floor for native jj checkouts (no git repository to ask, no
- * jj ignored-dir listing in 0.45). Dependency and build cache directories —
- * the trees that actually threaten the watcher's directory budget.
- */
-const JJ_FALLBACK_IGNORED_DIRECTORIES = [
-  "node_modules",
-  ".pnpm-store",
-  ".yarn",
-  "bower_components",
-  "dist",
-  "build",
-  "out",
-  "target",
-  "vendor",
-  ".venv",
-  "venv",
-  "__pycache__",
-  ".gradle",
-  ".next",
-  ".nuxt",
-  ".turbo",
-  "coverage",
-  ".terraform",
-  "Pods",
-  ".dart_tool",
-  ".tox",
-  ".cache",
-] as const;
 const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
@@ -3290,12 +3260,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     previous: Set<string> = new Set(),
   ): Promise<{ ignored: Set<string>; failed: boolean }> {
     const ignored = new Set<string>();
-    // jj-backed ignore evaluation for EVERY jj checkout (review fix 10: the
-    // colocated git exception is gone, and the static floor hid tracked
-    // files). Candidates are the cache-directory floor plus top-level
-    // gitignore directories; a candidate is excluded only when it contains NO
-    // tracked file (checked via `jj file list`), so builds that commit their
-    // output stay observable.
+    // Never ask Git about jj's working tree (including colocated repos).
     const jjIdentity = this.deps.resolveJjRepoIdentity(rootPath);
     if (jjIdentity) {
       return this.loadJjIgnoredDirs(rootPath);
@@ -3326,93 +3291,41 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     return { ignored, failed: false };
   }
 
-  /**
-   * jj-owned ignore evaluation (review fix 10). One `jj file list` call yields
-   * the tracked tree; candidates (cache floor + top-level gitignore dirs) are
-   * excluded only when fully untracked. No git spawns on any jj checkout.
-   */
   private async loadJjIgnoredDirs(
     rootPath: string,
   ): Promise<{ ignored: Set<string>; failed: boolean }> {
     const ignored = new Set<string>();
-    let trackedFiles: string[] = [];
     try {
-      const listed = await runJjCommand(["file", "list"], { cwd: rootPath });
-      if (listed.truncated) {
-        // Incomplete listing: excluding anything could hide tracked trees.
-        return { ignored, failed: true };
+      const text = await readFile(join(rootPath, ".gitignore"), "utf8");
+      const rules = text.split("\n").map((line) => line.replace(/\r$/, ""));
+      // shortcut: only literal directory rules are proven here. An unsupported
+      // negation could reinclude a candidate; keep everything observable then.
+      if (rules.some((line) => line.startsWith("!") && !/^!?\/?[\w.-]+\/$/.test(line))) {
+        return { ignored, failed: false };
       }
-      trackedFiles = listed.stdout.split("\n").filter((line) => line.length > 0);
+      const candidates = new Set<string>();
+      for (const line of rules) {
+        if (!/^!?\/?[\w.-]+\/$/.test(line)) continue;
+        const name = line.replace(/^!/, "").replace(/^\//, "").replace(/\/$/, "");
+        if (name === "." || name === "..") continue;
+        if (line.startsWith("!")) candidates.delete(name);
+        else candidates.add(name);
+      }
+      if (candidates.size === 0) return { ignored, failed: false };
+      const files = await runJjCommand(["file", "list"], { cwd: rootPath });
+      if (files.truncated) return { ignored, failed: true };
+      const tracked = files.stdout.split("\n");
+      for (const name of candidates) {
+        if (!tracked.some((path) => path === name || path.startsWith(`${name}/`))) {
+          ignored.add(join(rootPath, name));
+        }
+      }
+      return { ignored, failed: false };
     } catch {
-      // Without the tracked tree nothing can be safely excluded.
+      // Missing/unreadable effective policy must remain observable, not retain
+      // a stale exclusion that can hide future unignored files.
       return { ignored, failed: true };
     }
-    // Ordered top-level gitignore rules with negation (last match wins) —
-    // mirrors gitignore semantics for the directory-name patterns the
-    // watcher consumes; anchored patterns are honored as top-level names.
-    const rules: Array<{ negate: boolean; pattern: string }> = [];
-    try {
-      const gitignore = await readFile(join(rootPath, ".gitignore"), "utf8");
-      for (const rawLine of gitignore.split("\n")) {
-        let line = rawLine.trim();
-        if (!line || line.startsWith("#")) {
-          continue;
-        }
-        const negate = line.startsWith("!");
-        if (negate) {
-          line = line.slice(1).trim();
-        }
-        // Directory patterns carry a trailing slash; anchored top-level
-        // patterns a leading one. Strip both; only plain top-level names
-        // participate (embedded slashes address subdirectories).
-        while (line.endsWith("/")) {
-          line = line.slice(0, -1);
-        }
-        while (line.startsWith("/")) {
-          line = line.slice(1);
-        }
-        if (!line || line.includes("/") || line.includes("*")) {
-          continue;
-        }
-        rules.push({ negate, pattern: line });
-      }
-    } catch {
-      // No readable .gitignore: rules stay empty; the cache floor below
-      // still applies (tradeoff: an unignored empty `build/` is excluded —
-      // tracked content always wins, and negations are honored).
-    }
-    const floorIgnored = (name: string): boolean => {
-      let result = JJ_FALLBACK_IGNORED_DIRECTORIES.includes(
-        name as (typeof JJ_FALLBACK_IGNORED_DIRECTORIES)[number],
-      );
-      for (const rule of rules) {
-        if (rule.pattern === name) {
-          result = !rule.negate;
-        }
-      }
-      return result;
-    };
-    const candidates = new Set<string>(JJ_FALLBACK_IGNORED_DIRECTORIES);
-    for (const rule of rules) {
-      if (!rule.negate) {
-        candidates.add(rule.pattern);
-      }
-    }
-    for (const name of candidates) {
-      const candidate = join(rootPath, name);
-      if (!existsSync(candidate)) {
-        continue;
-      }
-      if (trackedFiles.some((file) => file === name || file.startsWith(`${name}/`))) {
-        // Tracked content inside: keep it observable.
-        continue;
-      }
-      if (!floorIgnored(name)) {
-        continue;
-      }
-      ignored.add(candidate);
-    }
-    return { ignored, failed: false };
   }
 
   private async refreshWorkspaceTarget(
