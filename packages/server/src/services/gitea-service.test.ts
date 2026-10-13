@@ -585,7 +585,7 @@ describe("createGiteaService", () => {
       firstMatching: true,
       second: "match",
       expected: null,
-      lastPage: 3,
+      lastPage: 2,
     },
     {
       name: "repeated row cannot prove exhaustion",
@@ -602,6 +602,22 @@ describe("createGiteaService", () => {
       second: "error",
       expected: null,
       lastPage: 2,
+    },
+    {
+      name: "fresh nonmatching pages cannot exceed the lookup budget",
+      firstLength: 1,
+      firstMatching: false,
+      second: "endless",
+      expected: null,
+      lastPage: 4,
+    },
+    {
+      name: "a candidate cannot be accepted without exhaustion within the budget",
+      firstLength: 1,
+      firstMatching: true,
+      second: "endless",
+      expected: null,
+      lastPage: 4,
     },
     {
       name: "blank later response cannot prove exhaustion",
@@ -650,6 +666,13 @@ describe("createGiteaService", () => {
           expect(argValue(args, "--login")).toBe("one");
           expect(args[1]).toContain(`repos/${repository.targetRepository}/pulls?`);
           if (args[1].includes("page=1&")) return ok(JSON.stringify(firstPage));
+          if (fixture.second === "endless") {
+            const page = Number(
+              new URL(args[1], "https://fixture.invalid").searchParams.get("page"),
+            );
+            if (page > fixture.lastPage) throw new Error("runner ceiling reached");
+            return ok(JSON.stringify([candidate(1000 + page, false)]));
+          }
           if (args[1].includes("page=2&")) {
             if (fixture.second === "error") throw new Error("pagination incomplete");
             if (fixture.second === "blank") return ok("");
@@ -681,7 +704,9 @@ describe("createGiteaService", () => {
       headRef: repository.headRef ?? "",
       headSha: repository.headSha ?? undefined,
     });
-    if (fixture.second === "error" || fixture.second === "blank") {
+    if (fixture.second === "endless") {
+      await expect(result).rejects.toThrow("Gitea PR lookup incomplete");
+    } else if (fixture.second === "error" || fixture.second === "blank") {
       await expect(result).rejects.toThrow();
     } else {
       expect((await result)?.number ?? null).toBe(fixture.expected);
