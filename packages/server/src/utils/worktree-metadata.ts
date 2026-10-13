@@ -165,9 +165,22 @@ async function getGitDirForWorktreeRoot(worktreeRoot: string): Promise<string> {
   return gitPath;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try { await stat(path); return true; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export async function getPaseoWorktreeMetadataPath(worktreeRoot: string): Promise<string> {
-  const gitDir = await getGitDirForWorktreeRoot(worktreeRoot);
-  return join(gitDir, "paseo", "worktree.json");
+  const jjDir = join(worktreeRoot, ".jj");
+  const jjMetadataPath = join(jjDir, "paseo", "worktree.json");
+  if (await pathExists(jjMetadataPath)) return jjMetadataPath;
+  if (await pathExists(join(worktreeRoot, ".git"))) {
+    return join(await getGitDirForWorktreeRoot(worktreeRoot), "paseo", "worktree.json");
+  }
+  if (await pathExists(jjDir)) return jjMetadataPath;
+  throw new Error(`Not a jj workspace: ${worktreeRoot}`);
 }
 
 export function isQualifiedRef(ref: string): boolean {
@@ -434,7 +447,7 @@ async function writePaseoWorktreeMetadataFile(
   }
   // Never recreate an archived Git directory while a queued mutation is pending.
   try {
-    await mkdir(join(await getGitDirForWorktreeRoot(worktreeRoot), "paseo"));
+    await mkdir(dirname(metadataPath));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }

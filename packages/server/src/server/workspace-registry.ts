@@ -85,6 +85,14 @@ const PersistedWorkspaceRecordSchema = z.object({
     .transform((value) => value ?? null),
   isPaseoOwnedWorktree: z.boolean().default(false),
   mainRepoRoot: z.string().nullable().default(null),
+  // jj only: private recovery bookmark (`paseo/recovery/<workspace>`) pinned
+  // at the workspace head before the workspace was forgotten on archive. Null
+  // on git workspaces and on jj workspaces that were never archived.
+  recoveryBookmark: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
@@ -672,6 +680,7 @@ export function createPersistedWorkspaceRecord(input: {
   baseBranch?: string | null;
   isPaseoOwnedWorktree?: boolean;
   mainRepoRoot?: string | null;
+  recoveryBookmark?: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -691,6 +700,7 @@ export function createPersistedWorkspaceRecord(input: {
     baseBranch: input.baseBranch ?? null,
     isPaseoOwnedWorktree: input.isPaseoOwnedWorktree ?? false,
     mainRepoRoot: input.mainRepoRoot ?? null,
+    recoveryBookmark: input.recoveryBookmark ?? null,
     archivedAt: input.archivedAt ?? null,
     autoArchivedChangeRequestUrl: input.autoArchivedChangeRequestUrl ?? null,
     pinnedAt: input.pinnedAt ?? null,

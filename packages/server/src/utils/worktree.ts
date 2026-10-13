@@ -49,6 +49,7 @@ import {
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
+export { writePaseoWorktreeMetadata } from "./worktree-metadata.js";
 
 const execFileAsync = promisify(execFile);
 const READ_ONLY_GIT_ENV = {
@@ -816,7 +817,7 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
 
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
-function deriveShortAlphanumericHash(value: string): string {
+export function deriveShortAlphanumericHash(value: string): string {
   const digest = createHash("sha256").update(value).digest();
   let hashValue = 0n;
   for (let index = 0; index < 8; index += 1) {
@@ -907,7 +908,7 @@ const resolveOwnershipPath = promisify(realpath);
 const resolveNativeOwnershipPath = promisify(realpath.native);
 const ownershipIdentityIo = pLimit(2);
 
-async function normalizePathForOwnership(input: string): Promise<string> {
+export async function normalizePathForOwnership(input: string): Promise<string> {
   try {
     return await ownershipIdentityIo(() => resolveOwnershipPath(input));
   } catch {
@@ -1076,7 +1077,7 @@ function parseWorktreeList(output: string): ParsedPaseoWorktreeInfo[] {
   return entries;
 }
 
-async function resolveWorktreeCreatedAtIso(worktreePath: string): Promise<string> {
+export async function resolveWorktreeCreatedAtIso(worktreePath: string): Promise<string> {
   try {
     const stats = await stat(worktreePath);
     const birthtimeMs = stats.birthtimeMs;
@@ -1268,7 +1269,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeDirectoryWithRetries(path: string): Promise<void> {
+export async function removeDirectoryWithRetries(path: string): Promise<void> {
   if (!(await pathExists(path))) {
     return;
   }

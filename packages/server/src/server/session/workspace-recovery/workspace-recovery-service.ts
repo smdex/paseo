@@ -2,8 +2,15 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 
 import { resolveRepositoryDefaultBranch } from "../../../utils/checkout-git.js";
+import { resolveEffectiveBackend } from "../../../utils/checkout-dispatch.js";
 import { createRealpathAwarePathMatcher } from "../../../utils/path.js";
 import { runGitCommand } from "../../../utils/run-git-command.js";
+import {
+  deleteJjBookmark,
+  jjRevisionResolves,
+  restoreJjWorkspace,
+  rollbackJjWorkspace,
+} from "../../../utils/worktree-jj.js";
 import {
   createWorktree,
   isPaseoOwnedWorktreeCwd,
@@ -68,6 +75,9 @@ export function createWorkspaceRecoveryService(deps: {
   getProject: (projectId: string) => Promise<PersistedProjectRecord | null>;
   isDirectory: (path: string) => Promise<boolean>;
   unarchiveWorkspace: (workspace: PersistedWorkspaceRecord) => Promise<void>;
+  // jj only: clears the persisted recovery bookmark after a successful
+  // restore (the pin bookmark itself is deleted in the repo).
+  clearRecoveryPin?: (workspaceId: string) => Promise<void>;
 }): WorkspaceRecoveryService {
   async function resolveRecovery(
     workspaceId: string,
@@ -144,6 +154,13 @@ export function createWorkspaceRecoveryService(deps: {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
     }
     await deps.unarchiveWorkspace(resolved.workspace);
+    if (
+      resolved.kind === "restore" &&
+      resolved.workspace.recoveryBookmark &&
+      deps.clearRecoveryPin
+    ) {
+      await deps.clearRecoveryPin(resolved.workspace.workspaceId);
+    }
     return { workspaceId, action: resolved.kind };
   }
 
@@ -151,6 +168,10 @@ export function createWorkspaceRecoveryService(deps: {
     workspace: PersistedWorkspaceRecord,
     sourceRepoRoot: string,
   ): Promise<void> {
+    if ((await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
+      await recreateArchivedJjWorkspace(workspace, sourceRepoRoot);
+      return;
+    }
     const source: WorktreeSource = workspace.branch
       ? { kind: "restore", branchName: workspace.branch, baseRef: workspace.baseBranch }
       : {
@@ -226,6 +247,88 @@ export function createWorkspaceRecoveryService(deps: {
         error,
       );
     }
+  }
+
+  /**
+   * jj restore: the workspace is re-created at its pinned recovery bookmark.
+   * `jj workspace add --revision <pin>` puts the pinned change back as the
+   * workspace's parent (verified on 0.45.1). An unresolved or missing pin
+   * BLOCKS with an explanation — never silently restore from base (plan §6).
+   */
+  async function recreateArchivedJjWorkspace(
+    workspace: PersistedWorkspaceRecord,
+    sourceRepoRoot: string,
+  ): Promise<void> {
+    const pin = workspace.recoveryBookmark;
+    if (!pin) {
+      throw new WorktreeRequestError({
+        code: "unknown",
+        message:
+          "This jj workspace has no recovery pin, so its changes cannot be located to restore. The changes may still be reachable with jj (op log / evolog) on the host.",
+      });
+    }
+    if (!(await jjRevisionResolves(sourceRepoRoot, pin))) {
+      throw new WorktreeRequestError({
+        code: "unknown",
+        message: `The recovery pin ${pin} no longer resolves in the repository, so this jj workspace cannot be restored safely.`,
+      });
+    }
+
+    let previousWorktreePath = workspace.worktreeRoot;
+    if (!previousWorktreePath) {
+      // COMPAT(worktreeRestoreMissingWorktreeRoot): records created before
+      // v0.1.110 lack durable backing placement; remove filesystem discovery
+      // after 2027-01-17.
+      const ownership = await isPaseoOwnedWorktreeCwd(workspace.cwd, {
+        paseoHome: deps.paseoHome,
+        worktreesRoot: deps.worktreesRoot,
+      });
+      previousWorktreePath = ownership.allowed
+        ? (ownership.worktreePath ?? workspace.cwd)
+        : workspace.cwd;
+    }
+
+    const worktreePath = previousWorktreePath;
+    try {
+      await restoreJjWorkspace({
+        cwd: sourceRepoRoot,
+        worktreePath,
+        workspaceName: basename(worktreePath),
+        revision: pin,
+      });
+    } catch (error) {
+      throw toWorktreeRequestError(error);
+    }
+
+    try {
+      const recreatedWorkspacePath = mapWorkspaceCwdToWorktree({
+        sourceWorktreePath: worktreePath,
+        workspaceCwd: workspace.cwd,
+        targetWorktreePath: worktreePath,
+      });
+      if (!createRealpathAwarePathMatcher(workspace.cwd)(recreatedWorkspacePath)) {
+        throw new WorktreeRequestError({
+          code: "unknown",
+          message: `Recreated workspace diverged from ${workspace.cwd}: ${recreatedWorkspacePath}`,
+        });
+      }
+      if (!(await deps.isDirectory(recreatedWorkspacePath))) {
+        throw new WorktreeRequestError({
+          code: "unknown",
+          message: `Selected project directory is missing from the restored workspace: ${recreatedWorkspacePath}`,
+        });
+      }
+    } catch (error) {
+      // The workspace was already re-created; removal is the same rollback
+      // shape (forget + directory removal) without a new pin.
+      await rollbackJjWorkspace(sourceRepoRoot, basename(worktreePath), worktreePath);
+      throw toWorktreeRequestError(error);
+    }
+
+    // Restore succeeded: consume the pin bookmark so the workspace name is
+    // free and the pin does not linger. The registry field is cleared by the
+    // caller after unarchive (clearRecoveryPin dep).
+    await deleteJjBookmark(sourceRepoRoot, pin);
   }
 
   return { inspect, restore };

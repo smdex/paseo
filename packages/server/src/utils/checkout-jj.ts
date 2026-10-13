@@ -495,10 +495,10 @@ export async function getJjSnapshotFacts(
     resolvePaseoOwnedWorkspace(cwd, identity, context),
   ]);
 
-  // For colocated default workspaces the .paseo worktree metadata lives in the
-  // git dir and reads normally. Native jj repos and secondary jj workspaces
-  // have no .git at the root, so the reader throws; Phase D defines where jj
-  // workspace metadata lives — until then absence is simply "no stored base".
+  // Worktree metadata: colocated default workspaces keep the git-dir
+  // placement; jj workspaces (and native repos) persist it under
+  // `.jj/paseo/worktree.json` (worktree-metadata.ts resolves both). Absence
+  // simply means "no stored base" — e.g. the user's own unmanaged checkout.
   const metadata = ownership.owned
     ? readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot)
     : null;

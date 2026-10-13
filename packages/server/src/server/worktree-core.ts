@@ -1,15 +1,14 @@
-import type { PluginWorktreeCreateRequest } from "@getpaseo/plugin/server";
-import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
 import { createNameId } from "mnemonic-id";
 
 import type { ForgeService } from "../services/forge-service.js";
 import {
   createWorktree,
-  resolveDefaultWorktreePath,
   slugify,
   validateBranchSlug,
   type CreatedWorktree,
 } from "../utils/worktree.js";
+import { createJjWorktree } from "../utils/worktree-jj.js";
+import { NotSupportedOnJjError, resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import {
   resolveWorktreeCreationIntent,
   type ResolveWorktreeCreationIntentInput,
@@ -18,7 +17,7 @@ import {
 } from "./resolve-worktree-creation-intent.js";
 import type { ChangeRequestCheckoutSource, FirstAgentContext } from "@getpaseo/protocol/messages";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
-import { runGitCommand, runWithGitCommandPriority } from "../utils/run-git-command.js";
+import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 
 export interface CreateWorktreeCoreInput {
   cwd: string;
@@ -34,7 +33,6 @@ export interface CreateWorktreeCoreInput {
 }
 
 export interface CreateWorktreeCoreDeps {
-  lifecycle?: Pick<PluginLifecycle, "before">;
   github: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
@@ -94,7 +92,7 @@ async function createWorktreeCoreWithPriority(
   }
 
   const forge = await resolveForge(repoRoot, deps, intentInput);
-  let intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
+  const intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
     forge: forge.forge,
     forgeService: forge.service,
     resolveDefaultBranch: (root) => resolveDefaultBranch(root, deps),
@@ -118,33 +116,10 @@ async function createWorktreeCoreWithPriority(
     }
   }
 
-  const defaultPath = await resolveDefaultWorktreePath({
-    cwd: repoRoot,
-    paseoHome: input.paseoHome,
-    worktreesRoot: input.worktreesRoot,
-    worktreeSlug: normalizedSlug,
-  });
-  const { stdout: sourceRoot } = await runGitCommand(["rev-parse", "--show-toplevel"], {
-    cwd: input.cwd,
-  });
-  const sourceCheckout = sourceRoot.trim();
-  const request = describeCreationRequest(intent, {
-    repoRoot,
-    sourceCheckout,
-    slug: normalizedSlug,
-    path: defaultPath,
-  });
-  const transformed = deps.lifecycle
-    ? await deps.lifecycle.before("worktree.create.before", request)
-    : request;
-  normalizedSlug = validateWorktreeSlug(transformed.slug);
-  intent = creationIntentFromRequest(transformed, intent);
-
   return {
-    worktree: await createWorktree({
+    worktree: await createWorktreeForBackend({
       cwd: repoRoot,
       worktreeSlug: normalizedSlug,
-      worktreePath: transformed.path,
       source: intent,
       paseoHome: input.paseoHome,
       worktreesRoot: input.worktreesRoot,
@@ -155,59 +130,30 @@ async function createWorktreeCoreWithPriority(
   };
 }
 
-function describeCreationRequest(
-  intent: WorktreeCreationIntent,
-  placement: Pick<PluginWorktreeCreateRequest, "repoRoot" | "sourceCheckout" | "slug" | "path">,
-): PluginWorktreeCreateRequest {
-  if (intent.kind === "branch-off")
-    return {
-      ...placement,
-      kind: intent.kind,
-      branch: intent.branchName,
-      baseRef: intent.baseBranch,
-    };
-  if (intent.kind === "checkout-branch")
-    return { ...placement, kind: intent.kind, branch: intent.branchName };
-  const { localBranchName, baseRefName, ...facts } = intent;
-  return {
-    ...placement,
-    ...facts,
-    branch: localBranchName ?? intent.headRef,
-    baseRef: baseRefName,
-  };
-}
-
-function creationIntentFromRequest(
-  request: PluginWorktreeCreateRequest,
-  original: WorktreeCreationIntent,
-): WorktreeCreationIntent {
-  if (request.kind === "branch-off") {
-    return { kind: request.kind, branchName: request.branch, baseBranch: request.baseRef };
+/**
+ * Backend routing for worktree creation: jj repositories get jj workspaces
+ * (checkout-change-request / checkout-github-pr intents are deferred on jj and
+ * fail typed); git repositories keep the existing worktree path unchanged.
+ */
+async function createWorktreeForBackend(input: {
+  cwd: string;
+  worktreeSlug: string;
+  source: Parameters<typeof createWorktree>[0]["source"];
+  runSetup: boolean;
+  paseoHome?: string;
+  worktreesRoot?: string;
+}): Promise<CreatedWorktree> {
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    // Change-request / PR checkout intents are deferred on jj (plan §7): fail
+    // typed BEFORE any process spawns.
+    if (input.source.kind !== "branch-off" && input.source.kind !== "checkout-branch") {
+      throw new NotSupportedOnJjError(
+        `Worktree source "${input.source.kind}" is not supported on jj repositories yet`,
+      );
+    }
+    return createJjWorktree(input);
   }
-  if (request.kind === "checkout-branch") {
-    return {
-      kind: request.kind,
-      branchName: request.branch,
-    };
-  }
-  const {
-    repoRoot: _repoRoot,
-    sourceCheckout: _checkout,
-    slug: _slug,
-    path: _path,
-    branch,
-    baseRef,
-    ...facts
-  } = request;
-  const keepLocalBranchName =
-    branch !== request.headRef ||
-    ((original.kind === "checkout-change-request" || original.kind === "checkout-github-pr") &&
-      original.localBranchName !== undefined);
-  return {
-    ...facts,
-    ...(keepLocalBranchName ? { localBranchName: branch } : {}),
-    baseRefName: baseRef,
-  };
+  return createWorktree(input);
 }
 
 async function resolveForge(
