@@ -1,5 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { EventEmitter } from "node:events";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it, afterEach } from "vitest";
@@ -745,6 +746,77 @@ describeIfJj("checkout-jj remote ops", () => {
     expect(remoteRefs.status).toBe(0);
     expect(remoteRefs.stdout).toContain("refs/heads/feature");
   });
+
+  it.each([false, true])(
+    "retains the publication owner through timeout and actual child close (caller signal=%s)",
+    async (callerSignal) => {
+      const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+      const { createRunJjCommand, runJjCommand } = await import("./run-jj-command.js");
+      const { withWorkspaceLifecycle } = await import("./workspace-lifecycle.js");
+      const context = { paseoHome: join(fixture.dir, "home") };
+      await jjDescribe(fixture.repoDir, { message: "Ready for publication" }, context);
+      expect(fixture.jj(["bookmark", "create", "feature", "-r", "@"]).status).toBe(0);
+      expect(fixture.jj(["git", "remote", "add", "origin", scratchBareGitOrigin()]).status).toBe(0);
+      const killed = Promise.withResolvers<void>();
+      class DelayedCloseChild extends EventEmitter {
+        stdout = new EventEmitter();
+        stderr = new EventEmitter();
+        stdin = null;
+        closed = false;
+        kill(signal: NodeJS.Signals) {
+          expect(signal).toBe("SIGKILL");
+          killed.resolve();
+          return true;
+        }
+        finish() {
+          this.closed = true;
+          this.emit("exit", null, "SIGKILL");
+          this.emit("close", null, "SIGKILL");
+        }
+      }
+      const child = new DelayedCloseChild();
+      const timed = createRunJjCommand("owned-push-timeout-test", { spawn: () => child });
+      const provided = callerSignal ? new AbortController().signal : undefined;
+      let settled = false;
+      let admitted = false;
+      const pushing = jjPush(fixture.repoDir, {
+        ...context,
+        signal: provided,
+        runJjCommand: async (args, options) => {
+          if (args[0] === "git" && args[1] === "push") {
+            expect(options.signal).toBeDefined();
+            expect(options.signal!.aborted).toBe(false);
+            if (provided) expect(options.signal).toBe(provided);
+            return timed(args, { ...options, timeout: 5 });
+          }
+          return runJjCommand(args, options);
+        },
+      }).catch((error: unknown) => {
+        settled = true;
+        return error;
+      });
+      let mutating: Promise<unknown> | undefined;
+      try {
+        await killed.promise;
+        expect(child.closed).toBe(false);
+        expect(settled).toBe(false);
+        mutating = withWorkspaceLifecycle(fixture.repoDir, async () => {
+          admitted = true;
+          expect(child.closed).toBe(true);
+          return jjDescribe(fixture.repoDir, { message: "Only after transport closes" }, context);
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(admitted).toBe(false);
+        child.finish();
+        expect(String(await pushing)).toContain("jj command timed out after 5ms");
+        await mutating;
+        expect(admitted).toBe(true);
+      } finally {
+        if (!child.closed) child.finish();
+        await Promise.allSettled([pushing, mutating].filter((promise) => promise !== undefined));
+      }
+    },
+  );
 
   it.each(["push-first", "mutation-first"])(
     "coordinates checkpoint admission and native push with Finish (%s)",

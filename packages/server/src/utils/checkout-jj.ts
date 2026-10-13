@@ -1882,7 +1882,13 @@ async function selectJjRemote(cwd: string, context?: JjCheckoutContext): Promise
 export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<void> {
   const checkpointRoot = await jjWorkspaceRoot(cwd);
   return withWorkspaceLifecycle(checkpointRoot, async () => {
-    const freshContext = { ...context, facts: null };
+    // Signal-owned executor calls settle only after actual child close, so a
+    // timeout cannot release this publication owner while transport is alive.
+    const freshContext = {
+      ...context,
+      facts: null,
+      signal: context?.signal ?? new AbortController().signal,
+    };
     await assertJjRestorationResolved(checkpointRoot, freshContext.paseoHome);
     const checkpoint = await readJjCheckpoint(checkpointRoot, freshContext?.paseoHome);
     if (checkpoint) {
