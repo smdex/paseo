@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, renameSync } from "node:fs";
+import type { Logger } from "pino";
+import { withWorkspaceLifecycle } from "./workspace-lifecycle.js";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -139,6 +141,7 @@ export async function createJjWorktree(options: {
   worktreeSlug: string;
   source: WorktreeSource;
   runSetup?: boolean;
+  logger?: Pick<Logger, "warn">;
   paseoHome?: string;
   worktreesRoot?: string;
 }): Promise<CreatedWorktree> {
@@ -161,6 +164,20 @@ export async function createJjWorktree(options: {
   // exactly that, so path and name can never collide independently.
   const workspaceName = basename(worktreePath);
 
+  return withWorkspaceLifecycle(worktreePath, () =>
+    createJjWorkspaceAtPath(options, source, primaryRoot, worktreePath, workspaceName),
+  );
+}
+
+async function createJjWorkspaceAtPath(
+  options: Parameters<typeof createJjWorktree>[0],
+  source: JjWorktreeSource,
+  primaryRoot: string,
+  worktreePath: string,
+  workspaceName: string,
+): Promise<CreatedWorktree> {
+  if (existsSync(worktreePath))
+    throw new Error("Workspace path was created concurrently; retry creation");
   // Base selection: branch-off cuts from the requested base (bookmark or
   // revset); checkout-branch continues at the existing bookmark. The base is
   // pinned to its commit id before anything is created so later bookmark
@@ -236,7 +253,10 @@ export async function createJjWorktree(options: {
       });
     }
   } catch (error) {
-    await rollbackJjWorkspace(primaryRoot, workspaceName, worktreePath, { createdBookmark });
+    await rollbackJjWorkspace(primaryRoot, workspaceName, worktreePath, {
+      createdBookmark,
+      logger: options.logger,
+    });
     throw error;
   }
 
@@ -252,19 +272,28 @@ export async function rollbackJjWorkspace(
   primaryRoot: string,
   name: string,
   worktreePath: string,
-  options?: { createdBookmark?: { name: string; target: string } },
+  options?: { createdBookmark?: { name: string; target: string }; logger?: Pick<Logger, "warn"> },
 ): Promise<void> {
-  try {
-    // A failed forget must never be followed by filesystem removal.
-    await runJj(["workspace", "forget", name], { cwd: primaryRoot });
-    const created = options?.createdBookmark;
-    if (created && (await readBookmarkTarget(primaryRoot, created.name)) === created.target) {
-      await runJj(["bookmark", "delete", created.name], { cwd: primaryRoot });
+  return withWorkspaceLifecycle(worktreePath, async () => {
+    try {
+      // A failed forget must never be followed by filesystem removal.
+      await runJj(["workspace", "forget", name], { cwd: primaryRoot });
+      // jj cannot condition bookmark deletion on an expected target. Even an
+      // apparently unchanged/conflicted bookmark may be adopted by external jj.
+      if (options?.createdBookmark)
+        options.logger?.warn(
+          { retainedBookmark: options.createdBookmark.name, worktreePath },
+          "Retained jj bookmark after workspace creation rollback; inspect before manual cleanup",
+        );
+      await removeDirectoryWithRetries(worktreePath);
+    } catch (error) {
+      // Rollback is best-effort; preserve the original creation failure.
+      options?.logger?.warn(
+        { err: error, worktreePath, retainedBookmark: options.createdBookmark?.name },
+        "jj rollback cleanup failed; inspect retained workspace/bookmark artifacts",
+      );
     }
-    await removeDirectoryWithRetries(worktreePath);
-  } catch {
-    // Rollback is best-effort; the creation error is the reported one.
-  }
+  });
 }
 
 export interface JjWorkspaceListEntry {
@@ -392,6 +421,7 @@ export interface DeleteJjPaseoWorktreeOptions {
    * aborts with nothing removed.
    */
   persistRecoveryPin?: (pin: string) => Promise<void>;
+  reportQuarantine?: (path: string) => void;
 }
 
 /** Unsnapshotted workspace files would be lost by forget+remove (review fix 2). */
@@ -410,6 +440,14 @@ export class JjUnsnapshottedFilesError extends Error {
  * only then forget + quarantine. Never touches the primary workspace.
  */
 export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOptions): Promise<void> {
+  return withWorkspaceLifecycle(options.worktreePath, () =>
+    deleteJjWorkspaceUnderLifecycle(options),
+  );
+}
+
+async function deleteJjWorkspaceUnderLifecycle(
+  options: DeleteJjPaseoWorktreeOptions,
+): Promise<void> {
   const primaryRoot = normalizePathForOwnership(options.cwd);
   const resolvedWorktree = normalizePathForOwnership(options.worktreePath);
 
@@ -437,9 +475,9 @@ export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOption
     throw new JjUnregisteredWorkspaceError(resolvedWorktree);
   }
 
-  // The whole sequence runs inside a deletion transaction: Paseo-initiated
-  // mutations for this workspace root are refused (JjMutationBarrierError) so
-  // no working-copy write can land after the final snapshot below.
+  // The executor barrier drains/refuses this daemon's jj calls from this
+  // root. It does not exclude filesystem writes, primary-cwd mutations or
+  // external processes; quarantine preserves writes outside that barrier.
   await withJjDeletionTransaction(resolvedWorktree, async () => {
     // Teardown FIRST (agents/watchers/processes may write files): anything
     // teardown writes is captured by the snapshot that follows. The final
@@ -469,20 +507,11 @@ export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOption
     }
     const headCommitId = await resolveWorkspaceHead(primaryRoot, match.name, resolvedWorktree);
 
-    // 1. Recovery pin: private bookmark at the workspace head, STRICT: any
-    //    creation failure aborts with nothing removed; an existing pin is
-    //    moved to the captured head with a guarded --from and verified.
-    //    `paseo/…` bookmarks are never push targets.
-    const pin = recoveryPinName(options.pinKey ?? match.name);
-    const pinTarget = await readBookmarkTarget(primaryRoot, pin);
-    if (pinTarget === null) {
-      await runJj(["bookmark", "create", pin, "--revision", headCommitId], { cwd: primaryRoot });
-    } else if (pinTarget !== headCommitId) {
-      await runJj(
-        ["bookmark", "move", "--allow-backwards", pin, "--from", pinTarget, "--to", headCommitId],
-        { cwd: primaryRoot },
-      );
-    }
+    // Each archive creates/verifies a fresh private pin before forgetting.
+    // Generations are never reused or automatically deleted; stale retirement
+    // cannot address a later archive by the same workspace ID/name.
+    const pin = recoveryPinName(`${options.pinKey ?? match.name}-${randomUUID()}`);
+    await runJj(["bookmark", "create", pin, "--revision", headCommitId], { cwd: primaryRoot });
     const pinnedAt = await readBookmarkTarget(primaryRoot, pin);
     if (pinnedAt !== headCommitId) {
       throw new Error(`Recovery pin ${pin} did not land on the workspace head; aborting deletion`);
@@ -499,7 +528,12 @@ export async function deleteJjPaseoWorktree(options: DeleteJjPaseoWorktreeOption
     //    every file — including any a racing external writer produced after
     //    the snapshot — instead of irrevocably removing them).
     await runJj(["workspace", "forget", match.name], { cwd: primaryRoot });
-    await quarantineWorktreeDirectory(resolvedWorktree, primaryRoot, options);
+    const quarantinePath = await quarantineWorktreeDirectory(
+      resolvedWorktree,
+      primaryRoot,
+      options,
+    );
+    if (quarantinePath) options.reportQuarantine?.(quarantinePath);
   });
 }
 
@@ -512,9 +546,9 @@ async function quarantineWorktreeDirectory(
   worktreePath: string,
   primaryRoot: string,
   options: Pick<DeleteJjPaseoWorktreeOptions, "paseoHome" | "worktreesRoot" | "worktreesBaseRoot">,
-): Promise<void> {
+): Promise<string | null> {
   if (!existsSync(worktreePath)) {
-    return;
+    return null;
   }
   const baseRoot = resolvePaseoWorktreesBaseRoot({
     paseoHome: options.paseoHome,
@@ -530,6 +564,7 @@ async function quarantineWorktreeDirectory(
   mkdirSync(dirname(quarantinePath), { recursive: true });
   try {
     renameSync(worktreePath, quarantinePath);
+    return quarantinePath;
   } catch (error) {
     throw new JjQuarantineError(worktreePath, error);
   }
@@ -573,8 +608,8 @@ async function readBookmarkTarget(cwd: string, bookmark: string): Promise<string
     ["log", "--no-graph", "-r", `bookmarks(exact:"${bookmark}")`, "-T", COMMIT_ID_TEMPLATE],
     { cwd, acceptExitCodes: [0, 1] },
   );
-  const commitId = result.stdout.trim().split("\n")[0];
-  return commitId && result.exitCode === 0 ? commitId : null;
+  const targets = result.stdout.trim().split("\n").filter(Boolean);
+  return result.exitCode === 0 && !result.truncated && targets.length === 1 ? targets[0]! : null;
 }
 
 function parseUntrackedPaths(statusStdout: string): string[] {
@@ -626,23 +661,20 @@ export async function restoreJjWorkspace(options: {
   workspaceName: string;
   revision: string;
 }): Promise<void> {
-  await runJj(
-    [
-      "workspace",
-      "add",
-      options.worktreePath,
-      "--name",
-      options.workspaceName,
-      "--revision",
-      options.revision,
-    ],
-    { cwd: options.cwd },
+  await withWorkspaceLifecycle(options.worktreePath, () =>
+    runJj(
+      [
+        "workspace",
+        "add",
+        options.worktreePath,
+        "--name",
+        options.workspaceName,
+        "--revision",
+        options.revision,
+      ],
+      { cwd: options.cwd },
+    ),
   );
-}
-
-/** Remove a recovery bookmark after a successful restore. */
-export async function deleteJjBookmark(cwd: string, name: string): Promise<void> {
-  await runJj(["bookmark", "delete", name], { cwd, acceptExitCodes: [0, 1] });
 }
 
 export function workspaceNameFromPath(worktreePath: string): string {
