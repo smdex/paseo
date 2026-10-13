@@ -97,7 +97,7 @@ const PR_LIST_FIELDS =
 const ISSUE_LIST_FIELDS = "index,state,author,url,title,body,labels,comments,created,updated";
 
 const CURRENT_PR_LOOKUP_PAGE_SIZE = 50;
-const CURRENT_PR_OPEN_LOOKUP_MAX_PAGES = 4;
+const CURRENT_PR_LOOKUP_MAX_PAGES = 4;
 const TIMELINE_PAGE_SIZE = 50;
 const TIMELINE_MAX_PAGES_PER_BUCKET = 4;
 
@@ -1644,7 +1644,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       if (!repository.headRef || !repository.headSha) return null;
       const matches: GiteaCurrentPullRequestApi[] = [];
       const seenNumbers = new Set<number>();
-      for (let page = 1; ; page += 1) {
+      // ponytail: four pages cap CLI work; use a head-filtered API for larger histories.
+      for (let page = 1; page <= CURRENT_PR_LOOKUP_MAX_PAGES; page += 1) {
         const candidates = await runJson(
           [
             "api",
@@ -1669,12 +1670,14 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
                 repository.remoteHeadSha === repository.headSha),
           ),
         );
+        if (matches.length > 1) return null;
         // A host can cap pages below the requested limit; only an empty JSON
         // page proves exhaustion. Do not accept a candidate before that evidence.
         if (candidates.length === 0) {
           return matches.length === 1 ? currentPullRequestApiToListItem(matches[0]) : null;
         }
       }
+      throw new Error(`Gitea PR lookup incomplete after ${CURRENT_PR_LOOKUP_MAX_PAGES} pages`);
     }
     const repoIdentity = await resolveCurrentRepoIdentity(input.cwd);
     const expectedHeadOwner = repoIdentity?.owner ?? null;
@@ -1734,7 +1737,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
     expectedHeadOwner: string | null,
   ): Promise<GiteaPrListItem | null> {
-    for (let page = 1; page <= CURRENT_PR_OPEN_LOOKUP_MAX_PAGES; page += 1) {
+    for (let page = 1; page <= CURRENT_PR_LOOKUP_MAX_PAGES; page += 1) {
       const items = await listPullRequestItems({
         cwd: input.cwd,
         state: "open",
