@@ -42,6 +42,7 @@ export interface CreateWorktreeCoreDeps {
     "resolveRepoRoot" | "resolveDefaultBranch" | "resolveForge"
   >;
   resolveDefaultBranch?: (repoRoot: string) => Promise<string>;
+  onJjWorktreeCreated?: (result: CreateWorktreeCoreResult) => Promise<void>;
 }
 
 export interface CreateWorktreeCoreResult {
@@ -132,6 +133,7 @@ async function createWorktreeCoreWithPriority(
     }
   }
 
+  const onJjWorktreeCreated = deps.onJjWorktreeCreated;
   return {
     worktree: await createWorktreeForBackend({
       cwd: repoRoot,
@@ -141,6 +143,9 @@ async function createWorktreeCoreWithPriority(
       paseoHome: input.paseoHome,
       worktreesRoot: input.worktreesRoot,
       logger: deps.logger,
+      onCreated: onJjWorktreeCreated
+        ? (worktree) => onJjWorktreeCreated({ worktree, intent, repoRoot, created: true })
+        : undefined,
     }),
     intent,
     repoRoot,
@@ -158,6 +163,7 @@ async function createWorktreeForBackend(input: {
   worktreeSlug: string;
   source: Parameters<typeof createWorktree>[0]["source"];
   runSetup: boolean;
+  onCreated?: (worktree: CreatedWorktree) => Promise<void>;
   logger?: Pick<Logger, "warn">;
   paseoHome?: string;
   worktreesRoot?: string;

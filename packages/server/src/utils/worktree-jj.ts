@@ -23,7 +23,7 @@ import {
   type PaseoWorktreeInfo,
   type WorktreeSource,
 } from "./worktree.js";
-import { readPaseoWorktreeMetadata } from "./worktree-metadata.js";
+import { readPaseoWorktreeMetadata, writeJjWorkspaceIncarnation } from "./worktree-metadata.js";
 import { getRealpathAwareRelativePath } from "./path.js";
 
 /**
@@ -141,6 +141,7 @@ export async function createJjWorktree(options: {
   worktreeSlug: string;
   source: WorktreeSource;
   runSetup?: boolean;
+  onCreated?: (worktree: CreatedWorktree) => Promise<void>;
   logger?: Pick<Logger, "warn">;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -164,9 +165,18 @@ export async function createJjWorktree(options: {
   // exactly that, so path and name can never collide independently.
   const workspaceName = basename(worktreePath);
 
-  return withWorkspaceLifecycle(worktreePath, () =>
-    createJjWorkspaceAtPath(options, source, primaryRoot, worktreePath, workspaceName),
-  );
+  return withWorkspaceLifecycle(worktreePath, async () => {
+    const worktree = await createJjWorkspaceAtPath(
+      options,
+      source,
+      primaryRoot,
+      worktreePath,
+      workspaceName,
+    );
+    // Provisioning/rollback must finish before a queued archive can inspect this path.
+    await options.onCreated?.(worktree);
+    return worktree;
+  });
 }
 
 async function createJjWorkspaceAtPath(
@@ -206,6 +216,7 @@ async function createJjWorkspaceAtPath(
   let branchName: string;
   let createdBookmark: { name: string; target: string } | undefined;
   try {
+    writeJjWorkspaceIncarnation(worktreePath, randomUUID());
     if (source.kind === "branch-off") {
       // Workspace-owned FEATURE bookmark at the workspace head: the name the
       // caller asked for (or the slug when none). The base bookmark is never

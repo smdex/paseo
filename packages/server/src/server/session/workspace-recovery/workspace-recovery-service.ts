@@ -17,7 +17,11 @@ import {
   restoreJjWorkspace,
   rollbackJjWorkspace,
 } from "../../../utils/worktree-jj.js";
-import { writePaseoWorktreeMetadata } from "../../../utils/worktree-metadata.js";
+import {
+  assertJjWorkspaceIncarnation,
+  writeJjWorkspaceIncarnation,
+  writePaseoWorktreeMetadata,
+} from "../../../utils/worktree-metadata.js";
 import {
   createWorktree,
   isPaseoOwnedWorktreeCwd,
@@ -153,6 +157,7 @@ export function createWorkspaceRecoveryService(deps: {
       };
     }
 
+    if (workspace.recoveryBookmark) assertRecoveryPin(workspace.recoveryBookmark);
     const project = await deps.getProject(workspace.projectId);
     if (!project) {
       return {
@@ -170,7 +175,7 @@ export function createWorkspaceRecoveryService(deps: {
       // WORKTREE ROOT against `jj workspace list` — never by basename(cwd),
       // which is wrong for subproject records and can falsely classify a
       // still-registered checkout.
-      if (workspace.recoveryBookmark && workspace.kind === "worktree") {
+      if (workspace.kind === "worktree") {
         const sourceRepoRoot = workspace.mainRepoRoot ?? project.rootPath;
         if ((await resolveEffectiveBackend(sourceRepoRoot)) === "jj") {
           const registered = await jjWorkspaceRootRegistered(
@@ -179,6 +184,19 @@ export function createWorkspaceRecoveryService(deps: {
           );
           if (!registered) {
             return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
+          }
+          try {
+            assertJjWorkspaceIncarnation(
+              workspace.worktreeRoot ?? workspace.cwd,
+              workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
+            );
+          } catch (error) {
+            return {
+              kind: "unavailable",
+              workspaceId,
+              reason: "workspace_directory_missing",
+              message: String(error),
+            };
           }
         }
       }
@@ -246,7 +264,6 @@ export function createWorkspaceRecoveryService(deps: {
     const currentRoot = await recoveryBackingRoot(resolved.workspace);
     if (workspaceLifecycleKey(currentRoot) !== workspaceLifecycleKey(lockedRoot))
       throw new Error("Workspace placement changed during recovery; retry");
-    if (resolved.workspace.recoveryBookmark) assertRecoveryPin(resolved.workspace.recoveryBookmark);
     if (resolved.kind === "restore") {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
     }
@@ -411,6 +428,8 @@ export function createWorkspaceRecoveryService(deps: {
         workspaceName: basename(worktreePath),
         revision: pin,
       });
+      // Legacy pins become the shared incarnation only after recreation from that exact pin.
+      writeJjWorkspaceIncarnation(worktreePath, workspace.jjWorkspaceId ?? pin);
     } catch (error) {
       throw toWorktreeRequestError(error);
     }
