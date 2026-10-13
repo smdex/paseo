@@ -190,6 +190,8 @@ export interface WorkspaceGitRuntimeSnapshot {
     vcs?: "git" | "jj";
     /** jj change id of the working-copy commit (jj only). */
     changeId?: string | null;
+    jjDescription?: string;
+    jjSnapshotRefusedPaths?: string[];
     defaultWorkspaceBase?: Extract<
       Awaited<ReturnType<typeof dispatchGetCheckoutStatus>>,
       { isGit: true }
@@ -3775,6 +3777,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       diffStat,
       vcs: checkoutStatus.vcs,
       changeId: checkoutStatus.changeId ?? null,
+      jjDescription: checkoutStatus.jjDescription,
+      jjSnapshotRefusedPaths: checkoutStatus.jjSnapshotRefusedPaths,
       defaultWorkspaceBase: checkoutStatus.defaultWorkspaceBase,
     };
     const loadedAtMs = this.deps.now().getTime();

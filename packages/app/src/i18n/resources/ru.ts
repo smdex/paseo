@@ -849,6 +849,10 @@ export const ru: TranslationResources = {
           pending: "Архивирование...",
           success: "В архиве",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "Новая правка",
           pending: "Создание новой правки...",

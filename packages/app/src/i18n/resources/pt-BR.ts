@@ -845,6 +845,10 @@ export const ptBR: TranslationResources = {
           pending: "Arquivando...",
           success: "Arquivado",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "Nova mudança",
           pending: "Iniciando nova mudança...",

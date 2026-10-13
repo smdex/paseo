@@ -1,3 +1,16 @@
+import { getJjChangeMeta, getJjOperationId } from "../../../utils/checkout-jj.js";
+import { runJjCommand } from "../../../utils/run-jj-command.js";
+import {
+  readJjArchiveCheckpoint,
+  restoreJjCheckpoint,
+  jjArchiveCheckpointPath,
+  readJjCheckpoint,
+  validateJjCheckpoint,
+  writeJjCheckpoint,
+  type JjCheckpoint,
+  type JjCheckpointOperation,
+  JjCheckpointError,
+} from "../../../utils/jj-checkpoint.js";
 import { randomUUID } from "node:crypto";
 import { basename, dirname } from "node:path";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
@@ -330,6 +343,24 @@ export function createWorkspaceRecoveryService(deps: {
     if (resolved.kind === "restore") {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
     }
+    if (jjWorkspaceAuthority(resolved.workspace) === "managed") {
+      const checkpoint = await readJjCheckpoint(currentRoot, deps.paseoHome);
+      if (checkpoint) {
+        validateJjCheckpoint(checkpoint, currentRoot);
+        if (
+          checkpoint.operations.some(
+            (operation) =>
+              operation.status === "pending" || operation.status === "reconciliation_required",
+          )
+        )
+          throw new JjCheckpointError(
+            "An unresolved jj operation requires reconciliation before unarchive; saved heads remain retained.",
+          );
+      } else if (resolved.workspace.jjCheckpointRef)
+        throw new JjCheckpointError(
+          "The checkpoint required by this workspace is missing; unarchive refused.",
+        );
+    }
     await deps.unarchiveWorkspace(resolved.workspace);
     if (resolved.workspace.recoveryBookmark && deps.clearRecoveryPin) {
       try {
@@ -438,6 +469,146 @@ export function createWorkspaceRecoveryService(deps: {
    * workspace's parent (verified on 0.45.1). An unresolved or missing pin
    * BLOCKS with an explanation — never silently restore from base (plan §6).
    */
+  async function validateArchivedCheckpoint(
+    workspace: PersistedWorkspaceRecord,
+    sourceRepoRoot: string,
+    worktreePath: string,
+    pin: string,
+  ): Promise<void> {
+    const checkpoint = await readJjArchiveCheckpoint(worktreePath, pin, deps.paseoHome);
+    const reference = workspace.jjCheckpointRef;
+    if (
+      reference &&
+      (!checkpoint ||
+        reference.path !== jjArchiveCheckpointPath(worktreePath, pin, deps.paseoHome) ||
+        checkpoint.generation !== reference.generation)
+    )
+      throw new JjCheckpointError(
+        "The retained jj checkpoint is missing or differs from its archive reference; directory retained.",
+      );
+    if (!checkpoint) return;
+    const source = resolveJjRepoIdentity(sourceRepoRoot);
+    if (
+      !source ||
+      checkpoint.sharedStore !== workspaceLifecycleKey(source.sharedStorePath) ||
+      checkpoint.incarnation !== (workspace.jjWorkspaceId ?? pin) ||
+      !checkpoint.recoveryPins.includes(pin)
+    )
+      throw new JjCheckpointError(
+        "The retained jj checkpoint does not authorize this incarnation or pin; directory retained.",
+      );
+    const pinned = await resolveJjPinnedRevision(sourceRepoRoot, pin);
+    if (pinned !== checkpoint.selection.commitId)
+      throw new JjCheckpointError(
+        "The recovery pin changed since its checkpoint. Reconcile retained heads before restoration.",
+      );
+  }
+
+  async function reapplyArchivedCheckpoint(
+    workspace: PersistedWorkspaceRecord,
+    sourceRepoRoot: string,
+    worktreePath: string,
+    pin: string,
+  ): Promise<void> {
+    const sourceIdentity = resolveJjRepoIdentity(sourceRepoRoot);
+    if (!sourceIdentity) throw new JjCheckpointError("The saved jj source is unavailable.");
+    const restoredCheckpoint = await restoreJjCheckpoint({
+      backingRoot: worktreePath,
+      sharedStore: sourceIdentity.sharedStorePath,
+      incarnation: workspace.jjWorkspaceId ?? pin,
+      paseoHome: deps.paseoHome,
+      recoveryPin: pin,
+    });
+    if (restoredCheckpoint) {
+      await reapplyJjSelection(
+        worktreePath,
+        pin,
+        (await readJjCheckpoint(worktreePath, deps.paseoHome)) ?? restoredCheckpoint,
+      );
+    } else if (workspace.baseBranch) {
+      // Legacy exact-pin recovery keeps its existing compatibility contract.
+      try {
+        const pinnedBase = await resolveJjPinnedRevision(sourceRepoRoot, workspace.baseBranch);
+        writePaseoWorktreeMetadata(worktreePath, {
+          baseRefName: workspace.baseBranch,
+          baseRef: pinnedBase,
+          ...(workspace.branch ? { jjBookmark: workspace.branch } : {}),
+        });
+      } catch {
+        // Legacy records predate durable comparison state; retain exact-pin recovery.
+      }
+    }
+  }
+
+  async function reapplyJjSelection(
+    worktreePath: string,
+    pin: string,
+    checkpoint: JjCheckpoint,
+  ): Promise<void> {
+    const context = { paseoHome: deps.paseoHome, worktreesRoot: deps.worktreesRoot };
+    const before = await getJjChangeMeta(worktreePath, "@", context);
+    if (!before)
+      throw new JjCheckpointError(
+        "Cannot capture the restoration working copy; no saved change was edited.",
+      );
+    const operation: JjCheckpointOperation = {
+      id: randomUUID(),
+      kind: "restore",
+      before,
+      target: checkpoint.selection,
+      beforeOperation: await getJjOperationId(worktreePath, context),
+      recoveryPin: pin,
+      affectedHeads: [],
+      status: "pending",
+      after: null,
+      afterOperation: null,
+      error: null,
+    };
+    checkpoint = await writeJjCheckpoint(
+      { ...checkpoint, operations: [...checkpoint.operations, operation] },
+      deps.paseoHome,
+    );
+    try {
+      // Reapply the exact retained native selection, not a copy or a moving base.
+      const edited = await runJjCommand(["edit", pin], { cwd: worktreePath });
+      if (edited.exitCode !== 0)
+        throw new JjCheckpointError(
+          `The saved change could not be edited during recovery: ${edited.stderr.trim()}. Pins remain retained.`,
+        );
+      const after = await getJjChangeMeta(worktreePath, "@", context);
+      if (
+        !after ||
+        after.changeId !== checkpoint.selection.changeId ||
+        after.commitId !== checkpoint.selection.commitId
+      )
+        throw new JjCheckpointError(
+          "Restoration did not reapply the exact saved native change. Retained pins require reconciliation.",
+        );
+      validateJjCheckpoint(checkpoint, worktreePath);
+      operation.status = "completed";
+      operation.after = after;
+      operation.afterOperation = await getJjOperationId(worktreePath, context);
+      await writeJjCheckpoint(
+        { ...checkpoint, operations: [...checkpoint.operations.slice(0, -1), operation] },
+        deps.paseoHome,
+      );
+    } catch (error) {
+      operation.status = "reconciliation_required";
+      operation.error = error instanceof Error ? error.message : String(error);
+      try {
+        operation.after = await getJjChangeMeta(worktreePath, "@", context);
+        operation.afterOperation = await getJjOperationId(worktreePath, context);
+      } catch {
+        /* Unknown state remains blocked, never undo. */
+      }
+      await writeJjCheckpoint(
+        { ...checkpoint, operations: [...checkpoint.operations.slice(0, -1), operation] },
+        deps.paseoHome,
+      );
+      throw error;
+    }
+  }
+
   async function recreateArchivedJjWorkspace(
     workspace: PersistedWorkspaceRecord,
     sourceRepoRoot: string,
@@ -473,6 +644,7 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     const worktreePath = previousWorktreePath;
+    await validateArchivedCheckpoint(workspace, sourceRepoRoot, worktreePath, pin);
     // Recheck immediately before renaming too: external jj is not excluded by
     // the daemon lifecycle guard, and a registered live root is never an orphan.
     if (await validateJjRestoreBacking({ workspace, sourceRepoRoot, backingRoot: worktreePath })) {
@@ -500,22 +672,7 @@ export function createWorkspaceRecoveryService(deps: {
       throw toWorktreeRequestError(error);
     }
 
-    // Reconstruct the workspace's pinned-base metadata (review fix 6): the
-    // recorded baseBranch is the durable source; without one, no metadata is
-    // better than wrong metadata.
-    if (workspace.baseBranch) {
-      try {
-        const pinnedBase = await resolveJjPinnedRevision(sourceRepoRoot, workspace.baseBranch);
-        writePaseoWorktreeMetadata(worktreePath, {
-          baseRefName: workspace.baseBranch,
-          baseRef: pinnedBase,
-          ...(workspace.branch ? { jjBookmark: workspace.branch } : {}),
-        });
-      } catch {
-        // Base unresolvable (removed upstream): restore continues without
-        // base metadata rather than failing an otherwise-good recovery.
-      }
-    }
+    await reapplyArchivedCheckpoint(workspace, sourceRepoRoot, worktreePath, pin);
 
     try {
       const recreatedWorkspacePath = mapWorkspaceCwdToWorktree({

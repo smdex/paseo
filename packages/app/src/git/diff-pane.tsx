@@ -1,3 +1,4 @@
+import { JjChangeControls } from "@/git/jj-change-controls";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { floatingActionsClearance } from "@/components/ui/floating-action-button";
 import { useState, useCallback, useMemo, type ReactElement, type ReactNode } from "react";
@@ -1444,6 +1445,27 @@ function useDiffTabNavigation({
   };
 }
 
+function NativeCheckoutControls({
+  serverId,
+  cwd,
+  status,
+}: {
+  serverId: string;
+  cwd: string;
+  status: CheckoutStatusPayload | null;
+}) {
+  if (status?.vcs !== "jj") return null;
+  return (
+    <JjChangeControls
+      serverId={serverId}
+      cwd={cwd}
+      changeId={status.changeId}
+      description={status.jjDescription ?? ""}
+      refusedPaths={status.jjSnapshotRefusedPaths ?? []}
+    />
+  );
+}
+
 export function ChangesSurface({
   serverId,
   workspaceId,
@@ -1947,6 +1969,8 @@ export function ChangesSurface({
           sidebarSurface={presentation === "tree"}
         />
       ) : null}
+
+      <NativeCheckoutControls serverId={serverId} cwd={cwd} status={status} />
 
       {forgeSetupMessage ? (
         <View style={styles.forgeSetupCallout} testID="forge-setup-callout">

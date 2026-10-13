@@ -2,6 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import {
   CheckoutCommitsListRequestSchema,
+  CheckoutCommitRequestSchema,
+  CheckoutNewChangeRequestSchema,
+  CheckoutDescribeChangeRequestSchema,
   CheckoutCommitsListResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionInboundMessageSchema,
@@ -159,5 +162,56 @@ describe("checkout.commits.list schemas", () => {
         },
       }).features,
     ).toEqual({ providersSnapshot: true });
+  });
+});
+
+describe("native checkpoint change intent", () => {
+  test("keeps legacy requests and optional capabilities compatible", () => {
+    const legacy = { cwd: "/native", requestId: "legacy" };
+    expect(
+      CheckoutCommitRequestSchema.parse({ type: "checkout_commit_request", ...legacy }),
+    ).toEqual({ type: "checkout_commit_request", ...legacy });
+    expect(
+      CheckoutNewChangeRequestSchema.parse({ type: "checkout.new_change.request", ...legacy }),
+    ).toEqual({ type: "checkout.new_change.request", ...legacy });
+    expect(
+      CheckoutDescribeChangeRequestSchema.parse({
+        type: "checkout.describe_change.request",
+        ...legacy,
+        message: "draft",
+      }),
+    ).toEqual({ type: "checkout.describe_change.request", ...legacy, message: "draft" });
+    const info = { status: "server_info", serverId: "host", hostname: null, version: null };
+    expect(
+      ServerInfoStatusPayloadSchema.parse(info).features?.checkoutJjCheckpoint,
+    ).toBeUndefined();
+    expect(
+      ServerInfoStatusPayloadSchema.parse({ ...info, features: { checkoutJjCheckpoint: true } })
+        .features?.checkoutJjCheckpoint,
+    ).toBe(true);
+  });
+  test("round-trips stable selection and acknowledgement through pure unions", () => {
+    const request = {
+      type: "checkout.edit_change.request",
+      cwd: "/native/sub",
+      changeId: "stable",
+      expectedChangeId: "captured",
+      acknowledgeRewrites: true,
+      requestId: "edit",
+    };
+    expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+    const response = {
+      type: "checkout.edit_change.response",
+      payload: {
+        cwd: "/native/sub",
+        success: false,
+        changeId: null,
+        commitId: null,
+        bookmark: null,
+        error: { code: "UNKNOWN", message: "Reconcile on host" },
+        requestId: "edit",
+      },
+    };
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
   });
 });

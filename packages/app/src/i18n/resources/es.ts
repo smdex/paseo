@@ -849,6 +849,10 @@ export const es: TranslationResources = {
           pending: "Archivando...",
           success: "Archivado",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        jj: en.workspace.git.actions.jj,
         newChange: {
           label: "Nuevo cambio",
           pending: "Iniciando nuevo cambio...",

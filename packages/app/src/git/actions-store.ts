@@ -96,6 +96,7 @@ function inFlightKey(key: CheckoutKey, actionId: CheckoutGitAsyncActionId): stri
 
 interface CheckoutGitActionsStoreState {
   statusByCheckout: Record<CheckoutKey, StatusMap>;
+  errorByCheckout: Record<CheckoutKey, string | null>;
 
   getStatus: (params: {
     serverId: string;
@@ -103,7 +104,12 @@ interface CheckoutGitActionsStoreState {
     actionId: CheckoutGitAsyncActionId;
   }) => CheckoutGitActionStatus;
 
-  commit: (params: { serverId: string; cwd: string }) => Promise<void>;
+  commit: (params: {
+    serverId: string;
+    cwd: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+  }) => Promise<void>;
   pull: (params: { serverId: string; cwd: string }) => Promise<void>;
   push: (params: { serverId: string; cwd: string }) => Promise<void>;
   pullAndPush: (params: { serverId: string; cwd: string }) => Promise<void>;
@@ -123,7 +129,12 @@ interface CheckoutGitActionsStoreState {
   mergeBranch: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   mergeFromBase: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   discardChanges: (params: { serverId: string; cwd: string; paths: string[] }) => Promise<void>;
-  newChange: (params: { serverId: string; cwd: string }) => Promise<void>;
+  newChange: (params: {
+    serverId: string;
+    cwd: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+  }) => Promise<void>;
 }
 
 async function runCheckoutAction({
@@ -152,6 +163,9 @@ async function runCheckoutAction({
     successTimers.delete(inflightId);
   }
 
+  useCheckoutGitActionsStore.setState((state) => ({
+    errorByCheckout: { ...state.errorByCheckout, [key]: null },
+  }));
   setStatus(key, actionId, "pending");
 
   const promise = (async () => {
@@ -165,6 +179,12 @@ async function runCheckoutAction({
       }, SUCCESS_DISPLAY_MS);
       successTimers.set(inflightId, timer);
     } catch (error) {
+      useCheckoutGitActionsStore.setState((state) => ({
+        errorByCheckout: {
+          ...state.errorByCheckout,
+          [key]: error instanceof Error ? error.message : String(error),
+        },
+      }));
       setStatus(key, actionId, "idle");
       throw error;
     } finally {
@@ -178,20 +198,25 @@ async function runCheckoutAction({
 
 export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()((set, get) => ({
   statusByCheckout: {},
+  errorByCheckout: {},
 
   getStatus: ({ serverId, cwd, actionId }) => {
     const key = checkoutKey(serverId, cwd);
     return get().statusByCheckout[key]?.[actionId] ?? "idle";
   },
 
-  commit: async ({ serverId, cwd }) => {
+  commit: async ({ serverId, cwd, expectedChangeId, acknowledgeRewrites }) => {
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: "commit",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutCommit(cwd, { addAll: true });
+        const payload = await client.checkoutCommit(cwd, {
+          addAll: true,
+          expectedChangeId,
+          acknowledgeRewrites,
+        });
         if (payload.error) {
           throw new Error(payload.error.message);
         }
@@ -390,14 +415,14 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
       },
     });
   },
-  newChange: async ({ serverId, cwd }) => {
+  newChange: async ({ serverId, cwd, expectedChangeId, acknowledgeRewrites }) => {
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: "new-change",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.newChange({ cwd });
+        const payload = await client.newChange({ cwd, expectedChangeId, acknowledgeRewrites });
         if (payload.error) {
           throw new Error(payload.error.message);
         }
@@ -412,5 +437,5 @@ export function __resetCheckoutGitActionsStoreForTests() {
   }
   successTimers.clear();
   inFlight.clear();
-  useCheckoutGitActionsStore.setState({ statusByCheckout: {} });
+  useCheckoutGitActionsStore.setState({ statusByCheckout: {}, errorByCheckout: {} });
 }

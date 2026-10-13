@@ -889,6 +889,8 @@ export interface CheckoutStatusGitNonPaseo {
   vcs?: "git" | "jj";
   /** jj change id of the working-copy commit (jj only). */
   changeId?: string | null;
+  jjDescription?: string;
+  jjSnapshotRefusedPaths?: string[];
   defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
@@ -910,6 +912,8 @@ export interface CheckoutStatusGitPaseo {
   vcs?: "git" | "jj";
   /** jj change id of the working-copy commit (jj only). */
   changeId?: string | null;
+  jjDescription?: string;
+  jjSnapshotRefusedPaths?: string[];
   defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 

@@ -1121,6 +1121,8 @@ export async function createPaseoDaemon(
     wsServer?.broadcast(wrapSessionMessage(message));
   };
   const workspaceAutoName = new WorkspaceAutoName({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
     agentManager,
     workspaceRegistry,
     workspaceGitService,

@@ -1081,6 +1081,50 @@ describe("CheckoutSession", () => {
     });
   });
 
+  itIfJj(
+    "Finish preserves a described message without invoking generation and refuses a stale draft",
+    async () => {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      fixture.jj(["describe", "-m", "My description\n\nDetails"]);
+      const changeId = fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])
+        .stdout.trim();
+      const { checkout, emitted, generatorCalls } = makeCheckoutSession({
+        paseoHome: join(fixture.dir, "home"),
+      });
+      await checkout.handleCheckoutCommitRequest({
+        type: "checkout_commit_request",
+        cwd: fixture.repoDir,
+        expectedChangeId: changeId,
+        acknowledgeRewrites: true,
+        requestId: "finish-native",
+      });
+      expect(emitted[0]).toEqual({
+        type: "checkout_commit_response",
+        payload: { cwd: fixture.repoDir, success: true, error: null, requestId: "finish-native" },
+      });
+      expect(generatorCalls.generateCommitMessage).toEqual([]);
+      expect(fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "description"]).stdout.trim()).toBe(
+        "My description\n\nDetails",
+      );
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: fixture.repoDir,
+        message: "old draft",
+        expectedChangeId: changeId,
+        requestId: "stale-native",
+      });
+      expect(emitted[1]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          success: false,
+          error: { message: expect.stringContaining("changed since this form opened") },
+        },
+      });
+    },
+  );
+
   describe("merge preflight", () => {
     it("fails when the target is not a git repository", async () => {
       const { checkout, emitted } = makeCheckoutSession({

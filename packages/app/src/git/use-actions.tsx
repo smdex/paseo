@@ -1,3 +1,4 @@
+import { confirmDialog } from "@/utils/confirm-dialog";
 import { useState, useCallback, useEffect, useMemo, type ReactElement } from "react";
 import { Info } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
@@ -313,6 +314,10 @@ function useWorkspaceScreenArchiveController({
   };
 }
 
+function hasJjDescription(status: ReturnType<typeof useCheckoutStatusQuery>["status"]): boolean {
+  return status?.vcs === "jj" && Boolean(status.jjDescription?.trim());
+}
+
 export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): UseGitActionsResult {
   const { t } = useTranslation();
   const toast = useToast();
@@ -326,6 +331,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const notGit = status !== null && !status.isGit && !status.error;
   const baseRef = gitStatus?.baseRef ?? undefined;
 
+  const isJj = gitStatus?.vcs === "jj";
+  const hasDescribedJjChange = hasJjDescription(gitStatus);
   const hasUncommittedChanges = Boolean(gitStatus?.isDirty);
 
   const {
@@ -466,7 +473,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   // jj RPCs require the advertised daemon capability — vcs data alone could
   // come from a newer daemon mismatch (review should-fix 1).
   const checkoutJjEnabled = useSessionStore(
-    (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutJj === true,
+    (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutJjCheckpoint === true,
   );
 
   const toastActionError = useCallback(
@@ -486,26 +493,56 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
 
   // Handlers
   const handleCommit = useCallback(() => {
-    void runCommit({ serverId, cwd })
-      .then(() => {
-        toastActionSuccess(t("workspace.git.actions.commit.success"));
+    const native = isJj;
+    const expectedChangeId = native ? (gitStatus?.changeId ?? undefined) : undefined;
+    const approval = native
+      ? confirmDialog({
+          title: t("workspace.git.actions.finishChange.label"),
+          message: t("workspace.git.actions.jj.rewriteWarning"),
+        })
+      : Promise.resolve(true);
+    void approval
+      .then(async (approved) => {
+        if (!approved) return false;
+        await runCommit({ serverId, cwd, expectedChangeId, acknowledgeRewrites: native });
+        return true;
+      })
+      .then((completed) => {
+        if (!completed) return;
+        toastActionSuccess(
+          t(
+            isJj
+              ? "workspace.git.actions.finishChange.success"
+              : "workspace.git.actions.commit.success",
+          ),
+        );
         return;
       })
       .catch((err) => {
         toastActionError(err, t("workspace.git.actions.toasts.failedCommit"));
       });
-  }, [cwd, runCommit, serverId, t, toastActionError, toastActionSuccess]);
+  }, [cwd, runCommit, serverId, t, toastActionError, toastActionSuccess, gitStatus, isJj]);
 
   const handleNewChange = useCallback(() => {
-    void runNewChange({ serverId, cwd })
-      .then(() => {
+    const expectedChangeId = gitStatus?.changeId ?? undefined;
+    void confirmDialog({
+      title: t("workspace.git.actions.newChange.label"),
+      message: t("workspace.git.actions.jj.rewriteWarning"),
+    })
+      .then(async (approved) => {
+        if (!approved) return false;
+        await runNewChange({ serverId, cwd, expectedChangeId, acknowledgeRewrites: true });
+        return true;
+      })
+      .then((completed) => {
+        if (!completed) return;
         toastActionSuccess(t("workspace.git.actions.newChange.success"));
         return;
       })
       .catch((err) => {
         toastActionError(err, t("workspace.git.actions.toasts.failedNewChange"));
       });
-  }, [cwd, runNewChange, serverId, t, toastActionError, toastActionSuccess]);
+  }, [cwd, runNewChange, serverId, t, toastActionError, toastActionSuccess, gitStatus]);
 
   const handlePull = useCallback(() => {
     void runPull({ serverId, cwd })
@@ -725,10 +762,11 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       behindOfOrigin,
       shouldPromoteArchive,
       shipDefault,
-      isJj: gitStatus?.vcs === "jj",
+      isJj: isJj,
+      hasDescribedJjChange,
       runtime: {
         commit: {
-          disabled: isActionDisabled(actionsDisabled, commitStatus),
+          disabled: isActionDisabled(actionsDisabled, commitStatus) || (isJj && !checkoutJjEnabled),
           status: commitStatus,
           icon: icons.commit,
           handler: handleCommit,
@@ -819,9 +857,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         },
         "new-change": {
           disabled:
-            !checkoutJjEnabled ||
-            gitStatus?.vcs !== "jj" ||
-            isActionDisabled(actionsDisabled, newChangeStatus),
+            !checkoutJjEnabled || !isJj || isActionDisabled(actionsDisabled, newChangeStatus),
           status: newChangeStatus,
           icon: icons.newChange,
           handler: handleNewChange,
@@ -869,7 +905,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     mergeFromBaseStatus,
     newChangeStatus,
     checkoutJjEnabled,
-    gitStatus?.vcs,
+    isJj,
+    hasDescribedJjChange,
     archiveController.canArchive,
     archiveController.isArchiving,
     handleCommit,
@@ -893,11 +930,12 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     () =>
       translateGitActions(buildGitActions(gitActionsInput), {
         baseRefLabel,
+        isJj: isJj,
         hasPullRequest,
         forge,
         t,
       }),
-    [gitActionsInput, baseRefLabel, hasPullRequest, forge, t],
+    [gitActionsInput, baseRefLabel, hasPullRequest, forge, t, isJj],
   );
 
   return { gitActions, branchLabel, isGit };
@@ -907,6 +945,7 @@ function translateGitActions(
   actions: GitActions,
   input: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
@@ -923,17 +962,25 @@ function translateGitAction(
   action: GitAction,
   {
     baseRefLabel,
+    isJj,
     hasPullRequest,
     forge,
     t,
   }: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
   },
 ): GitAction {
-  const labels = getTranslatedGitActionLabels(action, { baseRefLabel, hasPullRequest, forge, t });
+  const labels = getTranslatedGitActionLabels(action, {
+    baseRefLabel,
+    isJj,
+    hasPullRequest,
+    forge,
+    t,
+  });
   return {
     ...action,
     ...labels,
@@ -944,15 +991,26 @@ function translateGitAction(
   };
 }
 
+function translatedCommitLabels(isJj: boolean, t: (key: string) => string) {
+  const prefix = isJj ? "workspace.git.actions.finishChange" : "workspace.git.actions.commit";
+  return {
+    label: t(`${prefix}.label`),
+    pendingLabel: t(`${prefix}.pending`),
+    successLabel: t(`${prefix}.success`),
+  };
+}
+
 function getTranslatedGitActionLabels(
   action: GitAction,
   {
     baseRefLabel,
+    isJj,
     hasPullRequest,
     forge,
     t,
   }: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
@@ -960,11 +1018,7 @@ function getTranslatedGitActionLabels(
 ): Pick<GitAction, "label" | "pendingLabel" | "successLabel"> {
   switch (action.id) {
     case "commit":
-      return {
-        label: t("workspace.git.actions.commit.label"),
-        pendingLabel: t("workspace.git.actions.commit.pending"),
-        successLabel: t("workspace.git.actions.commit.success"),
-      };
+      return translatedCommitLabels(isJj, t);
     case "pull":
       return {
         label: t("workspace.git.actions.pull.label"),
