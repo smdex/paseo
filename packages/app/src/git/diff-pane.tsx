@@ -458,12 +458,16 @@ interface ChangesPullRequestLinkModel extends Pick<PrHint, "forge" | "number" | 
   onOpen: () => void;
 }
 
+const vcsOf = (status: { vcs?: "git" | "jj" | null } | undefined | null): "git" | "jj" | null =>
+  status?.vcs ?? null;
+
 interface ChangesRepositoryToolbarModel {
   branchName: string | null;
   cwd: string;
   gitActions: GitActions | null;
   pullRequest: ChangesPullRequestLinkModel | null;
   serverId: string;
+  vcs?: "git" | "jj" | null;
   workspaceId?: string | null;
 }
 
@@ -497,6 +501,7 @@ interface BuildChangesHeaderModelInput {
   pullRequest: PrHint | null;
   selectedDiffStat: { additions: number; deletions: number } | null;
   serverId: string;
+  vcs?: "git" | "jj" | null;
   workspaceId?: string | null;
 }
 
@@ -513,6 +518,7 @@ function buildChangesHeaderModel(input: BuildChangesHeaderModelInput): {
         ? { ...input.pullRequest, onOpen: input.onOpenPullRequest }
         : null,
       serverId: input.serverId,
+      vcs: input.vcs,
       workspaceId: input.workspaceId,
     },
     comparison: {
@@ -638,6 +644,7 @@ function ChangesRepositoryToolbar({
           workspaceId={model.workspaceId ?? model.cwd}
           workspaceDirectory={model.cwd}
           isGitCheckout
+          vcs={model.vcs}
           testID="changes-branch-switcher"
         />
       </ChangesToolbarLeading>
@@ -1886,6 +1893,7 @@ export function ChangesSurface({
       wrapLines,
     ],
   );
+  const vcs = vcsOf(status);
   const changesHeaderModel = useMemo(
     () =>
       buildChangesHeaderModel({
@@ -1902,6 +1910,7 @@ export function ChangesSurface({
         pullRequest: selectPrHintFromStatus(pullRequestStatus, forge),
         selectedDiffStat,
         serverId,
+        vcs,
         workspaceId,
       }),
     [
@@ -1918,6 +1927,7 @@ export function ChangesSurface({
       pullRequestStatus,
       selectedDiffStat,
       serverId,
+      vcs,
       toolbarMode,
       workspaceId,
     ],

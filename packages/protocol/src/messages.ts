@@ -2400,6 +2400,22 @@ export const CheckoutRenameBranchRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const CheckoutNewChangeRequestSchema = z.object({
+  type: z.literal("checkout.new_change.request"),
+  cwd: z.string(),
+  /** Optional description for the new working-copy change. */
+  message: z.string().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutDescribeChangeRequestSchema = z.object({
+  type: z.literal("checkout.describe_change.request"),
+  cwd: z.string(),
+  /** Replacement description for the current working-copy change. */
+  message: z.string(),
+  requestId: z.string(),
+});
+
 export const StashSaveRequestSchema = z.object({
   type: z.literal("stash_save_request"),
   cwd: z.string(),
@@ -3323,6 +3339,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PullRequestTimelineRequestSchema,
   CheckoutSwitchBranchRequestSchema,
   CheckoutRenameBranchRequestSchema,
+  CheckoutNewChangeRequestSchema,
+  CheckoutDescribeChangeRequestSchema,
   StashSaveRequestSchema,
   StashPopRequestSchema,
   StashListRequestSchema,
@@ -5841,6 +5859,32 @@ export const CheckoutRenameBranchResponseSchema = z.object({
   }),
 });
 
+export const CheckoutNewChangeResponseSchema = z.object({
+  type: z.literal("checkout.new_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutDescribeChangeResponseSchema = z.object({
+  type: z.literal("checkout.describe_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
 const StashEntrySchema = z.object({
   index: z.number().int().min(0),
   message: z.string(),
@@ -7014,6 +7058,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PullRequestTimelineResponseSchema,
   CheckoutSwitchBranchResponseSchema,
   CheckoutRenameBranchResponseSchema,
+  CheckoutNewChangeResponseSchema,
+  CheckoutDescribeChangeResponseSchema,
   StashSaveResponseSchema,
   StashPopResponseSchema,
   StashListResponseSchema,
@@ -7418,6 +7464,12 @@ export type CheckoutSwitchBranchRequest = z.infer<typeof CheckoutSwitchBranchReq
 export type CheckoutSwitchBranchResponse = z.infer<typeof CheckoutSwitchBranchResponseSchema>;
 export type CheckoutRenameBranchRequest = z.infer<typeof CheckoutRenameBranchRequestSchema>;
 export type CheckoutRenameBranchResponse = z.infer<typeof CheckoutRenameBranchResponseSchema>;
+export type CheckoutNewChangeRequest = z.infer<typeof CheckoutNewChangeRequestSchema>;
+export type CheckoutNewChangeResponse = z.infer<typeof CheckoutNewChangeResponseSchema>;
+export type CheckoutNewChangePayload = CheckoutNewChangeResponse["payload"];
+export type CheckoutDescribeChangeRequest = z.infer<typeof CheckoutDescribeChangeRequestSchema>;
+export type CheckoutDescribeChangeResponse = z.infer<typeof CheckoutDescribeChangeResponseSchema>;
+export type CheckoutDescribeChangePayload = CheckoutDescribeChangeResponse["payload"];
 export type StashSaveRequest = z.infer<typeof StashSaveRequestSchema>;
 export type StashSaveResponse = z.infer<typeof StashSaveResponseSchema>;
 export type StashPopRequest = z.infer<typeof StashPopRequestSchema>;

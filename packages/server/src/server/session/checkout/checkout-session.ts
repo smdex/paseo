@@ -41,9 +41,7 @@ import type {
   SearchResult,
 } from "../../../services/forge-service.js";
 import {
-  commitChanges,
   createPullRequest,
-  discardChanges,
   forgeAuthStateFromError,
   isForgeAuthError,
   mergeFromBase,
@@ -53,7 +51,14 @@ import {
   listCheckoutCommits,
   getCommitFileDiff,
 } from "../../../utils/checkout-git.js";
-import { runGitCommand } from "../../../utils/run-git-command.js";
+import {
+  dispatchCommitChanges,
+  dispatchDescribeChange,
+  dispatchDiscardChanges,
+  dispatchNewChange,
+  dispatchStashPop,
+  dispatchStashSave,
+} from "../../../utils/checkout-dispatch.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
 
@@ -651,7 +656,7 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, paths, requestId } = msg;
     try {
-      await discardChanges(cwd, paths);
+      await dispatchDiscardChanges(cwd, paths);
       await this.gitMutation.notifyGitMutation(cwd, "discard-changes");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -675,10 +680,7 @@ export class CheckoutSession {
       const message = branchLabel
         ? `${CheckoutSession.PASEO_STASH_PREFIX} ${branchLabel}`
         : `${CheckoutSession.PASEO_STASH_PREFIX} unnamed`;
-      await runGitCommand(["stash", "push", "--include-untracked", "-m", message], {
-        cwd,
-        timeout: 120_000,
-      });
+      await dispatchStashSave(cwd, message);
       await this.gitMutation.notifyGitMutation(cwd, "stash-push");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -698,10 +700,7 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, stashIndex, requestId } = msg;
     try {
-      await runGitCommand(["stash", "pop", `stash@{${stashIndex}}`], {
-        cwd,
-        timeout: 120_000,
-      });
+      await dispatchStashPop(cwd, stashIndex);
       await this.gitMutation.notifyGitMutation(cwd, "stash-pop");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -750,7 +749,7 @@ export class CheckoutSession {
         throw new Error("Commit message is required");
       }
 
-      await commitChanges(cwd, {
+      await dispatchCommitChanges(cwd, {
         message,
         addAll: msg.addAll ?? true,
       });
@@ -772,6 +771,66 @@ export class CheckoutSession {
         payload: {
           cwd,
           success: false,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutNewChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.new_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchNewChange(cwd, { message: msg.message });
+      await this.gitMutation.notifyGitMutation(cwd, "new-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.new_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutDescribeChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.describe_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const message = msg.message?.trim() ?? "";
+      if (!message) {
+        throw new Error("Description is required");
+      }
+      const result = await dispatchDescribeChange(cwd, { message });
+      await this.gitMutation.notifyGitMutation(cwd, "describe-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.describe_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
           error: toCheckoutError(error),
           requestId,
         },

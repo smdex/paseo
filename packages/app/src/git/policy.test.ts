@@ -81,6 +81,7 @@ function createInput(
     behindOfOrigin: 0,
     shouldPromoteArchive: false,
     shipDefault: "pr",
+    isJj: false,
     runtime: {
       commit: {
         disabled: false,
@@ -152,6 +153,11 @@ function createInput(
         status: "idle",
         handler: () => undefined,
       },
+      "new-change": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
       "archive-workspace": {
         disabled: false,
         status: "idle",
@@ -177,6 +183,21 @@ describe("git-actions-policy", () => {
       "pull-and-push",
       "archive-workspace",
     ]);
+  });
+
+  it("adds the new-change action on jj checkouts only", () => {
+    const gitActions = buildGitActions(createInput({ hasRemote: true }));
+    const jjActions = buildGitActions(createInput({ hasRemote: true, isJj: true }));
+
+    expect(gitActions.secondary.map((action) => action.id)).not.toContain("new-change");
+    expect(jjActions.secondary.map((action) => action.id)).toEqual([
+      "pull",
+      "push",
+      "pull-and-push",
+      "new-change",
+      "archive-workspace",
+    ]);
+    expect(jjActions.secondary.at(-2)).toMatchObject({ id: "new-change", label: "New change" });
   });
 
   it("prioritizes pull when the branch is behind origin", () => {

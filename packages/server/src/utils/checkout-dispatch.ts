@@ -5,6 +5,7 @@ import type {
   CheckoutContext,
   CheckoutDiffCompare,
   CheckoutDiffResult,
+  CheckoutExistingBranchResult,
   CheckoutReadCacheOptions,
   CheckoutRefDerivedState,
   CheckoutShortstat,
@@ -14,6 +15,9 @@ import type {
   PullRequestStatusResult,
 } from "./checkout-git.js";
 import {
+  checkoutResolvedBranch,
+  commitChanges,
+  discardChanges,
   getCheckoutDiff,
   getCheckoutRefDerivedState,
   getCheckoutShortstat,
@@ -38,7 +42,14 @@ import {
   getJjStatus,
   getJjWorktreeState,
   hasJjBookmark,
+  jjCommit,
+  jjCreateBookmark,
+  jjDescribe,
+  jjDiscard,
+  jjEditBookmark,
   jjFactsToCheckoutSnapshotFacts,
+  jjNew,
+  type JjMutationResult,
   listJjBookmarkSuggestions,
   resolveJjBranchCheckout,
   type JjCheckoutContext,
@@ -219,6 +230,87 @@ export async function dispatchResolveBranchCheckout(
 
 const READ_ONLY_ENV = { GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" };
 
+// ---------------------------------------------------------------- mutations
+
+export async function dispatchCommitChanges(
+  cwd: string,
+  options: { message: string; addAll?: boolean },
+): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return commitChanges(cwd, options);
+  }
+  // addAll is meaningless for jj: the working copy is always snapshotted in full.
+  await jjCommit(cwd, { message: options.message });
+}
+
+export async function dispatchDiscardChanges(cwd: string, paths: string[]): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return discardChanges(cwd, paths);
+  }
+  return jjDiscard(cwd, paths);
+}
+
+/**
+ * Start a new working-copy change. jj-only surface (the git flow models the
+ * same action as commit-then-continue); a git checkout gets a typed error
+ * instead of a silent no-op.
+ */
+export async function dispatchNewChange(
+  cwd: string,
+  options?: { message?: string },
+): Promise<JjMutationResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    throw new NotSupportedOnJjError("New change (jj-only operation) requested on a git checkout");
+  }
+  return jjNew(cwd, options);
+}
+
+/** Describe (retitle) the current working-copy change. jj-only surface. */
+export async function dispatchDescribeChange(
+  cwd: string,
+  options: { message: string },
+): Promise<JjMutationResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    throw new NotSupportedOnJjError(
+      "Describe change (jj-only operation) requested on a git checkout",
+    );
+  }
+  return jjDescribe(cwd, options);
+}
+
+/** Execute a validated branch checkout. Validation/clean-tree gates stay upstream. */
+export async function dispatchExecuteBranchCheckout(
+  cwd: string,
+  resolution: BranchCheckoutResolution,
+): Promise<CheckoutExistingBranchResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    return checkoutResolvedBranch({ cwd, resolution });
+  }
+  if (resolution.kind !== "local") {
+    throw new Error(`Only local bookmarks can be checked out, got: ${resolution.kind}`);
+  }
+  await jjEditBookmark(cwd, resolution.name);
+  return { source: "local" };
+}
+
+/** Execute branch creation from a base on the current working copy. Gates stay upstream. */
+export async function dispatchExecuteCreateBranchFromBase(
+  cwd: string,
+  params: { baseBranch: string; newBranchName: string },
+): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    await runGitCommand(["checkout", "-b", params.newBranchName, "--no-track", params.baseBranch], {
+      cwd,
+      timeout: 120_000,
+    });
+    return;
+  }
+  // New working-copy change on the base, bookmarked as the workspace line.
+  // The base bookmark itself is never moved by this flow.
+  await jjNew(cwd, {});
+  await jjCreateBookmark(cwd, params.newBranchName);
+}
+
 export async function dispatchHasLocalBranch(
   cwd: string,
   branch: string,
@@ -289,6 +381,29 @@ export async function dispatchRunStashList(
     return result.stdout;
   }
   throw new NotSupportedOnJjError("Stash listing");
+}
+
+/** jj has no stash; the app hides the surface and old clients get a typed error. */
+export async function dispatchStashSave(cwd: string, message: string): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    await runGitCommand(["stash", "push", "--include-untracked", "-m", message], {
+      cwd,
+      timeout: 120_000,
+    });
+    return;
+  }
+  throw new NotSupportedOnJjError("Stash save");
+}
+
+export async function dispatchStashPop(cwd: string, stashIndex: number): Promise<void> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+    await runGitCommand(["stash", "pop", `stash@{${stashIndex}}`], {
+      cwd,
+      timeout: 120_000,
+    });
+    return;
+  }
+  throw new NotSupportedOnJjError("Stash pop");
 }
 
 /**

@@ -21,6 +21,8 @@ import {
   AgentRefreshedStatusPayloadSchema,
   AgentResumedStatusPayloadSchema,
   CheckoutRenameBranchResponseSchema,
+  CheckoutNewChangeResponseSchema,
+  CheckoutDescribeChangeResponseSchema,
   parseServerInfoStatusPayload,
   RenameTerminalResponseSchema,
   RestartRequestedStatusPayloadSchema,
@@ -521,6 +523,8 @@ type CheckoutPrStatusPayload = CheckoutPrStatusResponse["payload"];
 type PullRequestTimelinePayload = PullRequestTimelineResponse["payload"];
 type CheckoutSwitchBranchPayload = CheckoutSwitchBranchResponse["payload"];
 export type RenameBranchResult = z.infer<typeof CheckoutRenameBranchResponseSchema>["payload"];
+export type NewChangeResult = z.infer<typeof CheckoutNewChangeResponseSchema>["payload"];
+export type DescribeChangeResult = z.infer<typeof CheckoutDescribeChangeResponseSchema>["payload"];
 type StashSavePayload = StashSaveResponse["payload"];
 type StashPopPayload = StashPopResponse["payload"];
 type StashListPayload = StashListResponse["payload"];
@@ -904,6 +908,16 @@ export interface UpdateScheduleOptions {
 export interface RenameBranchInput {
   cwd: string;
   branch: string;
+  requestId?: string;
+}
+export interface NewChangeInput {
+  cwd: string;
+  message?: string;
+  requestId?: string;
+}
+export interface DescribeChangeInput {
+  cwd: string;
+  message: string;
   requestId?: string;
 }
 export interface RenameTerminalInput {
@@ -4495,6 +4509,30 @@ export class DaemonClient {
         branch: input.branch,
       },
       responseType: "checkout.rename_branch.response",
+    });
+  }
+
+  async newChange(input: NewChangeInput): Promise<NewChangeResult> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.new_change.request",
+        cwd: input.cwd,
+        message: input.message,
+      },
+      responseType: "checkout.new_change.response",
+    });
+  }
+
+  async describeChange(input: DescribeChangeInput): Promise<DescribeChangeResult> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.describe_change.request",
+        cwd: input.cwd,
+        message: input.message,
+      },
+      responseType: "checkout.describe_change.response",
     });
   }
 
