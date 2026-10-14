@@ -1267,6 +1267,31 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       input: GetPullRequestOptions,
     ): Promise<PullRequestCheckoutTarget> {
       const mr = await viewMergeRequest(input.cwd, String(input.number), input.repository);
+      if (input.repository && (mr.source_project_id == null || mr.target_project_id == null))
+        throw new Error("The merge request source and target projects could not be identified");
+      const isCrossRepository =
+        mr.source_project_id !== undefined &&
+        mr.source_project_id !== null &&
+        mr.target_project_id !== undefined &&
+        mr.target_project_id !== null &&
+        mr.source_project_id !== mr.target_project_id;
+      // Native checkout fetches the source branch; merge-request refs are not
+      // branches that jj git fetch can import. Bind that read to the selected host.
+      const sourceProject =
+        input.repository && isCrossRepository
+          ? await runJson(
+              ["api", `projects/${mr.source_project_id}`],
+              input,
+              z.object({
+                id: z.number(),
+                path_with_namespace: z.string(),
+                ssh_url_to_repo: z.string().nullable(),
+                http_url_to_repo: z.string().nullable(),
+              }),
+            )
+          : null;
+      if (sourceProject && sourceProject.id !== mr.source_project_id)
+        throw new Error("The merge request source project changed during checkout");
       return {
         number: mr.iid,
         baseRefName: mr.target_branch,
@@ -1275,15 +1300,11 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
           { remoteName: "origin", remoteRef: `refs/merge-requests/${mr.iid}/head` },
           { remoteName: "origin", remoteRef: `refs/heads/${mr.source_branch}` },
         ],
-        headOwnerLogin: null,
-        headRepositorySshUrl: null,
-        headRepositoryUrl: null,
-        isCrossRepository:
-          mr.source_project_id !== undefined &&
-          mr.source_project_id !== null &&
-          mr.target_project_id !== undefined &&
-          mr.target_project_id !== null &&
-          mr.source_project_id !== mr.target_project_id,
+        headOwnerLogin:
+          sourceProject?.path_with_namespace.split("/").slice(0, -1).join("/") ?? null,
+        headRepositorySshUrl: sourceProject?.ssh_url_to_repo ?? null,
+        headRepositoryUrl: sourceProject?.http_url_to_repo ?? null,
+        isCrossRepository,
         headRefKind: "branch",
       };
     },

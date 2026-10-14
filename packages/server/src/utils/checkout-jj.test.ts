@@ -776,6 +776,36 @@ describeIfJj("checkout-jj remote ops", () => {
     expect(remoteRefs.stdout).toContain("refs/heads/feature");
   });
 
+  it("pushes to the exact captured forge remote after a PR checkout adds other remotes", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    const upstream = scratchBareGitOrigin();
+    const foreign = scratchBareGitOrigin();
+    expect(fixture.jj(["git", "remote", "add", "upstream", upstream]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", foreign]).status).toBe(0);
+    expect(fixture.jj(["describe", "-m", "Ready to push"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+    const context = { paseoHome: fixture.dir };
+    const { importJjCheckpoint, writeJjCheckpoint } = await import("./jj-checkpoint.js");
+    const head = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const checkpoint = await importJjCheckpoint({
+      backingRoot: fixture.repoDir,
+      head: { commitId: head.commitId, changeId: head.changeId },
+      paseoHome: context.paseoHome,
+    });
+    await writeJjCheckpoint(
+      { ...checkpoint, forgeRemote: { remoteName: "upstream", remoteUrl: upstream } },
+      context.paseoHome,
+    );
+    await jjPush(fixture.repoDir, context);
+    expect(spawnSync("git", ["ls-remote", upstream], { encoding: "utf8" }).stdout).toContain(
+      "refs/heads/feature",
+    );
+    expect(spawnSync("git", ["ls-remote", foreign], { encoding: "utf8" }).stdout).toBe("");
+    expect(fixture.jj(["git", "remote", "set-url", "upstream", foreign]).status).toBe(0);
+    await expect(jjPush(fixture.repoDir, context)).rejects.toThrow("saved");
+    expect(spawnSync("git", ["ls-remote", foreign], { encoding: "utf8" }).stdout).toBe("");
+  });
+
   it.each([false, true])(
     "retains the publication owner through timeout and actual child close (caller signal=%s)",
     async (callerSignal) => {

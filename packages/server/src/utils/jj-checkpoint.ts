@@ -47,6 +47,8 @@ export const JjCheckpointSchema = z.object({
   // Capture ownership; an ancestor bookmark is not the WIP's owning line.
   savedWip: z.array(HeadSchema.extend({ bookmark: z.string().nullable().optional() })),
   comparison: z.object({ pinnedCommitId: z.string().nullable(), liveBase: z.string().nullable() }),
+  // Keep forge identity stable when PR checkout adds a remote to the shared store, even without a local bookmark.
+  forgeRemote: z.object({ remoteName: z.string(), remoteUrl: z.string() }).optional(),
   publication: z
     .object({
       remoteName: z.string(),

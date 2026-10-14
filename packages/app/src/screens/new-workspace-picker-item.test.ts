@@ -449,6 +449,21 @@ it("does not search or retain PR choices before backend resolution or on jj", ()
     canSearchRefPickerChangeRequests({ status: { ...status, vcs: "jj" }, enabled: true }),
   ).toBe(false);
   expect(refPickerChangeRequests({ ...status, vcs: "jj" }, [prItem])).toEqual([]);
+  expect(
+    canSearchRefPickerChangeRequests({
+      status: { ...status, vcs: "jj" },
+      enabled: true,
+      supportsJjPrWorkspace: true,
+    }),
+  ).toBe(true);
+  expect(
+    canSearchRefPickerChangeRequests({
+      status: { ...status, vcs: "jj" },
+      enabled: false,
+      supportsJjPrWorkspace: true,
+    }),
+  ).toBe(false);
+  expect(refPickerChangeRequests({ ...status, vcs: "jj" }, [prItem], true)).toEqual([prItem]);
   expect(canSearchRefPickerChangeRequests({ status, enabled: true })).toBe(true);
   expect(refPickerChangeRequests(status, [prItem])).toEqual([prItem]);
 });

@@ -885,10 +885,8 @@ export type RecentProviderSessionDescriptorPayload = z.infer<
   typeof RecentProviderSessionDescriptorPayloadSchema
 >;
 
-// ============================================================================
-// Session Inbound Messages (Session receives these)
-// ============================================================================
-
+// =====================================================================// Session Inbound Messages (Session receives these)
+// =====================================================================
 export const VoiceAudioChunkMessageSchema = z.object({
   type: z.literal("voice_audio_chunk"),
   audio: z.string(), // base64 encoded
@@ -1214,10 +1212,8 @@ export const SendAgentMessageSchema = z.object({
   attachments: AgentAttachmentsSchema,
 });
 
-// ============================================================================
-// Agent RPCs (requestId-correlated)
-// ============================================================================
-
+// =====================================================================// Agent RPCs (requestId-correlated)
+// =====================================================================
 const DirectorySyncRequestSchema = z.object({
   generation: z.string().optional(),
   afterSeq: z.number().int().nonnegative().optional(),
@@ -1641,10 +1637,8 @@ export const WriteProjectConfigRequestMessageSchema = z.object({
   expectedRevision: PaseoConfigRevisionSchema.nullable(),
 });
 
-// ============================================================================
-// Dictation Streaming (lossless, resumable)
-// ============================================================================
-
+// =====================================================================// Dictation Streaming (lossless, resumable)
+// =====================================================================
 export const DictationStreamStartMessageSchema = z.object({
   type: z.literal("dictation_stream_start"),
   dictationId: z.string(),
@@ -3000,10 +2994,8 @@ export const PushUnregisterResponseSchema = z.object({
   }),
 });
 
-// ============================================================================
-// Terminal Messages
-// ============================================================================
-
+// =====================================================================// Terminal Messages
+// =====================================================================
 export const ListTerminalsRequestSchema = z.object({
   type: z.literal("list_terminals_request"),
   cwd: z.string().optional(),
@@ -3482,10 +3474,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
 
-// ============================================================================
-// Session Outbound Messages (Session emits these)
-// ============================================================================
-
+// =====================================================================// Session Outbound Messages (Session emits these)
+// =====================================================================
 export const ActivityLogPayloadSchema = z.object({
   subscriptionId: z.string().optional(),
   id: z.string(),
@@ -3741,6 +3731,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutJjCheckpoint: z.boolean().optional(),
         // COMPAT(checkoutJjPrCreate): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports native publication.
         checkoutJjPrCreate: z.boolean().optional(),
+        // COMPAT(checkoutJjPrWorkspace): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native PR workspace creation.
+        checkoutJjPrWorkspace: z.boolean().optional(),
         // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
         checkoutJjRewriteApproval: z.boolean().optional(),
         // COMPAT(checkoutJjFetchRebase): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native fetch/rebase.
@@ -6554,10 +6546,8 @@ export const ListCommandsResponseSchema = z.object({
   }),
 });
 
-// ============================================================================
-// Terminal Outbound Messages
-// ============================================================================
-
+// =====================================================================// Terminal Outbound Messages
+// =====================================================================
 const TerminalInfoSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -7723,10 +7713,8 @@ export type CaptureTerminalRequest = z.infer<typeof CaptureTerminalRequestSchema
 export type CaptureTerminalResponse = z.infer<typeof CaptureTerminalResponseSchema>;
 export type TerminalStreamExit = z.infer<typeof TerminalStreamExitSchema>;
 
-// ============================================================================
-// WebSocket Level Messages (wraps session messages)
-// ============================================================================
-
+// =====================================================================// WebSocket Level Messages (wraps session messages)
+// =====================================================================
 // WebSocket-only messages (not session messages)
 export const WSPingMessageSchema = z.object({
   type: z.literal("ping"),
@@ -7811,10 +7799,8 @@ export type WSInboundMessage = z.infer<typeof WSInboundMessageSchema>;
 export type WSOutboundMessage = z.infer<typeof WSOutboundMessageSchema>;
 export type WSHelloMessage = z.infer<typeof WSHelloMessageSchema>;
 
-// ============================================================================
-// Helper functions for message conversion
-// ============================================================================
-
+// =====================================================================// Helper functions for message conversion
+// =====================================================================
 /**
  * Extract session message from WebSocket message
  * Returns null if message should be handled at WS level only

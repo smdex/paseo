@@ -1,7 +1,13 @@
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import type { Logger } from "pino";
+import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
+import type { ForgeRepositoryContext } from "../services/forge-service.js";
+import { resolveSshHostname } from "./ssh-hostname.js";
+import type { JjCheckpoint } from "./jj-checkpoint.js";
 import {
   importJjCheckpoint,
+  readJjCheckpoint,
+  validateJjCheckpoint,
   writeJjCheckpoint,
   writeJjArchiveCheckpoint,
 } from "./jj-checkpoint.js";
@@ -11,7 +17,13 @@ import { basename, dirname, join } from "node:path";
 
 import { runJjCommand, withJjDeletionTransaction } from "./run-jj-command.js";
 import { resolveJjRepoIdentity } from "./vcs-backend.js";
-import { hasJjBookmark } from "./checkout-jj.js";
+import {
+  hasJjBookmark,
+  getJjSnapshotFacts,
+  getJjChangeMeta,
+  getJjForgeRepositoryContext,
+  type JjRemoteInfo,
+} from "./checkout-jj.js";
 import { validateBranchSlug } from "@getpaseo/protocol/branch-slug";
 import {
   deriveShortAlphanumericHash,
@@ -115,14 +127,190 @@ export async function getJjPaseoWorktreesRoot(
   return join(baseRoot, await deriveJjWorktreeProjectHash(cwd));
 }
 
-export type JjWorktreeSource = Extract<WorktreeSource, { kind: "branch-off" | "checkout-branch" }>;
+export type JjWorktreeSource = Extract<
+  WorktreeSource,
+  { kind: "branch-off" | "checkout-branch" | "checkout-change-request" }
+>;
 
 function toJjWorktreeSource(source: WorktreeSource): JjWorktreeSource {
-  if (source.kind === "branch-off" || source.kind === "checkout-branch") {
+  if (
+    source.kind === "branch-off" ||
+    source.kind === "checkout-branch" ||
+    source.kind === "checkout-change-request"
+  )
     return source;
+  if (source.kind === "checkout-github-pr")
+    return {
+      ...source,
+      kind: "checkout-change-request",
+      forge: "github",
+      changeRequestNumber: source.githubPrNumber,
+    };
+  throw new Error(`Worktree source "${source.kind}" is not supported on jj repositories`);
+}
+
+export class JjWorkspaceSourceError extends Error {
+  readonly code = "workspace_source_unavailable";
+  constructor(cause: unknown) {
+    super(
+      `Unable to open the selected pull request: ${cause instanceof Error ? cause.message : String(cause)}. Check the pull request and its remotes, then retry.`,
+      { cause },
+    );
+    this.name = "JjWorkspaceSourceError";
   }
-  // Change-request / PR checkout intents are deferred on jj (plan §7).
-  throw new Error(`Worktree source "${source.kind}" is not supported on jj repositories yet`);
+}
+
+const remoteBookmarkRevset = (name: string, remote: string) =>
+  `remote_bookmarks(exact:${JSON.stringify(name)}, exact:${JSON.stringify(remote)})`;
+
+async function prepareJjPrSource(
+  cwd: string,
+  source: Extract<JjWorktreeSource, { kind: "checkout-change-request" }>,
+  options: { forgeRepository?: ForgeRepositoryContext; paseoHome?: string },
+): Promise<{
+  head: string;
+  base: string;
+  liveBase: string;
+  publication: Omit<NonNullable<JjCheckpoint["publication"]>, "localBookmark">;
+}> {
+  const repository = options.forgeRepository ?? (await getJjForgeRepositoryContext(cwd, options));
+  const facts = await getJjSnapshotFacts(cwd, options);
+  if (!facts.isJj) throw new Error("The jj source workspace is unavailable");
+  const checkpoint = await readJjCheckpoint(facts.identity.workspaceRoot, options.paseoHome);
+  if (checkpoint) validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
+  const selection = checkpoint?.publication ?? checkpoint?.forgeRemote;
+  let selectedRemote = facts.remotes.length === 1 ? facts.remotes[0] : undefined;
+  if (selection)
+    selectedRemote = facts.remotes.find(
+      (remote) => remote.name === selection.remoteName && remote.url === selection.remoteUrl,
+    );
+  if (!selectedRemote)
+    throw new Error("Select an unambiguous jj forge remote before opening a pull request");
+  const targetRemote = await resolveJjPrTargetRemote(facts.remotes, repository, selectedRemote);
+  const headLocation = source.pushRemoteUrl ? parseGitRemoteLocation(source.pushRemoteUrl) : null;
+  const sourceRepository =
+    headLocation?.path.replace(/\.git$/, "") ??
+    source.headRepository ??
+    repository.targetRepository;
+  let headRemote = targetRemote;
+  if (sourceRepository !== repository.targetRepository) {
+    headRemote = await resolveJjPrForkRemote({
+      cwd,
+      source,
+      remotes: facts.remotes,
+      selectedRemote,
+      captureSourceRemote: !selection,
+      paseoHome: options.paseoHome,
+    });
+  }
+  const fetch = async (remote: string, branches: string[]) =>
+    runJj(
+      [
+        "--ignore-working-copy",
+        "--config",
+        "git.abandon-unreachable-commits=false",
+        "git",
+        "fetch",
+        "--remote",
+        `exact:${remote}`,
+        ...branches.flatMap((branch) => ["--branch", `exact:${branch}`]),
+      ],
+      { cwd },
+    );
+  if (headRemote.name === targetRemote.name)
+    await fetch(targetRemote.name, [source.baseRefName, source.headRef]);
+  else {
+    await fetch(targetRemote.name, [source.baseRefName]);
+    await fetch(headRemote.name, [source.headRef]);
+  }
+  const liveBase = remoteBookmarkRevset(source.baseRefName, targetRemote.name);
+  return {
+    head: await pinRevision(cwd, remoteBookmarkRevset(source.headRef, headRemote.name)),
+    base: await pinRevision(cwd, liveBase),
+    liveBase,
+    publication: {
+      remoteName: headRemote.name,
+      remoteUrl: headRemote.url,
+      remoteBookmark: source.headRef,
+      sourceRepository,
+      targetRepository: repository.targetRepository,
+    },
+  };
+}
+
+async function resolveJjPrTargetRemote(
+  remotes: JjRemoteInfo[],
+  repository: ForgeRepositoryContext,
+  selectedRemote: JjRemoteInfo,
+): Promise<JjRemoteInfo> {
+  const matchingTargets: JjRemoteInfo[] = [];
+  for (const remote of remotes) {
+    const location = parseGitRemoteLocation(remote.url);
+    if (!location || location.path.replace(/\.git$/, "") !== repository.targetRepository) continue;
+    const host = ["ssh", "scp"].includes(location.transport)
+      ? ((await resolveSshHostname(location.host)) ?? location.host)
+      : location.host;
+    if (host === repository.host) matchingTargets.push(remote);
+  }
+  let targetRemote = matchingTargets.length === 1 ? matchingTargets[0] : undefined;
+  if (matchingTargets.length === 0 && repository.sourceRepository === repository.targetRepository)
+    targetRemote = selectedRemote;
+  if (!targetRemote)
+    throw new Error(
+      `Configure an unambiguous remote for target repository ${repository.targetRepository}`,
+    );
+  return targetRemote;
+}
+
+async function resolveJjPrForkRemote({
+  cwd,
+  source,
+  remotes,
+  selectedRemote,
+  captureSourceRemote,
+  paseoHome,
+}: {
+  cwd: string;
+  source: Extract<JjWorktreeSource, { kind: "checkout-change-request" }>;
+  remotes: JjRemoteInfo[];
+  selectedRemote: JjRemoteInfo;
+  captureSourceRemote: boolean;
+  paseoHome?: string;
+}): Promise<JjRemoteInfo> {
+  if (!source.pushRemoteUrl) throw new Error("The pull request source repository is unavailable");
+  const matches = remotes.filter((remote) => remote.url === source.pushRemoteUrl);
+  if (matches.length > 1) throw new Error("The pull request source remote is ambiguous");
+  if (matches[0]) return matches[0];
+  // Adding a shared remote must not change the source workspace's forge identity,
+  // including a bookmarkless source that cannot have a publication mapping.
+  if (captureSourceRemote)
+    await withWorkspaceLifecycle(cwd, async () => {
+      const meta = await getJjChangeMeta(cwd, "@");
+      if (!meta) throw new Error("The source jj change is unavailable");
+      const captured = await importJjCheckpoint({
+        backingRoot: cwd,
+        head: { commitId: meta.commitId, changeId: meta.changeId },
+        paseoHome,
+      });
+      if (captured.publication || captured.forgeRemote) return;
+      await writeJjCheckpoint(
+        {
+          ...captured,
+          forgeRemote: { remoteName: selectedRemote.name, remoteUrl: selectedRemote.url },
+        },
+        paseoHome,
+      );
+    });
+  let name = `paseo-pr-${source.changeRequestNumber}`;
+  for (let suffix = 1; remotes.some((remote) => remote.name === name); suffix++)
+    name = `paseo-pr-${source.changeRequestNumber}-${suffix}`;
+  await runJj(["git", "remote", "add", name, source.pushRemoteUrl], { cwd });
+  // jj applies URL rewrites when listing remotes. Save the effective URL used
+  // by forge reads/push validation rather than the adapter's raw SSH spelling.
+  const updated = await getJjSnapshotFacts(cwd, { paseoHome });
+  const added = updated.isJj ? updated.remotes.find((remote) => remote.name === name) : undefined;
+  if (!added) throw new Error("The PR source remote disappeared during checkout");
+  return added;
 }
 
 /**
@@ -156,6 +344,7 @@ export async function createJjWorktree(options: {
   cwd: string;
   worktreeSlug: string;
   source: WorktreeSource;
+  forgeRepository?: ForgeRepositoryContext;
   runSetup?: boolean;
   onCreated?: (worktree: CreatedWorktree) => Promise<void>;
   logger?: Pick<Logger, "warn">;
@@ -206,7 +395,16 @@ async function createJjWorkspaceAtPath(
   // movement cannot shift the recorded comparison base.
   let baseRevset: string;
   let baseRefName: string;
-  if (source.kind === "branch-off") {
+  let prSource: Awaited<ReturnType<typeof prepareJjPrSource>> | undefined;
+  if (source.kind === "checkout-change-request") {
+    try {
+      prSource = await prepareJjPrSource(primaryRoot, source, options);
+    } catch (error) {
+      throw new JjWorkspaceSourceError(error);
+    }
+    baseRevset = prSource.base;
+    baseRefName = source.baseRefName;
+  } else if (source.kind === "branch-off") {
     baseRevset = source.baseBranch;
     baseRefName = source.baseBranch;
   } else {
@@ -221,7 +419,15 @@ async function createJjWorkspaceAtPath(
   // `jj workspace add` creates a new working-copy change on top of the base;
   // the destination directory is created by jj itself (verified on 0.45.1).
   await runJj(
-    ["workspace", "add", worktreePath, "--name", workspaceName, "--revision", pinnedBase],
+    [
+      "workspace",
+      "add",
+      worktreePath,
+      "--name",
+      workspaceName,
+      "--revision",
+      prSource?.head ?? pinnedBase,
+    ],
     { cwd: primaryRoot },
   );
 
@@ -229,29 +435,16 @@ async function createJjWorkspaceAtPath(
   let createdBookmark: { name: string; target: string } | undefined;
   try {
     writeJjWorkspaceIncarnation(worktreePath, randomUUID());
-    if (source.kind === "branch-off") {
-      // Workspace-owned FEATURE bookmark at the workspace head: the name the
-      // caller asked for (or the slug when none). The base bookmark is never
-      // created or advanced by this flow (plan §2/§6).
-      const desired = source.branchName?.trim();
-      const candidate = desired && desired.length > 0 ? desired : workspaceName;
-      const branchValidation = validateBranchSlug(candidate);
-      if (!branchValidation.valid) {
-        throw new Error(`Invalid branch name: ${branchValidation.error}`);
-      }
-      if (await hasJjBookmark(primaryRoot, candidate)) {
-        throw new Error(`Bookmark already exists: ${candidate}`);
-      }
-      // Created from the workspace so it lands on the workspace head (@ there).
-      await runJjWorkspaceSafe(["bookmark", "create", candidate], { cwd: worktreePath });
-      branchName = candidate;
-      const target = await readBookmarkTarget(primaryRoot, candidate);
-      if (!target) throw new Error(`Created bookmark ${candidate} has no unique target`);
-      createdBookmark = { name: candidate, target };
-    } else {
-      // Checkout semantics: the workspace sits at the existing bookmark's head;
-      // no new bookmark is created (mirrors `git worktree add <branch>`).
-      branchName = source.branchName;
+    if (source.kind === "checkout-branch") branchName = source.branchName;
+    else {
+      createdBookmark = await createJjFeatureBookmark(
+        primaryRoot,
+        worktreePath,
+        workspaceName,
+        source,
+        options.worktreeSlug,
+      );
+      branchName = createdBookmark.name;
     }
 
     writePaseoWorktreeMetadata(worktreePath, {
@@ -260,7 +453,37 @@ async function createJjWorkspaceAtPath(
       // Managed ownership (review fix 7): mutations advance exactly this
       // bookmark; derivation never substitutes for it.
       jjBookmark: branchName,
+      ...(source.kind === "checkout-change-request"
+        ? {
+            changeRequestLookupTarget: {
+              headRef: source.headRef,
+              changeRequestNumber: source.changeRequestNumber,
+              localBranchName: branchName,
+              ...(source.headRepositoryOwner
+                ? { headRepositoryOwner: source.headRepositoryOwner }
+                : {}),
+            },
+          }
+        : {}),
     });
+
+    if (prSource) {
+      const meta = await getJjChangeMeta(worktreePath, "@");
+      if (!meta) throw new Error("The PR workspace change is unavailable");
+      const checkpoint = await importJjCheckpoint({
+        backingRoot: worktreePath,
+        head: { commitId: meta.commitId, changeId: meta.changeId },
+        paseoHome: options.paseoHome,
+      });
+      await writeJjCheckpoint(
+        {
+          ...checkpoint,
+          comparison: { ...checkpoint.comparison, liveBase: prSource.liveBase },
+          publication: { ...prSource.publication, localBookmark: branchName },
+        },
+        options.paseoHome,
+      );
+    }
 
     await seedPaseoConfigFile({ sourceCwd: primaryRoot, targetCwd: worktreePath });
 
@@ -289,6 +512,34 @@ async function createJjWorkspaceAtPath(
     comparisonBaseRef: pinnedBase,
     ...(createdBookmark ? { jjCreatedBookmark: createdBookmark } : {}),
   };
+}
+
+async function createJjFeatureBookmark(
+  sourceRoot: string,
+  worktreePath: string,
+  workspaceName: string,
+  source: Extract<JjWorktreeSource, { kind: "branch-off" | "checkout-change-request" }>,
+  slug: string,
+): Promise<{ name: string; target: string }> {
+  const desired = source.kind === "branch-off" ? source.branchName?.trim() : slug;
+  let candidate = desired && desired.length > 0 ? desired : workspaceName;
+  if (source.kind === "checkout-change-request") {
+    const base = candidate.slice(0, 90);
+    for (let suffix = 1; await hasJjBookmark(sourceRoot, candidate); suffix++)
+      candidate = `${base}-${suffix}`;
+  }
+  const branchValidation = validateBranchSlug(candidate);
+  if (!branchValidation.valid) {
+    throw new Error(`Invalid branch name: ${branchValidation.error}`);
+  }
+  if (await hasJjBookmark(sourceRoot, candidate)) {
+    throw new Error(`Bookmark already exists: ${candidate}`);
+  }
+  // Created from the workspace so it lands on the workspace head (@ there).
+  await runJjWorkspaceSafe(["bookmark", "create", candidate], { cwd: worktreePath });
+  const target = await readBookmarkTarget(sourceRoot, candidate);
+  if (!target) throw new Error(`Created bookmark ${candidate} has no unique target`);
+  return { name: candidate, target };
 }
 
 export async function rollbackJjWorkspace(

@@ -107,6 +107,10 @@ Current change-request lookup uses two identities deliberately:
   selecting the newest terminal request by branch alone can silently attach an
   old promotion or feature request to new work.
 
+Checkout adapters must return the source clone URL for fork requests. Native jj fetch imports
+branches; forge PR/MR ref namespaces alone cannot supply the fork's change. Keep that source
+identity separate from the target repository used for lookup and comparison.
+
 Native PR creation publishes with jj before invoking the forge adapter. Pass the explicit
 `ForgeRepositoryContext` through create options and every CLI call: a secondary jj workspace
 can sit inside an unrelated Git checkout, so cwd discovery can target a different project.

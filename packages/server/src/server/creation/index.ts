@@ -202,6 +202,7 @@ export class CreationService {
         "directory_not_found",
         "source_required",
         "workspace_path_exists",
+        "workspace_source_unavailable",
       ].includes(code ?? "");
       const unknown =
         stage === "prompt" ||
