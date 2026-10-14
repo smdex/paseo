@@ -15,12 +15,16 @@ import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { getServerId } from "../support/helpers/server-id";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
 
-test.use({ e2eDaemonEnvironment: { PASEO_JJ_DISPATCH: "1" } });
+test.use({
+  // Pi catalog discovery loads user extensions, which can write into these temp checkouts.
+  e2eDaemonConfig: { version: 1, agents: { providers: { pi: { enabled: false } } } },
+});
 
 test("jj sibling creation shows pending, preserves collision errors, and retries once into the result", async ({
   page,
 }, testInfo) => {
   test.setTimeout(180_000);
+  expect(process.env.PASEO_JJ_DISPATCH).toBeUndefined();
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-e2e-jj-sibling-"));
   const repo = path.join(directory, "project");
   await mkdir(repo);

@@ -20,6 +20,10 @@ import {
 } from "@getpaseo/protocol/terminal-stream-protocol";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { APPLICATION_SOCKET_LEASE_MS } from "./websocket/physical-socket.js";
+import { isJjAvailable } from "../test-utils/jj.js";
+import { resetJjRuntimeCache, resolveJjRuntime } from "../utils/vcs-backend.js";
+
+const jjAvailable = isJjAvailable();
 
 type SocketListener = (...args: unknown[]) => void;
 
@@ -1161,6 +1165,44 @@ describe("relay external socket reconnect behavior", () => {
     expect(serverInfo.permissions).toEqual(DAEMON_PERMISSIONS);
     await server.close();
   });
+
+  test.skipIf(!jjAvailable)(
+    "advertises jj capabilities by default in initial server_info",
+    async () => {
+      const previousDispatch = process.env.PASEO_JJ_DISPATCH;
+      const previousDisable = process.env.PASEO_DISABLE_JJ;
+      delete process.env.PASEO_JJ_DISPATCH;
+      delete process.env.PASEO_DISABLE_JJ;
+      resetJjRuntimeCache();
+      let server: ReturnType<typeof createServer> | null = null;
+      try {
+        expect((await resolveJjRuntime()).ok).toBe(true);
+        server = createServer();
+        const serverInfo = await attachRelayAndHello({
+          server,
+          socket: new MockSocket(),
+          clientId: "cid-jj-default-capabilities",
+        });
+
+        expect(serverInfo.features?.checkoutJj).toBe(true);
+        expect(serverInfo.features?.checkoutJjCheckpoint).toBe(true);
+        expect(serverInfo.features?.checkoutJjPrCreate).toBe(true);
+        expect(serverInfo.features?.checkoutJjPrWorkspace).toBe(true);
+        expect(serverInfo.features?.checkoutJjPrMutations).toBe(true);
+        expect(serverInfo.features?.checkoutJjRewriteApproval).toBe(true);
+        expect(serverInfo.features?.checkoutJjFetchRebase).toBe(true);
+        expect(serverInfo.features?.checkoutJjIntegrate).toBe(true);
+        expect(serverInfo.features?.checkoutJjGraphSelections).toBe(true);
+      } finally {
+        await server?.close();
+        if (previousDispatch === undefined) delete process.env.PASEO_JJ_DISPATCH;
+        else process.env.PASEO_JJ_DISPATCH = previousDispatch;
+        if (previousDisable === undefined) delete process.env.PASEO_DISABLE_JJ;
+        else process.env.PASEO_DISABLE_JJ = previousDisable;
+        resetJjRuntimeCache();
+      }
+    },
+  );
 
   test("includes voice capabilities in initial server_info when speech readiness exists", async () => {
     const speechReadiness = createReadySpeechReadinessSnapshot();

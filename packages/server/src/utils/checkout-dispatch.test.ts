@@ -133,10 +133,23 @@ describe("checkout dispatch gate", () => {
       await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(JjUnavailableError);
     });
 
-    it.each(["0", undefined])("refuses detected jj when dispatch is %s", async (value) => {
+    it("routes detected jj by default when the opt-out is absent", async () => {
       const dir = scratchJj();
-      setEnv("PASEO_JJ_DISPATCH", value);
-      await expect(dispatchGetCheckoutStatus(dir)).rejects.toBeInstanceOf(JjUnavailableError);
+      setEnv("PASEO_JJ_DISPATCH", undefined);
+      resetJjRuntimeCache();
+      const status = await dispatchGetCheckoutStatus(dir);
+      expect(status.isGit).toBe(true);
+      if (status.isGit) expect(status.vcs).toBe("jj");
+      expect(isJjFeatureAvailable()).toBe(true);
+    });
+
+    it("refuses detected jj when dispatch is explicitly disabled", async () => {
+      const dir = scratchJj();
+      setEnv("PASEO_JJ_DISPATCH", "0");
+      await expect(dispatchGetCheckoutStatus(dir)).rejects.toMatchObject({
+        name: "JjUnavailableError",
+        message: expect.stringContaining("PASEO_JJ_DISPATCH=0"),
+      });
       await expect(dispatchRunStashList(dir)).rejects.toBeInstanceOf(JjUnavailableError);
       expect(isJjFeatureAvailable()).toBe(false);
     });
@@ -205,6 +218,11 @@ describe("checkout dispatch gate", () => {
 });
 
 describe("jj feature advertisement gate", () => {
+  it("is enabled by default when no opt-out is configured", () => {
+    setEnv("PASEO_JJ_DISPATCH", undefined);
+    expect(isJjDispatchEnabled()).toBe(true);
+  });
+
   it("is disabled while dispatch is off", () => {
     setEnv("PASEO_JJ_DISPATCH", "0");
     expect(isJjFeatureAvailable()).toBe(false);
