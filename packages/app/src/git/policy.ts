@@ -287,6 +287,7 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
       : getMergeBranchUnavailableMessage(input),
     icon: input.runtime["merge-branch"].icon,
     startsGroup: false,
+    closeOnSelect: input.isJj,
     handler: input.runtime["merge-branch"].handler,
   });
 
@@ -338,6 +339,8 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
     : [...REMOTE_ACTION_IDS];
   if (!input.isOnBaseBranch) {
     secondaryIds.push(...getFeatureActionIds(input));
+  } else if (input.isJj) {
+    secondaryIds.push("merge-branch");
   }
   if (input.isJj) {
     secondaryIds.push("new-change");
@@ -380,15 +383,8 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shipDefault === "pr" && canUsePullRequestActionAsShipDefault(input)) {
     return "pr";
   }
-  // Local merges are deferred on jj (plan §7) and never promote there.
-  if (!input.isJj) {
-    if (!input.isOnBaseBranch && input.aheadCount > 0) {
-      return "merge-branch";
-    }
-    if (!input.isOnBaseBranch && canMergeFromBase(input)) {
-      return "merge-from-base";
-    }
-  }
+  if ((input.isJj || !input.isOnBaseBranch) && input.aheadCount > 0) return "merge-branch";
+  if (!input.isJj && !input.isOnBaseBranch && canMergeFromBase(input)) return "merge-from-base";
   if (input.githubFeaturesEnabled && input.hasPullRequest && input.pullRequestUrl) {
     return "pr";
   }
@@ -425,7 +421,10 @@ function getPullRequestActionIds(filter: {
 function getFeatureActionIds(input: BuildGitActionsInput): GitActionId[] {
   // Native PR actions operate on the published request; local integration is separate.
   if (input.isJj) {
-    return getPullRequestActionIds({ roles: ["status", "direct", "auto"], input });
+    return [
+      "merge-branch",
+      ...getPullRequestActionIds({ roles: ["status", "direct", "auto"], input }),
+    ];
   }
   return [
     "merge-from-base",
@@ -746,7 +745,7 @@ function getMergeBranchUnavailableMessage(input: BuildGitActionsInput): string |
   if (!input.baseRefAvailable) {
     return i18n.t("workspace.git.actions.unavailable.mergeNoBase");
   }
-  if (input.hasUncommittedChanges) {
+  if (!input.isJj && input.hasUncommittedChanges) {
     return i18n.t("workspace.git.actions.unavailable.mergeDirty");
   }
   if (input.aheadCount === 0) {

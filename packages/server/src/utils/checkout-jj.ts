@@ -1,5 +1,8 @@
 import { resolve } from "node:path";
-import type { CheckoutFetchRebaseOutcome } from "@getpaseo/protocol/messages";
+import type {
+  CheckoutFetchRebaseOutcome,
+  CheckoutIntegrationOutcome,
+} from "@getpaseo/protocol/messages";
 import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import {
   ForgeRepositoryContextError,
@@ -25,7 +28,11 @@ import {
 import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import { parseAndHighlightDiff, parseDiff } from "../server/utils/diff-highlighter.js";
 import { isPaseoOwnedWorktreeCwd } from "./worktree.js";
-import { readPaseoWorktreeMetadata, updatePaseoWorktreeJjBookmark } from "./worktree-metadata.js";
+import {
+  readPaseoWorktreeMetadata,
+  updatePaseoWorktreeJjBookmark,
+  writePaseoWorktreeMetadataFile,
+} from "./worktree-metadata.js";
 import { detectVcsBackend, resolveJjRepoIdentity, type JjRepoIdentity } from "./vcs-backend.js";
 import {
   jjFilesetArg,
@@ -621,12 +628,11 @@ export function jjFactsToCheckoutSnapshotFacts(facts: JjSnapshotFacts): Checkout
 async function getJjAheadBehind(
   cwd: string,
   baseRef: string,
-  currentBranch: string,
   context?: JjCheckoutContext,
 ): Promise<AheadBehind | null> {
-  if (!baseRef || !currentBranch || baseRef === currentBranch) {
-    return null;
-  }
+  // Legacy metadata can name a removed base. Reads remain available; mutations
+  // require the base to resolve uniquely before advancing anything.
+  if (!baseRef || (await countRevset(cwd, `present(${baseRef})`, context)) !== 1) return null;
   const [ahead, behind] = await Promise.all([
     countRevset(cwd, `${baseRef}..@`, context),
     countRevset(cwd, `@..${baseRef}`, context),
@@ -768,10 +774,7 @@ export async function getJjStatus(
   const baseRef = jjFacts.resolvedBaseRef;
   const factsContext = { ...context, facts: jjFacts };
 
-  const aheadBehind =
-    baseRef && currentBranch
-      ? await getJjAheadBehind(cwd, baseRef, currentBranch, factsContext)
-      : null;
+  const aheadBehind = baseRef ? await getJjAheadBehind(cwd, baseRef, factsContext) : null;
   const upstreamStatus = await getJjUpstreamStatus(
     cwd,
     currentBranch,
@@ -1236,7 +1239,7 @@ export async function getJjRefDerivedState(
   const baseRef = jjFacts.resolvedBaseRef;
   const factsContext = { ...context, facts: jjFacts };
   const [aheadBehind, diffStat, upstreamStatus] = await Promise.all([
-    baseRef && currentBranch ? getJjAheadBehind(cwd, baseRef, currentBranch, factsContext) : null,
+    baseRef ? getJjAheadBehind(cwd, baseRef, factsContext) : null,
     getJjShortstat(cwd, factsContext),
     getJjUpstreamStatus(cwd, currentBranch, jjFacts.remotes, factsContext),
   ]);
@@ -2263,7 +2266,7 @@ export async function jjMoveBookmark(
   assertSafeJjRef(name, "bookmark");
   // `--from` mismatches exit 0 with "No bookmarks to update" (verified on
   // 0.45.1), so the guard must be verified, not trusted.
-  const bookmarkHere = `bookmarks.match("${name}").len() ++ "\\n"`;
+  const bookmarkHere = `local_bookmarks.filter(|bookmark| bookmark.name() == ${JSON.stringify(name)}).len() ++ "\\n"`;
   const before = await runJj(
     ["log", "--no-graph", "-r", options.fromRevset, "-T", bookmarkHere],
     { cwd },
@@ -2588,6 +2591,323 @@ export async function jjCreatePullRequest(
     });
     service.invalidate({ cwd, repository: published });
     return result;
+  });
+}
+
+export interface JjIntegrationIntent extends JjChangeIntent {
+  baseRef: string;
+  expectedCommitId?: string;
+  expectedBaseCommitId?: string;
+}
+export interface JjIntegrationResult extends Omit<JjMutationResult, "outcome"> {
+  baseCommitId: string;
+  integrationCommitId: string | null;
+  outcome: CheckoutIntegrationOutcome;
+}
+export class JjIntegrationApprovalRequiredError extends JjRewriteApprovalRequiredError {
+  constructor(
+    readonly source: JjChangeMeta,
+    readonly base: JjChangeMeta,
+    label: string,
+  ) {
+    super(
+      `Integrate change ${source.changeId} (${source.commitId}, ${source.description.trim() || "undescribed change"}) into ${label} at ${base.commitId}. Approve advancing this base to contain the selected work. Existing workspace heads are retained.`,
+    );
+    this.name = "JjIntegrationApprovalRequiredError";
+  }
+}
+interface PreparedJjIntegration {
+  bookmark: string | null;
+  alreadyIntegrated: boolean;
+  before: JjChangeMeta;
+  base: JjChangeMeta;
+  baseBookmark: string | null;
+  checkpoint: JjCheckpoint;
+}
+async function resolveJjIntegrationBase(
+  cwd: string,
+  checkpoint: JjCheckpoint,
+  baseRef: string,
+  owned: boolean,
+  context: JjCheckoutContext,
+): Promise<{ base: JjChangeMeta; baseBookmark: string | null; baseName: string }> {
+  const baseName = checkpoint.comparison.liveBase ?? baseRef;
+  const exactPin = baseName === "@" || baseName === "@-" || /^[0-9a-f]{40,64}$/.test(baseName);
+  const baseBookmark = exactPin ? null : baseName;
+  if (baseBookmark && !(await hasJjBookmark(cwd, baseBookmark, context)))
+    throw new JjCheckpointError(
+      "The named local base bookmark is missing. Restore it before integration.",
+    );
+  if (!baseBookmark && !owned)
+    throw new JjCheckpointError(
+      "An exact comparison base can only advance in its owned workspace.",
+    );
+  const base = await uniqueChange(
+    cwd,
+    baseBookmark
+      ? `bookmarks(exact:${JSON.stringify(baseBookmark)})`
+      : (checkpoint.comparison.pinnedCommitId ?? baseRef),
+    context,
+  );
+  return { base, baseBookmark, baseName };
+}
+async function prepareJjIntegration(
+  cwd: string,
+  intent: JjIntegrationIntent,
+  context: JjCheckoutContext,
+): Promise<PreparedJjIntegration> {
+  const facts = await getJjSnapshotFacts(cwd, context);
+  if (!facts.isJj) throw new JjCheckpointError("The jj workspace is unavailable.");
+  if (facts.workingCopy.untrackedPaths.length)
+    throw new JjCheckpointError(
+      `jj refused to snapshot ${facts.workingCopy.untrackedPaths.join(", ")}. Snapshot or ignore these files on the host, then retry.`,
+    );
+  const before = facts.workingCopy.meta;
+  if (before.changeId !== intent.expectedChangeId)
+    throw new JjCheckpointError(
+      "The selected change changed since this form opened. Reopen integration before continuing.",
+    );
+  if (intent.expectedCommitId !== undefined && intent.expectedCommitId !== before.commitId)
+    throw new JjCheckpointError(
+      "The selected change contents changed after capture. Reopen integration to review them.",
+    );
+  if (intent.baseRef !== facts.resolvedBaseRef)
+    throw new JjCheckpointError(
+      "The workspace base changed since this form opened. Reopen integration to review it.",
+    );
+  const checkpoint = await importJjCheckpoint({
+    backingRoot: cwd,
+    head: before,
+    paseoHome: context.paseoHome,
+  });
+  if (
+    checkpoint.operations.some(
+      (operation) =>
+        operation.status === "pending" || operation.status === "reconciliation_required",
+    )
+  )
+    throw new JjCheckpointError(
+      "A previous jj operation requires reconciliation before integration.",
+    );
+  if (checkpoint.metadata && !facts.paseoOwnedWorktree)
+    throw new JjCheckpointError("Integration cannot advance metadata for an unowned workspace.");
+  const { base, baseBookmark, baseName } = await resolveJjIntegrationBase(
+    cwd,
+    checkpoint,
+    intent.baseRef,
+    facts.paseoOwnedWorktree,
+    context,
+  );
+  if (intent.expectedBaseCommitId !== undefined && intent.expectedBaseCommitId !== base.commitId)
+    throw new JjCheckpointError(
+      "The base moved after capture. Reopen integration to review the new base.",
+    );
+  const alreadyIntegrated =
+    (await countRevset(cwd, `${before.commitId} & ::${base.commitId}`, context)) > 0;
+  const approved =
+    intent.acknowledgeRewrites && intent.expectedBaseCommitId && intent.expectedCommitId;
+  if (!alreadyIntegrated && !approved)
+    throw new JjIntegrationApprovalRequiredError(before, base, baseBookmark ?? baseName);
+  return {
+    before,
+    base,
+    baseBookmark,
+    bookmark: jjOwnedBookmark(facts),
+    checkpoint,
+    alreadyIntegrated,
+  };
+}
+async function assertJjIntegrationSelection(
+  cwd: string,
+  before: JjChangeMeta,
+  context: JjCheckoutContext,
+): Promise<void> {
+  const selected = await uniqueChange(cwd, "@", context);
+  if (selected.changeId !== before.changeId || selected.commitId !== before.commitId)
+    throw new JjCheckpointError(
+      "The captured working-copy selection changed during integration. Reconcile the retained heads; no undo was attempted.",
+    );
+}
+async function saveJjIntegratedBase(
+  cwd: string,
+  prepared: PreparedJjIntegration,
+  integrated: JjChangeMeta,
+  context: JjCheckoutContext,
+): Promise<JjCheckpoint> {
+  const { base, baseBookmark, before } = prepared;
+  await assertJjIntegrationSelection(cwd, before, context);
+  validateJjCheckpoint(prepared.checkpoint, cwd);
+  if (baseBookmark)
+    await jjMoveBookmark(
+      cwd,
+      baseBookmark,
+      { fromRevset: base.commitId, toRevset: integrated.commitId },
+      context,
+    );
+  // Preserve runtime metadata while advancing only this workspace's comparison
+  // pin. Rewriting its parent would also rewrite unrelated workspace descendants.
+  validateJjCheckpoint(prepared.checkpoint, cwd);
+  const metadata = readPaseoWorktreeMetadata(cwd);
+  const nextMetadata = metadata ? { ...metadata, baseRef: integrated.commitId } : null;
+  const checkpoint = await writeJjCheckpoint(
+    {
+      ...prepared.checkpoint,
+      metadata: nextMetadata,
+      comparison: { pinnedCommitId: integrated.commitId, liveBase: baseBookmark },
+    },
+    context.paseoHome,
+  );
+  if (nextMetadata) writePaseoWorktreeMetadataFile(cwd, nextMetadata);
+  validateJjCheckpoint(checkpoint, cwd);
+  await assertJjIntegrationSelection(cwd, before, context);
+  if (baseBookmark) await assertCapturedBookmark(cwd, baseBookmark, integrated, context);
+  return checkpoint;
+}
+interface JjIntegrationMergePlan extends Pick<PreparedJjIntegration, "before" | "base"> {
+  beforeOperation: string;
+}
+async function createJjIntegratedChange(
+  cwd: string,
+  plan: JjIntegrationMergePlan,
+  context: JjCheckoutContext,
+): Promise<JjChangeMeta> {
+  const { before, base, beforeOperation } = plan;
+  if (await countRevset(cwd, `${base.commitId} & ::${before.commitId}`, context)) return before;
+  await runJj(
+    [
+      "new",
+      "--no-edit",
+      ...advanceBookmarkArgs(null),
+      base.commitId,
+      before.commitId,
+      "-m",
+      `Integrate ${before.changeId.slice(0, 12)} into workspace base`,
+    ],
+    { cwd },
+    context,
+  );
+  // Exclude previous attempts rather than adopting a pre-existing or ambiguous merge.
+  return uniqueChange(
+    cwd,
+    `(children(${base.commitId}) & children(${before.commitId})) ~ at_operation(${beforeOperation}, all())`,
+    context,
+  );
+}
+
+export async function jjIntegrateIntoBase(
+  cwd: string,
+  intent: JjIntegrationIntent,
+  context?: JjCheckoutContext,
+): Promise<JjIntegrationResult> {
+  const root = await jjWorkspaceRoot(cwd);
+  return withWorkspaceLifecycle(root, async () => {
+    const freshContext = {
+      ...context,
+      facts: null,
+      signal: context?.signal ?? new AbortController().signal,
+    };
+    const prepared = await prepareJjIntegration(root, intent, freshContext);
+    const { before, base } = prepared;
+    const id = randomUUID();
+    const pins = await retainJjMutationHeads(root, [before, base], id, freshContext);
+    const operation: JjCheckpointOperation = {
+      id,
+      kind: "integrate",
+      before,
+      target: base,
+      beforeOperation: await getJjOperationId(root, freshContext),
+      recoveryPin: pins[0]!,
+      affectedHeads: [],
+      status: "pending",
+      after: null,
+      afterOperation: null,
+      error: null,
+    };
+    prepared.checkpoint = await writeJjCheckpoint(
+      {
+        ...prepared.checkpoint,
+        recoveryPins: [...prepared.checkpoint.recoveryPins, ...pins],
+        operations: [...prepared.checkpoint.operations, operation],
+      },
+      freshContext.paseoHome,
+    );
+    try {
+      const integrated = prepared.alreadyIntegrated
+        ? base
+        : await createJjIntegratedChange(
+            root,
+            { before, base, beforeOperation: operation.beforeOperation },
+            freshContext,
+          );
+      const resultPins = await retainJjMutationHeads(
+        root,
+        [integrated],
+        `${id}-result`,
+        freshContext,
+      );
+      prepared.checkpoint = await writeJjCheckpoint(
+        {
+          ...prepared.checkpoint,
+          recoveryPins: [...prepared.checkpoint.recoveryPins, ...resultPins],
+        },
+        freshContext.paseoHome,
+      );
+      await assertJjIntegrationSelection(root, before, freshContext);
+      validateJjCheckpoint(prepared.checkpoint, root);
+      if (await countRevset(root, `${integrated.commitId} & conflicts()`, freshContext)) {
+        if (prepared.baseBookmark)
+          await assertCapturedBookmark(root, prepared.baseBookmark, base, freshContext);
+        operation.status = "refused";
+        operation.after = before;
+        operation.afterOperation = await getJjOperationId(root, freshContext);
+        operation.error = `Integration has conflicts in retained change ${integrated.changeId} (${integrated.commitId}). Resolve that change on the host, then reopen integration. The base was not advanced.`;
+        await writeJjCheckpoint(
+          {
+            ...prepared.checkpoint,
+            operations: [...prepared.checkpoint.operations.slice(0, -1), operation],
+          },
+          freshContext.paseoHome,
+        );
+        return {
+          changeId: before.changeId,
+          commitId: before.commitId,
+          bookmark: prepared.bookmark,
+          baseCommitId: base.commitId,
+          integrationCommitId: integrated.commitId,
+          outcome: "conflicts",
+        };
+      }
+      prepared.checkpoint = await saveJjIntegratedBase(root, prepared, integrated, freshContext);
+      operation.status = "completed";
+      operation.after = before;
+      operation.afterOperation = await getJjOperationId(root, freshContext);
+      await writeJjCheckpoint(
+        {
+          ...prepared.checkpoint,
+          selection: before,
+          operations: [...prepared.checkpoint.operations.slice(0, -1), operation],
+        },
+        freshContext.paseoHome,
+      );
+      return {
+        changeId: before.changeId,
+        commitId: before.commitId,
+        bookmark: prepared.bookmark,
+        baseCommitId: integrated.commitId,
+        integrationCommitId: integrated.commitId,
+        outcome: prepared.alreadyIntegrated ? "noop" : "integrated",
+      };
+    } catch (error) {
+      await reconcileJjMutationFailure(root, operation, before, error, freshContext);
+      await writeJjCheckpoint(
+        {
+          ...prepared.checkpoint,
+          operations: [...prepared.checkpoint.operations.slice(0, -1), operation],
+        },
+        freshContext.paseoHome,
+      );
+      throw error;
+    }
   });
 }
 

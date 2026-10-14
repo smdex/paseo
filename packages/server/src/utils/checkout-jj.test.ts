@@ -24,6 +24,7 @@ import {
   resolveJjBranchCheckout,
   jjPull,
   jjFetchAndRebase,
+  jjIntegrateIntoBase,
   jjPush,
   jjCreatePullRequest,
   jjRenameBookmark,
@@ -683,10 +684,9 @@ describeIfJj("checkout-jj dispatch helpers", () => {
     writeFileSync(join(fixture.repoDir, "a.txt"), "a\nmore\n");
     fixture.jj(["new", "-m", "second feature"]);
 
-    // Working directly on the base bookmark: same-name guard, mirroring git's
-    // getAheadBehind (base === branch → null).
+    // A derived ancestor bookmark does not make the working-copy change the base.
     const onBase = await getJjRefDerivedState(fixture.repoDir);
-    expect(onBase.aheadBehind).toBeNull();
+    expect(onBase.aheadBehind).toEqual({ ahead: 2, behind: 0 });
 
     // A distinct workspace bookmark derives counts above the base.
     fixture.jj(["bookmark", "create", "feature-z", "-r", "@"]);
@@ -2507,5 +2507,266 @@ describeIfJj("fetch all remotes and rebase", () => {
     }
     expect(readFileSync(join(fixture.repoDir, "first.txt"), "utf8")).toBe("first\n");
     expect(readFileSync(join(fixture.repoDir, "trunk.txt"), "utf8")).toBe("trunk\n");
+  });
+});
+
+describeIfJj("integrate native work into its base", () => {
+  it.each(["base", "selection"])(
+    "preserves an external %s change during a divergent integration",
+    async (race) => {
+      const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+      expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+      writeFileSync(join(fixture.repoDir, "selected.txt"), "selected\n");
+      const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      expect(fixture.jj(["new", "-r", "main", "-m", "upstream"]).status).toBe(0);
+      writeFileSync(join(fixture.repoDir, "upstream.txt"), "upstream\n");
+      const base = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+      expect(fixture.jj(["new", "-r", "main", "-m", "external winner"]).status).toBe(0);
+      const winner = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      expect(fixture.jj(["edit", selected.changeId]).status).toBe(0);
+      let injected = false;
+      const context = {
+        paseoHome: join(fixture.dir, "home"),
+        runJjCommand: async (...args: Parameters<typeof executeJjCommand>) => {
+          const result = await executeJjCommand(...args);
+          if (!injected && args[0].includes("--no-edit")) {
+            injected = true;
+            expect(
+              fixture.jj(
+                race === "base"
+                  ? ["bookmark", "set", "main", "-r", winner.commitId]
+                  : ["edit", winner.changeId],
+              ).status,
+            ).toBe(0);
+          }
+          return result;
+        },
+      };
+      await expect(
+        jjIntegrateIntoBase(
+          fixture.repoDir,
+          {
+            baseRef: "main",
+            expectedChangeId: selected.changeId,
+            expectedCommitId: selected.commitId,
+            expectedBaseCommitId: base.commitId,
+            acknowledgeRewrites: true,
+          },
+          context,
+        ),
+      ).rejects.toThrow(race === "base" ? "expected revision" : "selection changed");
+      expect(injected).toBe(true);
+      expect((await getJjChangeMeta(fixture.repoDir, "main"))!.commitId).toBe(
+        race === "base" ? winner.commitId : base.commitId,
+      );
+      expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(
+        race === "selection" ? winner.commitId : selected.commitId,
+      );
+      const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+      const checkpoint = (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!;
+      expect(checkpoint.operations.at(-1)?.status).toBe("reconciliation_required");
+      expect(checkpoint.recoveryPins.length).toBeGreaterThanOrEqual(3);
+    },
+  );
+
+  it.each(["@-", "exact"])(
+    "advances only the managed %s comparison pin without rewriting either workspace",
+    async (baseLabel) => {
+      const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+      const parent = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      const worktreesRoot = join(fixture.dir, "worktrees");
+      const workspacePath = join(worktreesRoot, "project", "work");
+      mkdirSync(dirname(workspacePath), { recursive: true });
+      expect(
+        fixture.jj(["workspace", "add", "-r", parent.commitId, workspacePath, "--name", "work"])
+          .status,
+      ).toBe(0);
+      writePaseoWorktreeMetadata(workspacePath, {
+        baseRefName: baseLabel === "exact" ? parent.commitId : baseLabel,
+        baseRef: parent.commitId,
+        jjBookmark: "feature",
+      });
+      expect(fixture.jj(["bookmark", "create", "feature"], workspacePath).status).toBe(0);
+      writeFileSync(join(workspacePath, "selected.txt"), "selected\n");
+      const selected = (await getJjChangeMeta(workspacePath, "@"))!;
+      const result = await jjIntegrateIntoBase(
+        workspacePath,
+        {
+          baseRef: parent.commitId,
+          expectedChangeId: selected.changeId,
+          expectedCommitId: selected.commitId,
+          expectedBaseCommitId: parent.commitId,
+          acknowledgeRewrites: true,
+        },
+        { worktreesRoot, paseoHome: join(fixture.dir, "home") },
+      );
+      expect(result).toMatchObject({
+        outcome: "integrated",
+        baseCommitId: selected.commitId,
+        bookmark: "feature",
+      });
+      expect(readPaseoWorktreeMetadata(workspacePath)).toMatchObject({
+        baseRef: selected.commitId,
+        baseRefName: baseLabel === "exact" ? parent.commitId : baseLabel,
+        jjBookmark: "feature",
+      });
+      expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(parent.commitId);
+      expect((await getJjChangeMeta(workspacePath, "@"))!.commitId).toBe(selected.commitId);
+      expect(readFileSync(join(workspacePath, "selected.txt"), "utf8")).toBe("selected\n");
+    },
+  );
+
+  it("retains a conflicting merge for recovery and leaves the base and selected files unchanged", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "base.txt"), "selected\n");
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(fixture.jj(["new", "-r", "main", "-m", "base advancement"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "base.txt"), "upstream\n");
+    const base = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+    expect(fixture.jj(["edit", selected.changeId]).status).toBe(0);
+    const result = await jjIntegrateIntoBase(
+      fixture.repoDir,
+      {
+        baseRef: "main",
+        expectedChangeId: selected.changeId,
+        expectedCommitId: selected.commitId,
+        expectedBaseCommitId: base.commitId,
+        acknowledgeRewrites: true,
+      },
+      { paseoHome: join(fixture.dir, "home") },
+    );
+    expect(result.outcome).toBe("conflicts");
+    expect(result.baseCommitId).toBe(base.commitId);
+    expect(result.integrationCommitId).not.toBeNull();
+    expect(
+      fixture
+        .jj(["log", "--no-graph", "-r", result.integrationCommitId!, "-T", "conflict"])
+        .stdout.trim(),
+    ).toBe("true");
+    expect((await getJjChangeMeta(fixture.repoDir, "main"))!.commitId).toBe(base.commitId);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(selected.commitId);
+    expect(readFileSync(join(fixture.repoDir, "base.txt"), "utf8")).toBe("selected\n");
+  });
+
+  it("requires explicit typed approval of both captured heads and reports an already-integrated no-op", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const base = (await getJjChangeMeta(fixture.repoDir, "main"))!;
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const refused = await jjIntegrateIntoBase(
+      fixture.repoDir,
+      { baseRef: "main", expectedChangeId: selected.changeId },
+      context,
+    ).catch(toCheckoutError);
+    expect(refused).toMatchObject({
+      code: "NOT_ALLOWED",
+      reason: "rewrite_approval_required",
+      message: expect.stringContaining(base.commitId),
+    });
+    expect((await getJjChangeMeta(fixture.repoDir, "main"))!.commitId).toBe(base.commitId);
+    await jjIntegrateIntoBase(
+      fixture.repoDir,
+      {
+        baseRef: "main",
+        expectedChangeId: selected.changeId,
+        expectedCommitId: selected.commitId,
+        expectedBaseCommitId: base.commitId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    const result = await jjIntegrateIntoBase(
+      fixture.repoDir,
+      { baseRef: "main", expectedChangeId: selected.changeId },
+      context,
+    );
+    expect(result.outcome).toBe("noop");
+    expect(result.baseCommitId).toBe(selected.commitId);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(selected.commitId);
+  });
+
+  it("merges divergent base and selected work into the base while preserving the selected working copy", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["describe", "-m", "selected work"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "selected.txt"), "selected\n");
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(fixture.jj(["new", "-r", "main", "-m", "base advancement"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "upstream.txt"), "upstream\n");
+    const base = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+    expect(fixture.jj(["edit", selected.changeId]).status).toBe(0);
+    const result = await jjIntegrateIntoBase(
+      fixture.repoDir,
+      {
+        baseRef: "main",
+        expectedChangeId: selected.changeId,
+        expectedCommitId: selected.commitId,
+        expectedBaseCommitId: base.commitId,
+        acknowledgeRewrites: true,
+      },
+      { paseoHome: join(fixture.dir, "home") },
+    );
+    expect(result.outcome).toBe("integrated");
+    const integrated = (await getJjChangeMeta(fixture.repoDir, "main"))!;
+    expect(integrated.commitId).toBe(result.baseCommitId);
+    expect(integrated.parents.sort()).toEqual([base.commitId, selected.commitId].sort());
+    expect(fixture.jj(["file", "show", "-r", integrated.commitId, "selected.txt"]).stdout).toBe(
+      "selected\n",
+    );
+    expect(fixture.jj(["file", "show", "-r", integrated.commitId, "upstream.txt"]).stdout).toBe(
+      "upstream\n",
+    );
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(selected.commitId);
+    expect(fixture.jj(["file", "list", "-r", "@"]).stdout.trim().split("\n")).toEqual([
+      "base.txt",
+      "selected.txt",
+    ]);
+  });
+
+  it("advances the named base to include selected work without changing either workspace head or files", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["describe", "-m", "selected work"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "selected.txt"), "selected\n");
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const base = (await getJjChangeMeta(fixture.repoDir, "main"))!;
+    const sibling = join(fixture.dir, "sibling");
+    expect(fixture.jj(["workspace", "add", "-r", "main", sibling]).status).toBe(0);
+    writeFileSync(join(sibling, "sibling.txt"), "other workspace\n");
+    const unrelated = (await getJjChangeMeta(sibling, "@"))!;
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const result = await jjIntegrateIntoBase(
+      fixture.repoDir,
+      {
+        baseRef: "main",
+        expectedChangeId: selected.changeId,
+        expectedCommitId: selected.commitId,
+        expectedBaseCommitId: base.commitId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(result.outcome).toBe("integrated");
+    expect(result.baseCommitId).toBe(selected.commitId);
+    expect((await getJjChangeMeta(fixture.repoDir, "main"))!.commitId).toBe(selected.commitId);
+    expect(await getJjChangeMeta(fixture.repoDir, "@")).toMatchObject({
+      changeId: selected.changeId,
+      commitId: selected.commitId,
+      description: selected.description,
+      parents: selected.parents,
+    });
+    expect(await getJjChangeMeta(sibling, "@")).toMatchObject({
+      changeId: unrelated.changeId,
+      commitId: unrelated.commitId,
+      description: unrelated.description,
+      parents: unrelated.parents,
+    });
+    expect(readFileSync(join(fixture.repoDir, "selected.txt"), "utf8")).toBe("selected\n");
+    expect(readFileSync(join(sibling, "sibling.txt"), "utf8")).toBe("other workspace\n");
   });
 });

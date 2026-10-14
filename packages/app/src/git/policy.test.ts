@@ -206,6 +206,7 @@ describe("git-actions-policy", () => {
     expect(jjActions.secondary.map((action) => action.id)).toEqual([
       "pull",
       "push",
+      "merge-branch",
       "new-change",
       "archive-workspace",
     ]);
@@ -235,15 +236,23 @@ describe("git-actions-policy", () => {
     });
   });
 
-  it("hides deferred merge actions on jj checkouts", () => {
+  it("exposes native integration with captured dirty snapshots and a derived base bookmark", () => {
     const base = { hasRemote: true, isOnBaseBranch: false, aheadCount: 2 } as const;
     const gitActions = buildGitActions(createInput({ ...base, shipDefault: "merge" }));
-    const jjActions = buildGitActions(createInput({ ...base, shipDefault: "merge", isJj: true }));
+    const jjActions = buildGitActions(
+      createInput({ ...base, shipDefault: "merge", isJj: true, isOnBaseBranch: true }),
+    );
 
     expect(gitActions.primary).toMatchObject({ id: "merge-branch" });
     expect(gitActions.secondary.map((action) => action.id)).toContain("merge-branch");
-    expect(jjActions.primary?.id).not.toBe("merge-branch");
-    expect(jjActions.secondary.map((action) => action.id)).not.toContain("merge-branch");
+    expect(jjActions.primary).toMatchObject({ id: "merge-branch", closeOnSelect: true });
+    expect(jjActions.secondary.map((action) => action.id)).toContain("merge-branch");
+    const dirtyNative = buildGitActions(
+      createInput({ ...base, isJj: true, hasUncommittedChanges: true }),
+    );
+    expect(
+      dirtyNative.secondary.find((action) => action.id === "merge-branch")?.unavailableMessage,
+    ).toBeUndefined();
     expect(jjActions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
   });
 
@@ -1191,6 +1200,8 @@ it("offers native published PR merge independently of local jj dirtiness or ahea
     disabled: false,
     closeOnSelect: true,
   });
-  expect(actions.secondary.map((action) => action.id)).not.toContain("merge-branch");
+  expect(actions.secondary.find((action) => action.id === "merge-branch")).toMatchObject({
+    unavailableMessage: i18n.t("workspace.git.actions.unavailable.mergeNothing"),
+  });
   expect(actions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
 });

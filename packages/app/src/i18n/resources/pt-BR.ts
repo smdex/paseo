@@ -795,6 +795,14 @@ export const ptBR: TranslationResources = {
           pending: "Fazendo commit...",
           success: "Commit concluído",
         },
+        integrateBase: {
+          pending: "Integrando na base…",
+          approve: "Aprovar integração",
+          detail:
+            "Integre a alteração selecionada em {{base}}. A cópia de trabalho selecionada e as revisões dos outros espaços permanecem inalteradas.",
+          integrated: "A base agora contém o trabalho selecionado.",
+          noop: "A base já contém o trabalho selecionado.",
+        },
         fetchRebase: {
           label: "Buscar e rebasear",
           pending: "Buscando e rebaseando…",

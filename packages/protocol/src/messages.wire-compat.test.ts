@@ -9,6 +9,7 @@ import {
   CheckoutForgeSetAutoMergeRequestSchema,
   CheckoutEditChangeResponseSchema,
   CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
   ServerInfoStatusPayloadSchema,
@@ -670,4 +671,45 @@ test("selected native PR command identities are optional across wire versions", 
       expectedPullRequest: identity,
     }),
   ).toEqual(auto);
+});
+
+test("native integration retains optional captured heads and distinct outcomes in generated validation", () => {
+  const legacy = {
+    type: "checkout.jj.integrate_base.response",
+    payload: {
+      cwd: "/native",
+      requestId: "integration",
+      success: false,
+      changeId: null,
+      commitId: null,
+      bookmark: null,
+      error: { code: "NOT_ALLOWED", message: "Review native integration" },
+    },
+  };
+  expect(CheckoutIntegrateBaseResponseSchema.parse(legacy)).toEqual(legacy);
+  for (const outcome of ["integrated", "noop", "conflicts"]) {
+    const response = {
+      ...legacy,
+      payload: {
+        ...legacy.payload,
+        changeId: "selected",
+        commitId: "source",
+        baseCommitId: "base",
+        integrationCommitId: "merge",
+        outcome,
+      },
+    };
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+    const frame = { type: "session", message: response };
+    expect(validateWSOutboundMessage(frame)).toEqual({ success: true, data: frame });
+  }
+  expect(
+    ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "host",
+      hostname: null,
+      version: null,
+      features: { checkoutJjIntegrate: true },
+    }).features?.checkoutJjIntegrate,
+  ).toBe(true);
 });

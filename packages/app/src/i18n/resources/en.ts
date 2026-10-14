@@ -786,6 +786,14 @@ export const en = {
           pending: "Committing...",
           success: "Committed",
         },
+        integrateBase: {
+          pending: "Integrating into base…",
+          approve: "Approve integration",
+          detail:
+            "Integrate the selected change into {{base}}. The selected working copy and other workspace heads remain unchanged.",
+          integrated: "The base now contains the selected work.",
+          noop: "The base already contains the selected work.",
+        },
         fetchRebase: {
           label: "Fetch and rebase",
           pending: "Fetching and rebasing…",

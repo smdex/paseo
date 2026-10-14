@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Field, FormTextInput } from "@/components/ui/form-field";
@@ -154,6 +155,10 @@ export function JjChangeForm({
         if (result.error) throw new CheckoutOperationError(result.error);
         if (!result.success) throw new Error("New change did not complete");
       },
+      integrate: async (input) => {
+        if (!client) throw new Error("Host disconnected");
+        return client.integrateIntoBase(input);
+      },
       fetchAndRebase: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.fetchAndRebase(input);
@@ -179,6 +184,7 @@ export function JjChangeForm({
       edit: "workspace.git.actions.editChange.label",
       new: "workspace.git.actions.newChange.label",
       "fetch-rebase": "workspace.git.actions.fetchRebase.label",
+      integrate: "workspace.git.actions.mergeBranch.label",
     }[snapshot.mode],
   );
   const header = useMemo(() => ({ title }), [title]);
@@ -192,23 +198,7 @@ export function JjChangeForm({
     if (model.getState().status !== "pending") onClose();
   }, [model, onClose]);
   const pending = state.status === "pending";
-  let submitLabel = title;
-  if (pending && snapshot.mode === "fetch-rebase")
-    submitLabel = t("workspace.git.actions.fetchRebase.pending");
-  else if (pending)
-    submitLabel = t(
-      snapshot.mode === "new"
-        ? "workspace.git.actions.newChange.pending"
-        : "workspace.git.actions.jj.saving",
-    );
-  else if (state.needsRewriteApproval)
-    submitLabel = t("workspace.git.actions.jj.approveRewrite", {
-      defaultValue: "Approve native rewrite",
-    });
-  let successDescription = t("workspace.git.actions.jj.saved");
-  if (snapshot.mode === "new") successDescription = t("workspace.git.actions.newChange.success");
-  if (snapshot.mode === "fetch-rebase" && state.outcome)
-    successDescription = t(`workspace.git.actions.fetchRebase.${state.outcome}`);
+  const { submitLabel, successDescription } = getJjChangeFormLabels(state, title, t);
   return (
     <AdaptiveModalSheet visible onClose={close} header={header}>
       <View style={styles.form} testID="jj-change-form">
@@ -216,10 +206,15 @@ export function JjChangeForm({
         <Alert
           variant="warning"
           size={size}
-          description={t("workspace.git.actions.jj.rewriteWarning")}
+          description={
+            snapshot.mode === "integrate"
+              ? t("workspace.git.actions.integrateBase.detail", { base: snapshot.baseRef })
+              : t("workspace.git.actions.jj.rewriteWarning")
+          }
           testID="jj-rewrite-warning"
         />
-        {snapshot.mode === "fetch-rebase" && snapshot.description ? (
+        {(snapshot.mode === "fetch-rebase" || snapshot.mode === "integrate") &&
+        snapshot.description ? (
           <Text style={styles.identity}>{snapshot.description}</Text>
         ) : null}
         {snapshot.mode === "fetch-rebase" ? (
@@ -280,6 +275,34 @@ interface JjChangeHistoryProps {
   size: "sm" | "md";
   selectChange: ReturnType<typeof openJjChangeForm>["selectChange"];
 }
+function getJjChangeFormLabels(state: JjChangeFormState, title: string, t: TFunction) {
+  const pending = state.status === "pending";
+  let submitLabel = title;
+  if (pending && state.mode === "integrate")
+    submitLabel = t("workspace.git.actions.integrateBase.pending");
+  else if (pending && state.mode === "fetch-rebase")
+    submitLabel = t("workspace.git.actions.fetchRebase.pending");
+  else if (pending)
+    submitLabel = t(
+      state.mode === "new"
+        ? "workspace.git.actions.newChange.pending"
+        : "workspace.git.actions.jj.saving",
+    );
+  else if (state.needsRewriteApproval && state.mode === "integrate")
+    submitLabel = t("workspace.git.actions.integrateBase.approve");
+  else if (state.needsRewriteApproval)
+    submitLabel = t("workspace.git.actions.jj.approveRewrite", {
+      defaultValue: "Approve native rewrite",
+    });
+  let successDescription = t("workspace.git.actions.jj.saved");
+  if (state.mode === "new") successDescription = t("workspace.git.actions.newChange.success");
+  if (state.mode === "fetch-rebase" && state.outcome)
+    successDescription = t(`workspace.git.actions.fetchRebase.${state.outcome}`);
+  if (state.mode === "integrate" && state.integrationOutcome)
+    successDescription = t(`workspace.git.actions.integrateBase.${state.integrationOutcome}`);
+  return { submitLabel, successDescription };
+}
+
 function JjChangeHistory({ snapshot, state, size, selectChange }: JjChangeHistoryProps) {
   const { t } = useTranslation();
   const commits = useCheckoutCommitsQuery({

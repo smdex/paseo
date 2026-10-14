@@ -795,6 +795,14 @@ export const ja: TranslationResources = {
           pending: "コミット中...",
           success: "コミットしました",
         },
+        integrateBase: {
+          pending: "ベースに統合中…",
+          approve: "統合を承認",
+          detail:
+            "選択した変更を {{base}} に統合します。選択した作業コピーと他のワークスペースのリビジョンは変わりません。",
+          integrated: "選択した作業がベースに含まれるようになりました。",
+          noop: "選択した作業はすでにベースに含まれています。",
+        },
         fetchRebase: {
           label: "取得してリベース",
           pending: "取得してリベース中…",
