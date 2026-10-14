@@ -797,6 +797,14 @@ export const ko: TranslationResources = {
           pending: "커밋하는 중...",
           success: "커밋됨",
         },
+        integrateBase: {
+          pending: "베이스에 통합 중…",
+          approve: "통합 승인",
+          detail:
+            "선택한 변경을 {{base}}에 통합합니다. 선택한 작업 복사본과 다른 작업 공간의 리비전은 그대로 유지됩니다.",
+          integrated: "베이스에 선택한 작업이 포함되었습니다.",
+          noop: "베이스에 선택한 작업이 이미 포함되어 있습니다.",
+        },
         fetchRebase: {
           label: "가져오기 및 리베이스",
           pending: "가져오기 및 리베이스 중…",

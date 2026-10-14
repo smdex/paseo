@@ -8242,3 +8242,77 @@ test.each([false, true])(
     expect(mock.sent).toEqual([]);
   },
 );
+
+test("native integration refuses hosts without its capability before sending", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-integrate",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.integrateIntoBase({ cwd: "/native", baseRef: "main", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host to integrate jj work into its base.");
+  expect(mock.sent).toEqual([]);
+});
+
+test.each(["integrated", "noop", "conflicts"] as const)(
+  "native integration correlates captured source/base commits and %s outcome",
+  async (outcome) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "jj-integrate",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({
+      features: {
+        checkoutJjCheckpoint: true,
+        checkoutJjRewriteApproval: true,
+        checkoutJjIntegrate: true,
+      },
+    });
+    await connecting;
+    const input = {
+      cwd: "/native",
+      baseRef: "main",
+      expectedChangeId: "captured",
+      expectedCommitId: "source-commit",
+      expectedBaseCommitId: "base-commit",
+      acknowledgeRewrites: true,
+      requestId: "integrate",
+    };
+    const result = client.integrateIntoBase(input);
+    expect(parseSentFrame(mock.sent[0])).toEqual({
+      type: "checkout.jj.integrate_base.request",
+      ...input,
+    });
+    const payload = {
+      cwd: "/native",
+      requestId: "integrate",
+      success: outcome !== "conflicts",
+      changeId: "captured",
+      commitId: "source-commit",
+      bookmark: "feature",
+      baseCommitId: "integrated-base",
+      integrationCommitId: "retained-merge",
+      outcome,
+      error:
+        outcome === "conflicts"
+          ? { code: "MERGE_CONFLICT", message: "Resolve retained-merge on the host" }
+          : null,
+    };
+    mock.triggerMessage(
+      wrapSessionMessage({ type: "checkout.jj.integrate_base.response", payload }),
+    );
+    expect(await result).toEqual(payload);
+  },
+);
