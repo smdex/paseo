@@ -1170,3 +1170,27 @@ it("offers Fetch on dirty jj with unknown or zero behind without promoting Sync"
     expect(actions.secondary.map((action) => action.id)).not.toContain("pull-and-push");
   }
 });
+
+it("offers native published PR merge independently of local jj dirtiness or ahead counts", () => {
+  const actions = buildGitActions(
+    createInput({
+      isJj: true,
+      isOnBaseBranch: false,
+      hasRemote: true,
+      hasPullRequest: true,
+      pullRequestUrl: "https://github.com/upstream/project/pull/42",
+      pullRequestState: "open",
+      pullRequestMergeable: "MERGEABLE",
+      pullRequestGithub: githubStatus(),
+      hasUncommittedChanges: true,
+      aheadCount: 0,
+      aheadOfOrigin: 2,
+    }),
+  );
+  expect(actions.secondary.find((action) => action.id === "merge-pr-squash")).toMatchObject({
+    disabled: false,
+    closeOnSelect: true,
+  });
+  expect(actions.secondary.map((action) => action.id)).not.toContain("merge-branch");
+  expect(actions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
+});

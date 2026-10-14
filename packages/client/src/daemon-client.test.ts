@@ -7924,3 +7924,126 @@ test.each(["rebased", "unchanged", "conflicts"] as const)(
     expect(await result).toEqual(payload);
   },
 );
+
+test.each(["merge", "enable", "disable"] as const)(
+  "native PR %s refuses hosts without selected-PR mutation support",
+  async (operation) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-mutations",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen();
+    await connecting;
+    const expectedPullRequest = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      number: 42,
+    };
+    const result =
+      operation === "merge"
+        ? client.checkoutPrMerge("/native", { method: "squash", expectedPullRequest })
+        : client.checkoutForgeSetAutoMerge(
+            "/native",
+            operation === "enable"
+              ? { enabled: true, method: "squash", expectedPullRequest }
+              : { enabled: false, expectedPullRequest },
+          );
+    await expect(result).rejects.toThrow("Update the host");
+    expect(mock.sent).toEqual([]);
+  },
+);
+
+test.each(["merge", "enable", "disable"] as const)(
+  "native selected PR %s sends the captured identity and retains provider result",
+  async (operation) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-command",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({ features: { checkoutJjPrMutations: true } });
+    await connecting;
+    const expectedPullRequest = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      number: 42,
+    };
+    const result =
+      operation === "merge"
+        ? client.checkoutPrMerge(
+            "/native",
+            { method: "squash", expectedPullRequest },
+            "selected-command",
+          )
+        : client.checkoutForgeSetAutoMerge(
+            "/native",
+            operation === "enable"
+              ? { enabled: true, method: "squash", expectedPullRequest }
+              : { enabled: false, expectedPullRequest },
+            "selected-command",
+          );
+    expect(parseSentFrame(mock.sent[0])).toEqual(
+      operation === "merge"
+        ? {
+            type: "checkout_pr_merge_request",
+            cwd: "/native",
+            mergeMethod: "squash",
+            expectedPullRequest,
+            requestId: "selected-command",
+          }
+        : {
+            type: "checkout.forge.set_auto_merge.request",
+            cwd: "/native",
+            enabled: operation === "enable",
+            ...(operation === "enable" ? { mergeMethod: "squash" } : {}),
+            expectedPullRequest,
+            requestId: "selected-command",
+          },
+    );
+    const payload = {
+      cwd: "/native",
+      requestId: "selected-command",
+      success: true,
+      error: null,
+      ...(operation === "merge" ? {} : { enabled: operation === "enable" }),
+    };
+    mock.triggerMessage(
+      wrapSessionMessage(
+        operation === "merge"
+          ? { type: "checkout_pr_merge_response", payload }
+          : { type: "checkout.forge.set_auto_merge.response", payload },
+      ),
+    );
+    expect(await result).toEqual(payload);
+  },
+);
+
+test.each([false, true])(
+  "native PR with missing identity checks host capability first: %s",
+  async (capable) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-missing-identity",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({ features: { checkoutJjPrMutations: capable } });
+    await connecting;
+    await expect(
+      client.checkoutPrMerge("/native", { method: "squash", expectedPullRequest: null }),
+    ).rejects.toThrow(capable ? "exact repository and number" : "Update the host");
+    expect(mock.sent).toEqual([]);
+  },
+);

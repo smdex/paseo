@@ -3591,3 +3591,48 @@ it("creates a native fork PR with the exact source owner, target and host login"
     ],
   ]);
 });
+
+it("merges a native Gitea PR on the explicit host and target while auto-merge stays unsupported", async () => {
+  const { service, calls } = makeService((args) =>
+    ok(
+      args[0] === "login"
+        ? JSON.stringify([
+            { name: "private", url: "https://tea.private", ssh_host: "tea.private", user: "me" },
+          ])
+        : "",
+    ),
+  );
+  const repository: ForgeRepositoryContext = {
+    host: "tea.private",
+    targetRepository: "upstream/project",
+    sourceRepository: "fork/project",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "b".repeat(40),
+  };
+  await expect(
+    service.mergePullRequest({
+      cwd: "/native",
+      repository,
+      prNumber: 5,
+      mergeMethod: "squash",
+      status: giteaMergeStatus(),
+    }),
+  ).resolves.toEqual({ success: true });
+  expect(calls).toEqual([
+    ["login", "list", "-o", "json"],
+    ["pr", "merge", "5", "--style", "squash", "--login", "private", "--repo", "upstream/project"],
+  ]);
+  expect(() =>
+    service.enablePullRequestAutoMerge({
+      cwd: "/native",
+      repository,
+      prNumber: 5,
+      mergeMethod: "squash",
+    }),
+  ).toThrow(/not supported/);
+  expect(() =>
+    service.disablePullRequestAutoMerge({ cwd: "/native", repository, prNumber: 5 }),
+  ).toThrow(/not supported/);
+  expect(calls).toHaveLength(2);
+});

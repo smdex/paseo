@@ -1,3 +1,4 @@
+import { openJjPrMutationForm, type JjPrMutationSnapshot } from "./jj-pr-mutation-form-model";
 import { openJjPrCreateForm } from "./jj-pr-create-form-model";
 import { openJjChangeForm, type JjChangeFormPorts } from "./jj-change-form-model";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -777,6 +778,59 @@ describe("jj fetch-and-rebase approval", () => {
         description: "Captured work",
       });
       approved.close();
+    },
+  );
+});
+
+describe("native selected PR mutation form", () => {
+  it.each([
+    { kind: "merge", method: "squash" },
+    { kind: "enable-auto-merge", method: "merge" },
+    { kind: "disable-auto-merge" },
+  ] as const)(
+    "retains $kind identity through pending, failure and successful retry",
+    async (intent) => {
+      const first = createDeferred<void>();
+      const submitted: JjPrMutationSnapshot[] = [];
+      const snapshot: JjPrMutationSnapshot = {
+        serverId: "host",
+        cwd: "/native",
+        identity: { host: "forge.example", targetRepository: "upstream/project", number: 42 },
+        intent,
+      };
+      const form = openJjPrMutationForm(snapshot, {
+        mutate: async (input) => {
+          submitted.push(input);
+          if (submitted.length === 1) await first.promise;
+        },
+        refresh: async () => {},
+      });
+      const pending = form.submit();
+      await form.submit();
+      expect(form.getState()).toMatchObject({
+        status: "pending",
+        identity: snapshot.identity,
+        intent,
+      });
+      expect(submitted).toEqual([snapshot]);
+      first.reject(new Error("Provider refused this operation. Refresh eligibility and retry."));
+      await pending;
+      expect(form.getState()).toMatchObject({
+        status: "error",
+        error: "Provider refused this operation. Refresh eligibility and retry.",
+        identity: snapshot.identity,
+        intent,
+      });
+      await form.submit();
+      expect(form.getState()).toMatchObject({
+        status: "success",
+        error: null,
+        identity: snapshot.identity,
+        intent,
+      });
+      await form.submit();
+      expect(submitted).toEqual([snapshot, snapshot]);
+      form.close();
     },
   );
 });

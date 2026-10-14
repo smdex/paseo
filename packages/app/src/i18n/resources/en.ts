@@ -880,6 +880,7 @@ export const en = {
           success_mr: "MR merged",
         },
         autoMerge: {
+          disable: "Disable auto-merge",
           enableSquash: "Auto merge (squash)",
           enableMerge: "Auto merge (merge)",
           enableRebase: "Auto merge (rebase)",

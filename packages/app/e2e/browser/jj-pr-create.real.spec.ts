@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -185,6 +185,169 @@ test("native Create PR preserves a failed draft, prevents duplicate submission, 
           type: "cleanup",
           description: error instanceof Error ? error.message : String(error),
         });
+      }
+    } finally {
+      await client.close();
+      await rm(cwd, { recursive: true, force: true });
+      await generated?.cleanup();
+    }
+  }
+});
+
+test("native direct merge acts on the captured published PR and preserves local jj work across layouts", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const reusable = process.env.PASEO_E2E_REUSE_GITHUB_PR;
+  const generated = reusable
+    ? null
+    : await createTempGithubRepo({ category: "jj-pr-merge", prs: [] });
+  const fullName = reusable ? reusable.split("#")[0] : generated!.fullName;
+  const cwd = await mkdtemp(path.join(tmpdir(), "paseo-jj-merge-pr-"));
+  const prefix = `paseo-e2e-jj-merge-${randomUUID()}`;
+  const base = `${prefix}-base`;
+  const head = `${prefix}-head`;
+  const client = await connectSeedClient();
+  try {
+    const defaultBase = command("gh", [
+      "repo",
+      "view",
+      fullName,
+      "--json",
+      "defaultBranchRef",
+      "--jq",
+      ".defaultBranchRef.name",
+    ]);
+    command("git", [
+      "clone",
+      "--quiet",
+      "--branch",
+      defaultBase,
+      `https://github.com/${fullName}.git`,
+      cwd,
+    ]);
+    command("git", ["checkout", "-b", base], cwd);
+    command("git", ["push", "origin", base], cwd);
+    jj(cwd, ["git", "init", "--colocate"]);
+    jj(cwd, ["new", base]);
+    await writeFile(
+      path.join(cwd, "published-native-feature.txt"),
+      "Only this published feature belongs in the PR.\n",
+    );
+    jj(cwd, ["describe", "-m", "Published native merge feature"]);
+    jj(cwd, ["bookmark", "create", head]);
+    jj(cwd, ["git", "push", "--bookmark", head, "--remote", "origin"]);
+    const published = jj(cwd, ["log", "--no-graph", "-r", head, "-T", "commit_id"]);
+    const prUrl = command("gh", [
+      "pr",
+      "create",
+      "--repo",
+      fullName,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--title",
+      `Native merge ${prefix}`,
+      "--body",
+      "Merge only the published jj feature.",
+    ]);
+    const pr = z
+      .object({ number: z.number() })
+      .parse(
+        JSON.parse(command("gh", ["pr", "view", prUrl, "--repo", fullName, "--json", "number"])),
+      );
+    jj(cwd, ["new"]);
+    await writeFile(
+      path.join(cwd, "unpublished-native-change.txt"),
+      "A local descendant must not be pushed by Merge PR.\n",
+    );
+    jj(cwd, ["describe", "-m", "Local unpublished descendant"]);
+    jj(cwd, ["bookmark", "move", head, "--to", "@"]);
+    const localHead = jj(cwd, ["log", "--no-graph", "-r", head, "-T", "commit_id"]);
+    expect(localHead).not.toBe(published);
+    jj(cwd, ["new"]);
+    await writeFile(
+      path.join(cwd, "unpublished-native-wip.txt"),
+      "This local work must remain unpublished.\n",
+    );
+    const selected = jj(cwd, ["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+    const created = await client.createWorkspace({
+      source: { kind: "directory", path: cwd },
+      title: "Native direct PR merge",
+    });
+    if (!created.workspace) throw new Error("Expected native workspace fixture");
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(buildHostWorkspaceRoute(getServerId(), created.workspace.id));
+    await waitForWorkspaceTabsVisible(page);
+    await openChangesPanel(page);
+    await page.getByTestId("changes-primary-cta-caret").filter({ visible: true }).click();
+    await page
+      .getByRole("menuitem", { name: "Merge PR (squash)", exact: true })
+      .click({ timeout: 60_000 });
+    await expect(page.getByTestId("jj-pr-mutation-identity")).toContainText(
+      `${fullName} #${pr.number}`,
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId("jj-pr-mutation-identity")).toContainText(`#${pr.number}`);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.getByTestId("jj-pr-mutation-submit").click();
+    await expect(page.getByTestId("jj-pr-mutation-submit")).toBeDisabled();
+    await expect(page.getByTestId("jj-pr-mutation-submit")).toContainText("Merging PR");
+    await expect(page.getByTestId("jj-pr-mutation-success")).toHaveText("PR merged", {
+      timeout: 60_000,
+    });
+    const merged = z
+      .object({ state: z.string(), headRefOid: z.string(), baseRefName: z.string() })
+      .parse(
+        JSON.parse(
+          command("gh", [
+            "pr",
+            "view",
+            String(pr.number),
+            "--repo",
+            fullName,
+            "--json",
+            "state,headRefOid,baseRefName",
+          ]),
+        ),
+      );
+    expect(merged).toEqual({ state: "MERGED", headRefOid: published, baseRefName: base });
+    expect(command("git", ["ls-remote", "origin", `refs/heads/${head}`], cwd).split(/\s+/)[0]).toBe(
+      published,
+    );
+    expect(jj(cwd, ["log", "--no-graph", "-r", head, "-T", "commit_id"])).toBe(localHead);
+    expect(jj(cwd, ["log", "--no-graph", "-r", "@", "-T", "change_id"])).toBe(selected);
+    expect(await readFile(path.join(cwd, "unpublished-native-wip.txt"), "utf8")).toBe(
+      "This local work must remain unpublished.\n",
+    );
+    await expect(page).toHaveURL(new RegExp(created.workspace.id));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId("jj-pr-mutation-success")).toHaveText("PR merged");
+    await expect(page.getByTestId("jj-pr-mutation-identity")).toContainText(`#${pr.number}`);
+    await page.screenshot({ path: testInfo.outputPath("native-direct-merge-success-narrow.png") });
+    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(0);
+  } finally {
+    try {
+      const open = z
+        .array(z.object({ number: z.number() }))
+        .parse(
+          JSON.parse(
+            command("gh", ["pr", "list", "--repo", fullName, "--head", head, "--json", "number"]),
+          ),
+        );
+      for (const request of open)
+        command("gh", ["pr", "close", String(request.number), "--repo", fullName]);
+      for (const branch of [head, base]) {
+        try {
+          command("gh", ["api", "-X", "DELETE", `repos/${fullName}/git/refs/heads/${branch}`]);
+        } catch (error) {
+          testInfo.annotations.push({
+            type: "cleanup",
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     } finally {
       await client.close();

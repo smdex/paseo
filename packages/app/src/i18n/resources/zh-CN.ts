@@ -869,6 +869,7 @@ export const zhCN: TranslationResources = {
         },
         viewPr_mr: "查看 MR",
         autoMerge: {
+          disable: "禁用自动合并",
           enableSquash: "Auto merge (squash)",
           enableMerge: "Auto merge (merge)",
           enableRebase: "Auto merge (rebase)",

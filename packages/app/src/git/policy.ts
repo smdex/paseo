@@ -402,11 +402,8 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   return null;
 }
 
-/** PR-merge promotion in its original precedence; deferred on jj (plan §7). */
+/** PR-merge promotion preserves provider eligibility for both backends. */
 function getPrMergePrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
-  if (input.isJj) {
-    return null;
-  }
   if (canMergePr(input)) {
     return getDefaultDirectPullRequestMergeActionId(input);
   }
@@ -426,10 +423,9 @@ function getPullRequestActionIds(filter: {
 }
 
 function getFeatureActionIds(input: BuildGitActionsInput): GitActionId[] {
-  // Local merges and change-request checkouts are deferred on jj (plan §7);
-  // the availability hierarchy hides them rather than rendering disabled.
+  // Native PR actions operate on the published request; local integration is separate.
   if (input.isJj) {
-    return getPullRequestActionIds({ roles: ["status"], input });
+    return getPullRequestActionIds({ roles: ["status", "direct", "auto"], input });
   }
   return [
     "merge-from-base",
@@ -503,6 +499,7 @@ function buildDirectPullRequestMergeAction(
   const runtime = input.runtime[model.id];
   const unavailableMessage = getMergePrUnavailableMessage(input);
   return {
+    closeOnSelect: input.isJj,
     id: model.id,
     label: getDirectPullRequestMergeActionLabel(model.id),
     pendingLabel: i18n.t("workspace.git.actions.mergePr.pending"),
@@ -522,6 +519,7 @@ function buildEnablePullRequestAutoMergeAction(
 ): GitAction {
   const runtime = input.runtime[model.id];
   return {
+    closeOnSelect: input.isJj,
     id: model.id,
     label: getEnablePullRequestAutoMergeActionLabel(model.id),
     pendingLabel: i18n.t("workspace.git.actions.autoMerge.enabling"),
@@ -541,8 +539,13 @@ function buildDisablePullRequestAutoMergeAction(input: BuildGitActionsInput): Gi
       ? undefined
       : i18n.t("workspace.git.actions.unavailable.autoMergeCannotDisable");
   return {
+    closeOnSelect: input.isJj,
     id: "disable-pr-auto-merge",
-    label: i18n.t("workspace.git.actions.autoMerge.enabled"),
+    label: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.autoMerge.disable"
+        : "workspace.git.actions.autoMerge.enabled",
+    ),
     pendingLabel: i18n.t("workspace.git.actions.autoMerge.disabling"),
     successLabel: i18n.t("workspace.git.actions.autoMerge.disabled"),
     disabled: runtime.disabled || input.mergeCapability?.canDisableAutoMerge !== true,
@@ -624,8 +627,7 @@ function canMergePr(input: BuildGitActionsInput): boolean {
     !input.pullRequestIsDraft &&
     !input.pullRequestIsMerged &&
     input.pullRequestMergeable !== "CONFLICTING" &&
-    input.aheadCount > 0 &&
-    !input.hasUncommittedChanges;
+    (input.isJj || (input.aheadCount > 0 && !input.hasUncommittedChanges));
 
   if (!canMergeFromPullRequestStatus) {
     return false;

@@ -1017,56 +1017,271 @@ describe("CheckoutSession", () => {
         });
       },
     );
+  });
 
-    itIfJj("rejects PR merge with the typed deferral", async () => {
-      const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
+  describe("native selected PR commands", () => {
+    function nativeCommandSession(operation: "merge" | "enable" | "disable", failure = false) {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
       sessionDisposables.push(fixture.dispose);
-      const { checkout, emitted } = makeCheckoutSession();
-
-      await checkout.handleCheckoutPrMergeRequest({
-        type: "checkout_pr_merge_request",
-        cwd: fixture.repoDir,
-        mergeMethod: "merge",
-        requestId: "prm1",
+      const selected = fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])
+        .stdout.trim();
+      const repository: ForgeRepositoryContext = {
+        host: "forge.example",
+        targetRepository: "upstream/project",
+        sourceRepository: "contributor/fork",
+        headRef: "feature",
+        headSha: "a".repeat(40),
+        remoteHeadSha: "b".repeat(40),
+      };
+      const commands: string[][] = [];
+      const service = createGitHubService({
+        runner: async (args, options) => {
+          commands.push(args);
+          if (failure)
+            throw new GitHubCommandError({
+              args,
+              cwd: options.cwd,
+              exitCode: 1,
+              stderr: "Provider refused the captured PR. Refresh eligibility and retry.",
+            });
+          return { stdout: "", stderr: "" };
+        },
+        resolveRepoHost: async () => {
+          throw new Error("no Git discovery");
+        },
       });
-
-      expect(emitted.at(-1)).toMatchObject({
-        type: "checkout_pr_merge_response",
-        payload: {
-          requestId: "prm1",
-          success: false,
-          error: expect.objectContaining({
-            message: expect.stringContaining("not supported on jj"),
+      const snapshot = createGitSnapshot(fixture.repoDir, "feature");
+      snapshot.git = { ...snapshot.git, vcs: "jj", aheadOfOrigin: 1, isDirty: true };
+      snapshot.forge = {
+        featuresEnabled: true,
+        authState: "authenticated",
+        error: null,
+        repository,
+        pullRequest: {
+          number: 42,
+          url: "https://forge.example/upstream/project/pull/42",
+          title: "Published",
+          state: "open",
+          repoOwner: "upstream",
+          repoName: "project",
+          baseRefName: "main",
+          headRefName: "feature",
+          isMerged: false,
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          forgeSpecific: {
+            forge: "github",
+            mergeStateStatus: operation === "enable" ? "BLOCKED" : "CLEAN",
+            autoMergeRequest:
+              operation === "disable"
+                ? { enabledAt: null, mergeMethod: "SQUASH", enabledBy: null }
+                : null,
+            isMergeQueueEnabled: false,
+            isInMergeQueue: false,
+            repository: {
+              autoMergeAllowed: true,
+              mergeCommitAllowed: true,
+              squashMergeAllowed: true,
+              rebaseMergeAllowed: true,
+              viewerDefaultMergeMethod: "SQUASH",
+            },
+            viewerCanEnableAutoMerge: true,
+            viewerCanDisableAutoMerge: true,
+            viewerCanMergeAsAdmin: false,
+            viewerCanUpdateBranch: false,
+          },
+        },
+      };
+      const reads: unknown[] = [];
+      const session = makeCheckoutSession({
+        git: {
+          getSnapshot: async (_cwd, options) => {
+            reads.push(options);
+            return snapshot;
+          },
+          resolveForge: async () => ({
+            forge: "github",
+            host: repository.host,
+            repository,
+            service,
           }),
         },
       });
-    });
-  });
 
-  itIfJj("rejects jj auto-merge before forge resolution", async () => {
-    const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
-    sessionDisposables.push(fixture.dispose);
-    const forgeCalls: string[] = [];
-    const { checkout, emitted } = makeCheckoutSession({
-      git: {
-        resolveForge: async () => {
-          forgeCalls.push("resolveForge");
-          return { forge: "github", host: "github.com", service: null };
-        },
+      const identity = {
+        host: repository.host,
+        targetRepository: repository.targetRepository,
+        number: 42,
+      };
+      const send = async (captured: typeof identity | null = identity) => {
+        const expectedPullRequest = captured ?? undefined;
+        if (operation === "merge")
+          await session.checkout.handleCheckoutPrMergeRequest({
+            type: "checkout_pr_merge_request",
+            cwd: fixture.repoDir,
+            mergeMethod: "squash",
+            expectedPullRequest,
+            requestId: "native-command",
+          });
+        else
+          await session.checkout.handleCheckoutForgeSetAutoMergeRequest({
+            type: "checkout.forge.set_auto_merge.request",
+            cwd: fixture.repoDir,
+            enabled: operation === "enable",
+            ...(operation === "enable" ? { mergeMethod: "squash" } : {}),
+            expectedPullRequest,
+            requestId: "native-command",
+          });
+      };
+      return {
+        ...session,
+        fixture,
+        selected,
+        repository,
+        snapshot,
+        commands,
+        reads,
+        identity,
+        send,
+      };
+    }
+    itIfJj.each([
+      {
+        operation: "merge",
+        args: ["pr", "merge", "42", "--squash", "--repo", "forge.example/upstream/project"],
+        reason: "merge-pr-validation",
+        response: "checkout_pr_merge_response",
       },
+      {
+        operation: "enable",
+        args: [
+          "pr",
+          "merge",
+          "42",
+          "--auto",
+          "--squash",
+          "--repo",
+          "forge.example/upstream/project",
+        ],
+        reason: "auto-merge-validation",
+        response: "checkout.forge.set_auto_merge.response",
+      },
+      {
+        operation: "disable",
+        args: ["pr", "merge", "42", "--disable-auto", "--repo", "forge.example/upstream/project"],
+        reason: "auto-merge-validation",
+        response: "checkout.forge.set_auto_merge.response",
+      },
+    ] as const)(
+      "runs native $operation on the captured published PR without pushing local work",
+      async ({ operation, args, reason, response }) => {
+        const session = nativeCommandSession(operation);
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          type: response,
+          payload: {
+            cwd: session.fixture.repoDir,
+            success: true,
+            error: null,
+            requestId: "native-command",
+          },
+        });
+        expect(session.commands).toEqual([args]);
+        expect(session.reads).toEqual([{ force: true, includeForge: true, reason }]);
+        expect(
+          session.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+        ).toBe(session.selected);
+      },
+    );
+    itIfJj.each(["merge", "enable", "disable"] as const)(
+      "preserves actionable native %s provider failure and selection",
+      async (operation) => {
+        const session = nativeCommandSession(operation, true);
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            cwd: session.fixture.repoDir,
+            success: false,
+            error: {
+              message: expect.stringContaining(
+                "Provider refused the captured PR. Refresh eligibility and retry.",
+              ),
+            },
+            requestId: "native-command",
+          },
+        });
+        expect(session.commands).toHaveLength(1);
+        expect(
+          session.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+        ).toBe(session.selected);
+      },
+    );
+    itIfJj.each(["merge", "enable", "disable"] as const)(
+      "refuses native %s if forced lookup selects a different PR",
+      async (operation) => {
+        const session = nativeCommandSession(operation);
+        if (!session.snapshot.forge.pullRequest) throw new Error("Expected PR fixture");
+        session.snapshot.forge.pullRequest.number = 43;
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: {
+              message:
+                "The selected pull request changed since this action opened. Dismiss it and refresh PR status before trying again.",
+            },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
+    itIfJj.each([
+      { host: "other.example", targetRepository: "upstream/project" },
+      { host: "forge.example", targetRepository: "other/project" },
+    ])("refuses a changed native target $host/$targetRepository", async (target) => {
+      const session = nativeCommandSession("merge");
+      Object.assign(session.repository, target);
+      await session.send();
+      expect(session.emitted.at(-1)).toMatchObject({
+        payload: {
+          success: false,
+          error: { message: expect.stringContaining("selected pull request changed") },
+        },
+      });
+      expect(session.commands).toEqual([]);
     });
-    await checkout.handleCheckoutForgeSetAutoMergeRequest({
-      type: "checkout.forge.set_auto_merge.request",
-      cwd: fixture.repoDir,
-      enabled: true,
-      mergeMethod: "merge",
-      requestId: "jj-auto",
-    });
-    expect(forgeCalls).toEqual([]);
-    expect(emitted.at(-1)).toMatchObject({
-      type: "checkout.forge.set_auto_merge.response",
-      payload: { success: false, error: { code: "NOT_ALLOWED" } },
-    });
+    itIfJj(
+      "refuses native commands when forced lookup retains a PR alongside an error",
+      async () => {
+        const session = nativeCommandSession("merge");
+        session.snapshot.forge.error = {
+          message: "Cannot refresh provider eligibility. Retry after reconnecting.",
+        };
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: { message: "Cannot refresh provider eligibility. Retry after reconnecting." },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
+    itIfJj(
+      "requires exact native selected PR identity even from an older request shape",
+      async () => {
+        const session = nativeCommandSession("merge");
+        await session.send(null);
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: { message: expect.stringContaining("exact repository and number") },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
   });
 
   describe("commit", () => {

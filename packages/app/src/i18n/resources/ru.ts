@@ -885,6 +885,7 @@ export const ru: TranslationResources = {
         },
         viewPr_mr: "Посмотреть MR",
         autoMerge: {
+          disable: "Отключить автоматическое слияние",
           enableSquash: "Включить автослияние (squash)",
           enableMerge: "Включить автослияние (merge)",
           enableRebase: "Включить автослияние (rebase)",

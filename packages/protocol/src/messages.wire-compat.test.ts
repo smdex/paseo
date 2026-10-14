@@ -5,12 +5,15 @@ import {
   BranchSuggestionsResponseSchema,
   CheckoutStatusResponseSchema,
   CheckoutPrCreateRequestSchema,
+  CheckoutPrMergeRequestSchema,
+  CheckoutForgeSetAutoMergeRequestSchema,
   CheckoutEditChangeResponseSchema,
   CheckoutFetchRebaseResponseSchema,
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
+  SessionInboundMessageSchema,
   WSHelloMessageSchema,
   WorkspaceSetupSnapshotSchema,
   WorkspaceSetupProgressMessageSchema,
@@ -634,4 +637,37 @@ test("jj fetch-rebase additions remain optional and generated wire parsing retai
     features: z.object({ checkoutJj: z.boolean().optional() }),
   });
   expect(oldInfoSchema.parse(currentInfo)).toEqual(oldInfo);
+});
+
+test("selected native PR command identities are optional across wire versions", () => {
+  const identity = { host: "forge.example", targetRepository: "upstream/project", number: 42 };
+  const merge = {
+    type: "checkout_pr_merge_request",
+    cwd: "/native",
+    mergeMethod: "squash",
+    requestId: "merge",
+  };
+  const auto = {
+    type: "checkout.forge.set_auto_merge.request",
+    cwd: "/native",
+    enabled: false,
+    requestId: "disable",
+  };
+  for (const request of [merge, auto]) {
+    const current = { ...request, expectedPullRequest: identity };
+    expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+    expect(SessionInboundMessageSchema.parse(current)).toEqual(current);
+  }
+  expect(
+    CheckoutPrMergeRequestSchema.omit({ expectedPullRequest: true }).parse({
+      ...merge,
+      expectedPullRequest: identity,
+    }),
+  ).toEqual(merge);
+  expect(
+    CheckoutForgeSetAutoMergeRequestSchema.omit({ expectedPullRequest: true }).parse({
+      ...auto,
+      expectedPullRequest: identity,
+    }),
+  ).toEqual(auto);
 });

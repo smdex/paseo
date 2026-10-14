@@ -883,6 +883,7 @@ export const es: TranslationResources = {
         },
         viewPr_mr: "Ver MR",
         autoMerge: {
+          disable: "Desactivar la fusión automática",
           enableSquash: "Fusión automática (squash)",
           enableMerge: "Fusión automática (merge)",
           enableRebase: "Fusión automática (rebase)",

@@ -61,6 +61,7 @@ import type {
   CheckoutPrCreateResponse,
   CheckoutPrMergeResponse,
   CheckoutPrMergeMethod,
+  CheckoutPrIdentity,
   CheckoutForgeSetAutoMergeResponse,
   CheckoutGithubSetAutoMergeResponse,
   CheckoutForgeGetCheckDetailsResponse,
@@ -4385,16 +4386,33 @@ export class DaemonClient {
     });
   }
 
+  private requireNativePrMutationCapability(expected?: CheckoutPrIdentity | null): void {
+    // COMPAT(checkoutJjPrMutations): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports selected native PR mutations.
+    if (
+      expected !== undefined &&
+      this.lastServerInfoMessage?.features?.checkoutJjPrMutations !== true
+    )
+      throw new Error(
+        "Update the host to merge pull requests or manage auto-merge from jj workspaces.",
+      );
+    if (expected === null)
+      throw new Error(
+        "Dismiss this action and refresh PR status to capture its exact repository and number.",
+      );
+  }
+
   async checkoutPrMerge(
     cwd: string,
-    input: { method: CheckoutPrMergeMethod },
+    input: { method: CheckoutPrMergeMethod; expectedPullRequest?: CheckoutPrIdentity | null },
     requestId?: string,
   ): Promise<CheckoutPrMergePayload> {
+    this.requireNativePrMutationCapability(input.expectedPullRequest);
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "checkout_pr_merge_request",
         cwd,
+        expectedPullRequest: input.expectedPullRequest ?? undefined,
         mergeMethod: input.method,
       },
       responseType: "checkout_pr_merge_response",
@@ -4403,14 +4421,18 @@ export class DaemonClient {
 
   async checkoutForgeSetAutoMerge(
     cwd: string,
-    input: { enabled: true; method: CheckoutPrMergeMethod } | { enabled: false },
+    input: ({ enabled: true; method: CheckoutPrMergeMethod } | { enabled: false }) & {
+      expectedPullRequest?: CheckoutPrIdentity | null;
+    },
     requestId?: string,
   ): Promise<CheckoutForgeSetAutoMergePayload> {
+    this.requireNativePrMutationCapability(input.expectedPullRequest);
     return this.sendNamespacedCorrelatedSessionRequest<"checkout.forge.set_auto_merge.response">({
       requestId,
       message: {
         type: "checkout.forge.set_auto_merge.request",
         cwd,
+        expectedPullRequest: input.expectedPullRequest ?? undefined,
         enabled: input.enabled,
         ...(input.enabled ? { mergeMethod: input.method } : {}),
       },

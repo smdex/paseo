@@ -1955,6 +1955,7 @@ export class VoiceAssistantWebSocketServer {
         checkoutJjCheckpoint: isJjFeatureAvailable(),
         checkoutJjPrCreate: isJjFeatureAvailable(),
         checkoutJjPrWorkspace: isJjFeatureAvailable(),
+        checkoutJjPrMutations: isJjFeatureAvailable(),
         checkoutJjRewriteApproval: isJjFeatureAvailable(),
         checkoutJjFetchRebase: isJjFeatureAvailable(),
         checkoutJjGraphSelections: isJjFeatureAvailable(),
