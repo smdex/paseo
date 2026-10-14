@@ -15,7 +15,11 @@ import { useCheckoutCommitsQuery } from "@/git/use-commits-query";
 import { useCheckoutGitActionsStore } from "@/git/actions-store";
 import { invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
 import { queryClient } from "@/data/query-client";
-import { openJjChangeForm, type JjChangeFormSnapshot } from "./jj-change-form-model";
+import {
+  openJjChangeForm,
+  type JjChangeFormState,
+  type JjChangeFormSnapshot,
+} from "./jj-change-form-model";
 
 interface JjChangeControlsProps {
   serverId: string;
@@ -55,6 +59,7 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   );
   const openDescribe = useCallback(() => open("describe"), [open]);
   const openEdit = useCallback(() => open("edit"), [open]);
+  const openFetchRebase = useCallback(() => open("fetch-rebase"), [open]);
   const openNewOn = useCallback(() => open("new-on"), [open]);
   if (!enabled) return null;
   return (
@@ -86,6 +91,15 @@ export function JjChangeControls(props: JjChangeControlsProps) {
           testID="jj-newon-open"
         >
           {t("workspace.git.actions.newChangeOn.label")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!props.changeId}
+          onPress={openFetchRebase}
+          testID="jj-fetch-rebase-open"
+        >
+          {t("workspace.git.actions.fetchRebase.label")}
         </Button>
       </View>
       {props.refusedPaths.length ? (
@@ -140,6 +154,14 @@ export function JjChangeForm({
         if (result.error) throw new CheckoutOperationError(result.error);
         if (!result.success) throw new Error("New change did not complete");
       },
+      fetchAndRebase: async (input) => {
+        if (!client) throw new Error("Host disconnected");
+        const result = await client.fetchAndRebase(input);
+        if (result.error) throw new CheckoutOperationError(result.error);
+        if (!result.success || !result.outcome)
+          throw new Error("Fetch and rebase did not complete");
+        return result.outcome;
+      },
       refresh: () =>
         invalidateCheckoutGitQueriesForClient(queryClient, {
           serverId: snapshot.serverId,
@@ -149,11 +171,6 @@ export function JjChangeForm({
   );
   useEffect(() => () => model.close(), [model]);
   const state = useSyncExternalStore(model.subscribe, model.getState);
-  const commits = useCheckoutCommitsQuery({
-    serverId: snapshot.serverId,
-    cwd: snapshot.cwd,
-    enabled: snapshot.mode !== "describe" && snapshot.mode !== "new",
-  });
   const size = compact ? "md" : "sm";
   const title = t(
     {
@@ -161,6 +178,7 @@ export function JjChangeForm({
       "new-on": "workspace.git.actions.newChangeOn.label",
       edit: "workspace.git.actions.editChange.label",
       new: "workspace.git.actions.newChange.label",
+      "fetch-rebase": "workspace.git.actions.fetchRebase.label",
     }[snapshot.mode],
   );
   const header = useMemo(() => ({ title }), [title]);
@@ -175,7 +193,9 @@ export function JjChangeForm({
   }, [model, onClose]);
   const pending = state.status === "pending";
   let submitLabel = title;
-  if (pending)
+  if (pending && snapshot.mode === "fetch-rebase")
+    submitLabel = t("workspace.git.actions.fetchRebase.pending");
+  else if (pending)
     submitLabel = t(
       snapshot.mode === "new"
         ? "workspace.git.actions.newChange.pending"
@@ -185,6 +205,10 @@ export function JjChangeForm({
     submitLabel = t("workspace.git.actions.jj.approveRewrite", {
       defaultValue: "Approve native rewrite",
     });
+  let successDescription = t("workspace.git.actions.jj.saved");
+  if (snapshot.mode === "new") successDescription = t("workspace.git.actions.newChange.success");
+  if (snapshot.mode === "fetch-rebase" && state.outcome)
+    successDescription = t(`workspace.git.actions.fetchRebase.${state.outcome}`);
   return (
     <AdaptiveModalSheet visible onClose={close} header={header}>
       <View style={styles.form} testID="jj-change-form">
@@ -195,6 +219,12 @@ export function JjChangeForm({
           description={t("workspace.git.actions.jj.rewriteWarning")}
           testID="jj-rewrite-warning"
         />
+        {snapshot.mode === "fetch-rebase" && snapshot.description ? (
+          <Text style={styles.identity}>{snapshot.description}</Text>
+        ) : null}
+        {snapshot.mode === "fetch-rebase" ? (
+          <Text style={styles.identity}>{t("workspace.git.actions.fetchRebase.detail")}</Text>
+        ) : null}
         {snapshot.mode === "describe" || snapshot.mode === "new" ? (
           <Field label={t("workspace.git.actions.jj.description")}>
             <FormTextInput
@@ -207,65 +237,22 @@ export function JjChangeForm({
               testID="jj-description-input"
             />
           </Field>
-        ) : (
-          <View>
-            {state.targetChangeId && state.targetChangeLabel ? (
-              <View testID="jj-selected-change">
-                <Text style={styles.identity}>
-                  {state.targetChangeId.slice(0, 12)} {state.targetChangeLabel}
-                </Text>
-                {state.targetCommitId ? (
-                  <Text style={styles.identity}>{state.targetCommitId.slice(0, 12)}</Text>
-                ) : null}
-              </View>
-            ) : null}
-            {commits.status === "loaded" ? (
-              commits.data.commits
-                .filter((commit) =>
-                  snapshot.mode === "new-on"
-                    ? Boolean(commit.changeId)
-                    : Boolean(commit.changeId) && commit.changeId !== snapshot.changeId,
-                )
-                .map((commit) => (
-                  <ChangeSelection
-                    key={commit.sha}
-                    changeId={commit.changeId!}
-                    commitId={snapshot.mode === "new-on" ? commit.sha : null}
-                    label={commit.subject || commit.shortSha}
-                    testID={
-                      snapshot.mode === "new-on"
-                        ? `jj-newon-select-${commit.sha}`
-                        : `jj-edit-select-${commit.changeId}`
-                    }
-                    selected={
-                      snapshot.mode === "new-on"
-                        ? state.targetCommitId === commit.sha
-                        : state.targetChangeId === commit.changeId
-                    }
-                    size={size}
-                    disabled={pending}
-                    select={selectChange}
-                  />
-                ))
-            ) : (
-              <Text style={styles.identity}>{t("workspace.git.actions.jj.loadingHistory")}</Text>
-            )}
-            {commits.status === "error" ? (
-              <Alert variant="error" description={commits.error.message} />
-            ) : null}
-          </View>
-        )}
+        ) : null}
+        {snapshot.mode === "edit" || snapshot.mode === "new-on" ? (
+          <JjChangeHistory
+            snapshot={snapshot}
+            state={state}
+            size={size}
+            selectChange={selectChange}
+          />
+        ) : null}
         {state.error ? (
           <Alert variant="error" description={state.error} testID="jj-form-error" />
         ) : null}
         {state.status === "success" ? (
           <Alert
-            variant="success"
-            description={
-              snapshot.mode === "new"
-                ? t("workspace.git.actions.newChange.success")
-                : t("workspace.git.actions.jj.saved")
-            }
+            variant={state.outcome === "conflicts" ? "warning" : "success"}
+            description={successDescription}
             testID="jj-form-success"
           />
         ) : null}
@@ -284,6 +271,70 @@ export function JjChangeForm({
         </View>
       </View>
     </AdaptiveModalSheet>
+  );
+}
+
+interface JjChangeHistoryProps {
+  snapshot: JjChangeFormSnapshot;
+  state: JjChangeFormState;
+  size: "sm" | "md";
+  selectChange: ReturnType<typeof openJjChangeForm>["selectChange"];
+}
+function JjChangeHistory({ snapshot, state, size, selectChange }: JjChangeHistoryProps) {
+  const { t } = useTranslation();
+  const commits = useCheckoutCommitsQuery({
+    serverId: snapshot.serverId,
+    cwd: snapshot.cwd,
+    enabled: true,
+  });
+  const pending = state.status === "pending";
+  return (
+    <View>
+      {state.targetChangeId && state.targetChangeLabel ? (
+        <View testID="jj-selected-change">
+          <Text style={styles.identity}>
+            {state.targetChangeId.slice(0, 12)} {state.targetChangeLabel}
+          </Text>
+          {state.targetCommitId ? (
+            <Text style={styles.identity}>{state.targetCommitId.slice(0, 12)}</Text>
+          ) : null}
+        </View>
+      ) : null}
+      {commits.status === "loaded" ? (
+        commits.data.commits
+          .filter((commit) =>
+            snapshot.mode === "new-on"
+              ? Boolean(commit.changeId)
+              : Boolean(commit.changeId) && commit.changeId !== snapshot.changeId,
+          )
+          .map((commit) => (
+            <ChangeSelection
+              key={commit.sha}
+              changeId={commit.changeId!}
+              commitId={snapshot.mode === "new-on" ? commit.sha : null}
+              label={commit.subject || commit.shortSha}
+              testID={
+                snapshot.mode === "new-on"
+                  ? `jj-newon-select-${commit.sha}`
+                  : `jj-edit-select-${commit.changeId}`
+              }
+              selected={
+                snapshot.mode === "new-on"
+                  ? state.targetCommitId === commit.sha
+                  : state.targetChangeId === commit.changeId
+              }
+              size={size}
+              disabled={pending}
+              select={selectChange}
+            />
+          ))
+      ) : (
+        <Text style={styles.identity}>{t("workspace.git.actions.jj.loadingHistory")}</Text>
+      )}
+      {commits.status === "error" ? (
+        <Alert variant="error" description={commits.error.message} />
+      ) : null}
+    </View>
   );
 }
 

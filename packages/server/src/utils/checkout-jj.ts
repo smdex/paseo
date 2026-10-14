@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { CheckoutFetchRebaseOutcome } from "@getpaseo/protocol/messages";
 import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import {
   ForgeRepositoryContextError,
@@ -1528,6 +1529,7 @@ export interface JjMutationResult {
   commitId: string;
   /** Workspace bookmark advanced onto the working-copy change, if any. */
   bookmark: string | null;
+  outcome?: CheckoutFetchRebaseOutcome;
 }
 
 const WORKING_COPY_IDS_TEMPLATE = 'change_id ++ "\\n" ++ commit_id ++ "\\n"';
@@ -1605,7 +1607,7 @@ export async function jjEdit(
 }
 
 interface ChangeMutationIntent extends JjChangeIntent {
-  kind: "describe" | "finish" | "new" | "edit";
+  kind: "describe" | "finish" | "new" | "edit" | "fetch-rebase";
   message?: string;
   changeId?: string;
   /**
@@ -1662,23 +1664,29 @@ async function uniqueChange(
   return meta;
 }
 
+interface JjRewriteScope {
+  revset: string;
+  includesCurrent: boolean;
+  label: string;
+}
+
 async function sharedJjSelection(
   cwd: string,
-  target: JjChangeMeta,
-  before: JjChangeMeta,
+  selection: Pick<JjRewriteScope, "revset" | "includesCurrent">,
   context: JjCheckoutContext,
 ): Promise<number> {
   const result = await runJj(
-    ["log", "--no-graph", "-r", target.commitId, "-T", 'working_copies.len() ++ "\\n"'],
+    ["log", "--no-graph", "-r", selection.revset, "-T", 'working_copies.len() ++ "\\n"'],
     { cwd },
     context,
   );
-  const count = result.stdout.trim();
-  if (result.truncated || !/^\d+$/.test(count))
+  const counts = result.stdout.trim().split("\n").filter(Boolean);
+  if (result.truncated || counts.some((count) => !/^\d+$/.test(count)))
     throw new JjCheckpointError(
       "Cannot capture the shared workspace scope. Review it on the host.",
     );
-  return Math.max(0, Number(count) - Number(target.changeId === before.changeId));
+  const total = counts.reduce((sum, count) => sum + Number(count), 0);
+  return Math.max(0, total - Number(selection.includesCurrent));
 }
 
 interface PreparedJjChange {
@@ -1688,6 +1696,25 @@ interface PreparedJjChange {
   affectedHeads: JjCheckpointHead[];
   impact: { otherWorkspaces: number; published: boolean };
 }
+function jjRewriteScope(
+  intent: ChangeMutationIntent,
+  prepared: Pick<PreparedJjChange, "before" | "target" | "affectedHeads">,
+): JjRewriteScope {
+  const { before, target, affectedHeads } = prepared;
+  if (intent.kind === "fetch-rebase")
+    return {
+      revset: "trunk().. & mutable()",
+      includesCurrent: affectedHeads.some((head) => head.changeId === before.changeId),
+      label: "all mutable work above trunk()",
+    };
+  const subject = intent.kind === "new" ? before : target;
+  return {
+    revset: subject.commitId,
+    includesCurrent: subject.changeId === before.changeId,
+    label: subject.changeId,
+  };
+}
+
 async function prepareJjChange(
   cwd: string,
   intent: ChangeMutationIntent,
@@ -1707,6 +1734,7 @@ async function prepareJjChange(
   if (intent.changeId !== undefined && !/^[k-z]{32}$/.test(intent.changeId))
     throw new JjCheckpointError("Select a full, stable change ID.");
   let target = before;
+  if (intent.kind === "fetch-rebase") target = await uniqueChange(cwd, "trunk()", freshContext);
   if (intent.changeId !== undefined) {
     target = await uniqueChange(cwd, intent.changeId, freshContext);
   } else if (intent.targetCommitId !== undefined) {
@@ -1719,15 +1747,12 @@ async function prepareJjChange(
   // affected/published/shared scope follows `before`, not the target. Every
   // other kind rewrites its target directly.
   const impactSubject = intent.kind === "new" ? before : target;
+  const affectedScope =
+    intent.kind === "fetch-rebase"
+      ? "trunk().. & mutable()"
+      : `descendants(${impactSubject.commitId}) ~ ${impactSubject.commitId}`;
   const affected = await runJj(
-    [
-      "log",
-      "--no-graph",
-      "-r",
-      `descendants(${impactSubject.commitId}) ~ ${impactSubject.commitId}`,
-      "-T",
-      'change_id ++ "\\t" ++ commit_id ++ "\\n"',
-    ],
+    ["log", "--no-graph", "-r", affectedScope, "-T", 'change_id ++ "\\t" ++ commit_id ++ "\\n"'],
     { cwd },
     freshContext,
   );
@@ -1745,15 +1770,16 @@ async function prepareJjChange(
         throw new JjCheckpointError("Cannot read the affected native descendants.");
       return { changeId, commitId };
     });
-  const shared = await sharedJjSelection(cwd, impactSubject, before, freshContext);
+  const scope = jjRewriteScope(intent, { before, target, affectedHeads });
+  const shared = await sharedJjSelection(cwd, scope, freshContext);
   const published = await countRevset(
     cwd,
-    `${impactSubject.commitId} & ::remote_bookmarks()`,
+    `(${scope.revset}) & ::remote_bookmarks()`,
     freshContext,
   );
   if ((affectedHeads.length || published || shared) && intent.acknowledgeRewrites !== true)
     throw new JjRewriteApprovalRequiredError(
-      `Native rewrite approval required: ${impactSubject.changeId}; ${affectedHeads.length} known descendant(s)${
+      `Native rewrite approval required: ${scope.label}; ${affectedHeads.length} known descendant(s)${
         affectedHeads.length
           ? ` (${affectedHeads
               .slice(0, 16)
@@ -1780,6 +1806,20 @@ async function applyJjChange(
   context: JjCheckoutContext,
 ): Promise<void> {
   switch (intent.kind) {
+    case "fetch-rebase":
+      return void (await runJj(
+        [
+          "rebase",
+          "--source",
+          "roots(trunk().. & mutable())",
+          "--onto",
+          target.commitId,
+          "--skip-emptied",
+          "--ignore-immutable",
+        ],
+        { cwd },
+        context,
+      ));
     case "describe":
       return void (await runJj(
         ["describe", "-r", target.commitId, "-m", message],
@@ -1815,6 +1855,7 @@ function jjSelectionMatches(
   target: JjChangeMeta,
   rewritten: JjChangeMeta,
 ): boolean {
+  if (kind === "fetch-rebase") return true;
   if (kind === "describe") return after.changeId === before.changeId;
   if (kind === "edit")
     return after.changeId === target.changeId && after.commitId === rewritten.commitId;
@@ -1893,12 +1934,13 @@ async function assertCapturedBookmark(
 async function materializeJjTransition(
   cwd: string,
   root: string,
-  transition: ChangeMutationIntent["bookmarkTransition"],
+  intent: ChangeMutationIntent,
   after: JjChangeMeta,
   facts: Extract<JjSnapshotFacts, { isJj: true }>,
   checkpoint: JjCheckpoint,
   context: JjCheckoutContext,
 ): Promise<JjCheckpoint> {
+  const transition = intent.bookmarkTransition;
   if (transition) {
     await assertCapturedBookmark(cwd, transition.headBookmark, transition.head, context);
     if (transition.oldHead && transition.oldBookmark)
@@ -1908,7 +1950,10 @@ async function materializeJjTransition(
       await assertCapturedBookmark(cwd, transition.name, after, context);
     }
   }
-  if (await countRevset(cwd, `${after.commitId} & conflicts()`, context))
+  if (
+    intent.kind !== "fetch-rebase" &&
+    (await countRevset(cwd, `${after.commitId} & conflicts()`, context))
+  )
     throw new JjCheckpointError(
       "The native action left conflicts. Inspect the actual working copy and retained heads before continuing.",
     );
@@ -1983,6 +2028,38 @@ async function verifyJjMutationResult(
     );
 }
 
+async function fetchJjMutationRemotes(
+  cwd: string,
+  intent: ChangeMutationIntent,
+  context: JjCheckoutContext,
+): Promise<void> {
+  if (intent.kind !== "fetch-rebase") return;
+  await assertJjRestorationResolved(cwd, context.paseoHome);
+  const selected = await uniqueChange(cwd, "@", context);
+  if (intent.expectedChangeId !== selected.changeId)
+    throw new JjCheckpointError(
+      "The current change changed since this form opened. Reopen it before fetching and rebasing.",
+    );
+  if (!(await listJjRemotes(cwd, context)).length)
+    throw new JjPushTargetError(
+      "No git remote is configured. Configure a remote on the host, then retry.",
+    );
+  await runJj(
+    ["--config", "git.abandon-unreachable-commits=false", "git", "fetch", "--all-remotes"],
+    { cwd },
+    context,
+  );
+}
+
+async function jjRebaseOutcome(
+  cwd: string,
+  operation: JjCheckpointOperation,
+  context: JjCheckoutContext,
+): Promise<NonNullable<JjMutationResult["outcome"]>> {
+  if (await countRevset(cwd, "(trunk()..) & conflicts()", context)) return "conflicts";
+  return operation.beforeOperation === operation.afterOperation ? "unchanged" : "rebased";
+}
+
 async function mutateJjChange(
   cwd: string,
   intent: ChangeMutationIntent,
@@ -1997,6 +2074,7 @@ async function mutateJjChange(
       facts: null,
       signal: context?.signal ?? new AbortController().signal,
     };
+    await fetchJjMutationRemotes(cwd, intent, freshContext);
     const { facts, before, target, affectedHeads, impact } = await prepareJjChange(
       cwd,
       intent,
@@ -2005,7 +2083,7 @@ async function mutateJjChange(
     let checkpoint = await importJjCheckpoint({
       backingRoot: root,
       head: before,
-      paseoHome: context?.paseoHome,
+      paseoHome: freshContext.paseoHome,
     });
     if (
       checkpoint.operations.some(
@@ -2047,7 +2125,7 @@ async function mutateJjChange(
         recoveryPins: [...checkpoint.recoveryPins, ...pins],
         operations: [...checkpoint.operations, operation],
       },
-      context?.paseoHome,
+      freshContext.paseoHome,
     );
     const bookmark = intent.pinAdvanceEmpty ? null : jjOwnedBookmark(facts);
     try {
@@ -2060,6 +2138,15 @@ async function mutateJjChange(
         await assertCapturedBookmark(cwd, transition.headBookmark, transition.head, freshContext);
       await applyJjChange(cwd, intent, target, message, bookmark, freshContext);
       const after = await uniqueChange(cwd, "@", freshContext);
+      const rebaseSelectionChanged =
+        intent.kind === "fetch-rebase" && after.changeId !== before.changeId;
+      if (
+        rebaseSelectionChanged &&
+        (await countRevset(cwd, `present(${before.changeId})`, freshContext))
+      )
+        throw new JjCheckpointError(
+          "The native rebase lost the captured working-copy selection. Reconcile the retained heads before retrying.",
+        );
       const rewritten = await uniqueChange(cwd, target.changeId, freshContext);
       const selectionMatches = jjSelectionMatches(intent.kind, after, before, target, rewritten);
       const descriptionMatches =
@@ -2072,7 +2159,7 @@ async function mutateJjChange(
       checkpoint = await materializeJjTransition(
         cwd,
         root,
-        transition,
+        intent,
         after,
         facts,
         checkpoint,
@@ -2095,15 +2182,19 @@ async function mutateJjChange(
           operation,
           jjOwnedBookmark(facts),
         ),
-        context?.paseoHome,
+        freshContext.paseoHome,
       );
       await verifyJjMutationResult(cwd, root, intent, after, checkpoint, freshContext);
+      if (intent.kind === "fetch-rebase") {
+        const outcome = await jjRebaseOutcome(cwd, operation, freshContext);
+        return { changeId: after.changeId, commitId: after.commitId, bookmark, outcome };
+      }
       return { changeId: after.changeId, commitId: after.commitId, bookmark };
     } catch (error) {
       await reconcileJjMutationFailure(cwd, operation, before, error, freshContext);
       await writeJjCheckpoint(
         { ...checkpoint, operations: [...checkpoint.operations.slice(0, -1), operation] },
-        context?.paseoHome,
+        freshContext.paseoHome,
       );
       throw error;
     }
@@ -2485,6 +2576,14 @@ export async function jjCreatePullRequest(
     service.invalidate({ cwd, repository: published });
     return result;
   });
+}
+
+export async function jjFetchAndRebase(
+  cwd: string,
+  options: JjChangeIntent,
+  context?: JjCheckoutContext,
+): Promise<JjMutationResult> {
+  return mutateJjChange(cwd, { ...options, kind: "fetch-rebase" }, context);
 }
 
 /**

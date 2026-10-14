@@ -64,6 +64,7 @@ import {
   jjFactsToCheckoutSnapshotFacts,
   jjNew,
   jjPull,
+  jjFetchAndRebase,
   jjPush,
   jjRenameBookmark,
   jjSwitchBookmark,
@@ -514,6 +515,16 @@ export async function dispatchPullCurrentBranch(
     return pullCurrentBranch(cwd, forgeService);
   }
   return jjPull(cwd, toJjContext(context));
+}
+
+export async function dispatchFetchAndRebase(
+  cwd: string,
+  options: JjChangeIntent,
+  context?: CheckoutContext,
+): Promise<JjMutationResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj")
+    throw new Error("Fetch and rebase requires a jj workspace.");
+  return jjFetchAndRebase(cwd, options, toJjContext(context));
 }
 
 /** Rename the current line of work (branch on git, bookmark on jj). */

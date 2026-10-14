@@ -23,6 +23,7 @@ import {
   listJjCommits,
   resolveJjBranchCheckout,
   jjPull,
+  jjFetchAndRebase,
   jjPush,
   jjCreatePullRequest,
   jjRenameBookmark,
@@ -2250,5 +2251,231 @@ describeIfJj("native PR creation", () => {
       ],
     ]);
     expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(selected);
+  });
+});
+
+describeIfJj("fetch all remotes and rebase", () => {
+  it("retains an external selection winner and refuses to claim a completed rebase", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    const origin = scratchBareGitOrigin();
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    if (!before) throw new Error("Missing test change");
+    const context = {
+      paseoHome: join(fixture.dir, "home"),
+      runJjCommand: async (...args: Parameters<typeof executeJjCommand>) => {
+        const result = await executeJjCommand(...args);
+        if (args[0][0] === "rebase") {
+          expect(fixture.jj(["new", "-r", "main", "-m", "external selection winner"]).status).toBe(
+            0,
+          );
+        }
+        return result;
+      },
+    };
+    await expect(
+      jjFetchAndRebase(
+        fixture.repoDir,
+        { expectedChangeId: before.changeId, acknowledgeRewrites: true },
+        context,
+      ),
+    ).rejects.toThrow("captured working-copy selection");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))?.description.trim()).toBe(
+      "external selection winner",
+    );
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
+    expect(checkpoint?.operations.at(-1)?.status).toBe("reconciliation_required");
+  });
+
+  it("stops before rebase on any remote failure while fetch-only still uses its selected remote", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    const origin = scratchBareGitOrigin();
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    expect(
+      fixture.jj(["git", "remote", "add", "upstream", join(fixture.dir, "missing.git")]).status,
+    ).toBe(0);
+    expect(fixture.jj(["describe", "-m", "retained local work"]).status).toBe(0);
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    if (!before) throw new Error("Missing test change");
+    const commands: string[][] = [];
+    const context = {
+      paseoHome: join(fixture.dir, "home"),
+      runJjCommand: async (...args: Parameters<typeof executeJjCommand>) => {
+        commands.push(args[0]);
+        return executeJjCommand(...args);
+      },
+    };
+    await expect(
+      jjFetchAndRebase(
+        fixture.repoDir,
+        { expectedChangeId: before.changeId, acknowledgeRewrites: true },
+        context,
+      ),
+    ).rejects.toThrow("missing.git");
+    expect(commands.filter((args) => args[0] === "rebase")).toEqual([]);
+    expect(await getJjChangeMeta(fixture.repoDir, "@")).toEqual(before);
+    await jjPull(fixture.repoDir, context);
+    expect(commands.filter((args) => args[0] === "rebase")).toEqual([]);
+    expect(commands.filter((args) => args.includes("fetch"))).toEqual([
+      ["--config", "git.abandon-unreachable-commits=false", "git", "fetch", "--all-remotes"],
+      ["--config", "git.abandon-unreachable-commits=false", "git", "fetch", "--remote", "origin"],
+    ]);
+    expect(await getJjChangeMeta(fixture.repoDir, "@")).toEqual(before);
+  });
+
+  it("requires structured approval without rebasing, then reports an approved unchanged graph", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    const origin = scratchBareGitOrigin();
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    expect(fixture.jj(["describe", "-m", "local work"]).status).toBe(0);
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    if (!before) throw new Error("Missing test change");
+    const context = { paseoHome: join(fixture.dir, "home") };
+    const error = await jjFetchAndRebase(
+      fixture.repoDir,
+      { expectedChangeId: before.changeId },
+      context,
+    ).catch(toCheckoutError);
+    expect(error).toMatchObject({ code: "NOT_ALLOWED", reason: "rewrite_approval_required" });
+    expect(await getJjChangeMeta(fixture.repoDir, "@")).toEqual(before);
+    const result = await jjFetchAndRebase(
+      fixture.repoDir,
+      { expectedChangeId: before.changeId, acknowledgeRewrites: true },
+      context,
+    );
+    expect(result.outcome).toBe("unchanged");
+    expect(result.changeId).toBe(before.changeId);
+  });
+
+  it("reports native rebase conflicts separately from successful completion", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+    const origin = scratchBareGitOrigin();
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    expect(fixture.jj(["describe", "-m", "local work"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "local\n");
+    const before = await getJjChangeMeta(fixture.repoDir, "@");
+    if (!before) throw new Error("Missing test change");
+    expect(fixture.jj(["new", "-r", "main", "-m", "upstream work"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "upstream\n");
+    expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    expect(fixture.jj(["edit", before.changeId]).status).toBe(0);
+    const result = await jjFetchAndRebase(
+      fixture.repoDir,
+      { expectedChangeId: before.changeId, acknowledgeRewrites: true },
+      { paseoHome: join(fixture.dir, "home") },
+    );
+    expect(result.outcome).toBe("conflicts");
+    expect(result.changeId).toBe(before.changeId);
+    expect(fixture.jj(["log", "--no-graph", "-r", "@", "-T", "conflict"]).stdout.trim()).toBe(
+      "true",
+    );
+  });
+
+  it("fetches both remotes and rebases every divergent mutable root onto the fetched trunk", async () => {
+    const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
+    const commands: string[][] = [];
+    const context = {
+      paseoHome: join(fixture.dir, "home"),
+      runJjCommand: async (...args: Parameters<typeof executeJjCommand>) => {
+        commands.push(args[0]);
+        return executeJjCommand(...args);
+      },
+    };
+    const origin = scratchBareGitOrigin();
+    const upstream = scratchBareGitOrigin();
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "upstream", upstream]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    expect(fixture.jj(["describe", "-m", "first branch"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "first.txt"), "first\n");
+    const first = await getJjChangeMeta(fixture.repoDir, "@");
+    expect(fixture.jj(["new", "-r", "main", "-m", "second branch"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "second.txt"), "second\n");
+    const second = await getJjChangeMeta(fixture.repoDir, "@");
+    if (!first || !second) throw new Error("Missing test changes");
+    expect(fixture.jj(["new", "-r", "main", "-m", "new trunk"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "trunk.txt"), "trunk\n");
+    expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "remote-only", "-r", "main"]).status).toBe(0);
+    expect(
+      fixture.jj(["git", "push", "--bookmark", "remote-only", "--remote", "upstream"]).status,
+    ).toBe(0);
+    expect(fixture.jj(["bookmark", "forget", "remote-only", "--include-remotes"]).status).toBe(0);
+    expect(fixture.jj(["edit", first.changeId]).status).toBe(0);
+    const sibling = join(fixture.dir, "sibling");
+    expect(fixture.jj(["workspace", "add", "-r", second.changeId, sibling]).status).toBe(0);
+    expect(fixture.jj(["edit", second.changeId], sibling).status).toBe(0);
+    const approval = await jjFetchAndRebase(
+      fixture.repoDir,
+      { expectedChangeId: first.changeId },
+      context,
+    ).catch(toCheckoutError);
+    expect(approval).toMatchObject({
+      code: "NOT_ALLOWED",
+      reason: "rewrite_approval_required",
+      message: expect.stringContaining("shared workspaces: 1"),
+    });
+    const result = await jjFetchAndRebase(
+      fixture.repoDir,
+      { expectedChangeId: first.changeId, acknowledgeRewrites: true },
+      context,
+    );
+    expect(result.outcome).toBe("rebased");
+    const fetchIndex = commands.findIndex((args) => args.includes("--all-remotes"));
+    const rebaseIndex = commands.findIndex((args) => args[0] === "rebase");
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(rebaseIndex).toBeGreaterThan(fetchIndex);
+    expect(commands[rebaseIndex]).toEqual([
+      "rebase",
+      "--source",
+      "roots(trunk().. & mutable())",
+      "--onto",
+      fixture.jj(["log", "--no-graph", "-r", "trunk()", "-T", "commit_id"]).stdout.trim(),
+      "--skip-emptied",
+      "--ignore-immutable",
+    ]);
+    expect(result.changeId).toBe(first.changeId);
+    expect(
+      fixture
+        .jj(["log", "--no-graph", "-r", "remote-only@upstream", "-T", "description"])
+        .stdout.trim(),
+    ).toBe("new trunk");
+    for (const change of [first, second]) {
+      expect(
+        fixture
+          .jj(["log", "--no-graph", "-r", `${change.changeId}-`, "-T", "description"])
+          .stdout.trim(),
+      ).toBe("new trunk");
+    }
+    expect(readFileSync(join(fixture.repoDir, "first.txt"), "utf8")).toBe("first\n");
+    expect(readFileSync(join(fixture.repoDir, "trunk.txt"), "utf8")).toBe("trunk\n");
   });
 });

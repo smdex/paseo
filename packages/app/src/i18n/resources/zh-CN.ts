@@ -800,6 +800,14 @@ export const zhCN: TranslationResources = {
           pending: "正在 commit...",
           success: "已 commit",
         },
+        fetchRebase: {
+          label: "获取并变基",
+          pending: "正在获取并变基…",
+          detail: "获取所有远程仓库，然后将所有可变分支变基到 trunk。",
+          rebased: "已获取所有远程仓库，并将可变工作变基到 trunk。",
+          unchanged: "已获取所有远程仓库。可变工作已在 trunk 上。",
+          conflicts: "变基产生了冲突。请先在主机上解决冲突再继续。",
+        },
         fetch: {
           label: "获取",
           pending: "正在获取...",

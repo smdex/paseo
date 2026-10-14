@@ -812,6 +812,16 @@ export const es: TranslationResources = {
           pending: "Comprometiéndose...",
           success: "Comprometido",
         },
+        fetchRebase: {
+          label: "Obtener y rebasar",
+          pending: "Obteniendo y rebasando…",
+          detail: "Obtener todos los remotos y rebasar todas las ramas mutables sobre trunk.",
+          rebased:
+            "Se obtuvieron todos los remotos y se rebasaron los cambios mutables sobre trunk.",
+          unchanged: "Se obtuvieron todos los remotos. Los cambios mutables ya están sobre trunk.",
+          conflicts:
+            "Rebase con conflictos. Resuelve los conflictos en el host antes de continuar.",
+        },
         fetch: {
           label: "Obtener",
           pending: "Obteniendo...",

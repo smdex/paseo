@@ -808,6 +808,15 @@ export const ptBR: TranslationResources = {
           pending: "Fazendo commit...",
           success: "Commit concluído",
         },
+        fetchRebase: {
+          label: "Buscar e rebasear",
+          pending: "Buscando e rebaseando…",
+          detail: "Buscar todos os remotos e rebasear todas as branches mutáveis sobre trunk.",
+          rebased:
+            "Todos os remotos foram buscados e os trabalhos mutáveis rebaseados sobre trunk.",
+          unchanged: "Todos os remotos foram buscados. Os trabalhos mutáveis já estão sobre trunk.",
+          conflicts: "Rebase com conflitos. Resolva os conflitos no host antes de continuar.",
+        },
         fetch: {
           label: "Buscar",
           pending: "Buscando...",

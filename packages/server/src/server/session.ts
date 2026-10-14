@@ -3040,6 +3040,8 @@ export class Session {
         return this.checkoutSession.handleCheckoutRenameBranchRequest(msg);
       case "checkout.new_change.request":
         return this.checkoutSession.handleCheckoutNewChangeRequest(msg);
+      case "checkout.jj.fetch_rebase.request":
+        return this.checkoutSession.handleCheckoutFetchRebaseRequest(msg);
       case "checkout.edit_change.request":
         return this.checkoutSession.handleCheckoutEditChangeRequest(msg);
       case "checkout.describe_change.request":

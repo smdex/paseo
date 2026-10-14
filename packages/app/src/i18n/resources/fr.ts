@@ -813,6 +813,17 @@ export const fr: TranslationResources = {
           pending: "Commit en cours…",
           success: "Commité",
         },
+        fetchRebase: {
+          label: "Récupérer et rebaser",
+          pending: "Récupération et rebasage…",
+          detail:
+            "Récupérer tous les dépôts distants, puis rebaser toutes les branches modifiables sur trunk.",
+          rebased:
+            "Tous les dépôts distants ont été récupérés et les changements modifiables rebasés sur trunk.",
+          unchanged:
+            "Tous les dépôts distants ont été récupérés. Les changements modifiables sont déjà sur trunk.",
+          conflicts: "Rebasage avec conflits. Résolvez les conflits sur l’hôte avant de continuer.",
+        },
         fetch: {
           label: "Récupérer",
           pending: "Récupération...",

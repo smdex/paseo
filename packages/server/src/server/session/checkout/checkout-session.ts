@@ -51,6 +51,7 @@ import {
 import {
   dispatchCommitChanges,
   dispatchDescribeChange,
+  dispatchFetchAndRebase,
   dispatchEditChange,
   dispatchGetCommitFileDiff,
   dispatchDiscardChanges,
@@ -889,6 +890,41 @@ export class CheckoutSession {
     } catch (error) {
       this.host.emit({
         type: "checkout.describe_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutFetchRebaseRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.jj.fetch_rebase.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchFetchAndRebase(
+        cwd,
+        {
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "pull", { invalidateForge: true });
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.jj.fetch_rebase.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.jj.fetch_rebase.response",
         payload: {
           cwd,
           success: false,
