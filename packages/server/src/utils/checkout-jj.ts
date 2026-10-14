@@ -1466,8 +1466,12 @@ export async function resolveJjBranchCheckout(
 
 const SAFE_JJ_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
+export function isSafeJjRef(name: string): boolean {
+  return SAFE_JJ_REF_PATTERN.test(name);
+}
+
 function assertSafeJjRef(name: string, label: string): void {
-  if (!SAFE_JJ_REF_PATTERN.test(name)) {
+  if (!isSafeJjRef(name)) {
     throw new Error(`Invalid ${label}: ${name}`);
   }
 }
