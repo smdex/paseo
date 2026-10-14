@@ -90,7 +90,7 @@ function JjPrCreateForm({
         </Text>
         <Field label={t("workspace.git.actions.createPr.form.title")}>
           <FormTextInput
-            initialValue=""
+            initialValue={state.title}
             onChangeText={model.setTitle}
             editable={editable}
             size={size}
@@ -101,7 +101,7 @@ function JjPrCreateForm({
         </Field>
         <Field label={t("workspace.git.actions.createPr.form.body")}>
           <FormTextInput
-            initialValue=""
+            initialValue={state.body}
             onChangeText={model.setBody}
             editable={editable}
             size={size}
@@ -113,7 +113,7 @@ function JjPrCreateForm({
         </Field>
         <Field label={t("workspace.git.actions.createPr.form.base")}>
           <FormTextInput
-            initialValue=""
+            initialValue={state.baseRef}
             onChangeText={model.setBaseRef}
             editable={editable}
             size={size}

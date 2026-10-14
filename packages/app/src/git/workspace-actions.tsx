@@ -8,16 +8,11 @@ interface WorkspaceActionsProps {
 }
 
 export function WorkspaceActions({ serverId, cwd }: WorkspaceActionsProps) {
-  const { gitActions, actionForms } = useGitActions({
+  const { gitActions } = useGitActions({
     serverId,
     cwd,
     icons: GIT_ACTION_ICONS,
   });
 
-  return (
-    <>
-      <GitActionsSplitButton gitActions={gitActions} />
-      {actionForms}
-    </>
-  );
+  return <GitActionsSplitButton gitActions={gitActions} />;
 }

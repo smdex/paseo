@@ -1,3 +1,4 @@
+import { openCheckoutActionForm } from "./action-forms-store";
 import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { View, Text } from "react-native";
@@ -36,16 +37,18 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   const error = useCheckoutGitActionsStore(
     (state) => state.errorByCheckout[`${props.serverId}::${props.cwd}`] ?? null,
   );
-  const [opened, setOpened] = useState<JjChangeFormSnapshot | null>(null);
   const open = useCallback(
     (mode: JjChangeFormSnapshot["mode"]) => {
       if (props.changeId)
-        setOpened({
-          serverId: props.serverId,
-          cwd: props.cwd,
-          changeId: props.changeId,
-          description: props.description,
-          mode,
+        openCheckoutActionForm({
+          kind: "change",
+          snapshot: {
+            serverId: props.serverId,
+            cwd: props.cwd,
+            changeId: props.changeId,
+            description: props.description,
+            mode,
+          },
         });
     },
     [props.changeId, props.serverId, props.cwd, props.description],
@@ -53,7 +56,6 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   const openDescribe = useCallback(() => open("describe"), [open]);
   const openEdit = useCallback(() => open("edit"), [open]);
   const openNewOn = useCallback(() => open("new-on"), [open]);
-  const close = useCallback(() => setOpened(null), []);
   if (!enabled) return null;
   return (
     <View style={styles.controls} testID="jj-change-controls">
@@ -97,13 +99,6 @@ export function JjChangeControls(props: JjChangeControlsProps) {
       ) : null}
       {error ? (
         <Alert variant="error" size="sm" description={error} testID="jj-action-error" />
-      ) : null}
-      {opened ? (
-        <JjChangeForm
-          key={`${opened.mode}:${opened.cwd}:${opened.changeId}`}
-          snapshot={opened}
-          onClose={close}
-        />
       ) : null}
     </View>
   );
@@ -203,7 +198,7 @@ export function JjChangeForm({
         {snapshot.mode === "describe" || snapshot.mode === "new" ? (
           <Field label={t("workspace.git.actions.jj.description")}>
             <FormTextInput
-              initialValue={snapshot.description}
+              initialValue={state.draft}
               onChangeText={model.setDraft}
               multiline
               size={size}

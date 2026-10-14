@@ -107,6 +107,11 @@ test("native Create PR preserves a failed draft, prevents duplicate submission, 
     await title.fill(titleText);
     await body.fill("This body must survive a provider refusal.");
     await baseInput.fill("paseo-e2e-missing-base");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(title).toHaveValue(titleText);
+    await expect(body).toHaveValue("This body must survive a provider refusal.");
+    await expect(baseInput).toHaveValue("paseo-e2e-missing-base");
+    await page.setViewportSize({ width: 1400, height: 900 });
     await page.getByTestId("jj-pr-submit").click();
     await expect(page.getByTestId("jj-pr-submit")).toBeDisabled();
     await expect(page.getByTestId("jj-pr-submit")).toContainText("Creating PR");
