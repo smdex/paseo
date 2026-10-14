@@ -27,10 +27,11 @@ Two questions to ask before you commit a schema change:
 If you can't answer both with yes, the change isn't done.
 
 Checkout discovery keeps `defaultWorkspaceBase` and bookmark `localRef`, `remoteRef`, and
-`remoteName` optional. Git hosts can keep sending named refs; opt-in jj hosts send exact commit
-IDs because a Git-shaped ref is not a native jj revision. Older clients accept the added fields,
-and newer clients accept their omission. Native picker rows without exact refs are unavailable,
-not reinterpreted as Git branches. This does not enable jj by default or establish full jj parity.
+`remoteName` optional. Git hosts can keep sending named refs; jj hosts send exact commit IDs
+because a Git-shaped ref is not a native jj revision. Older clients accept the added fields, and
+newer clients accept their omission. Native picker rows without exact refs are unavailable, not
+reinterpreted as Git branches. First-class jj checkout is available by default when the daemon
+has a supported jj runtime; `PASEO_JJ_DISPATCH=0` and `PASEO_DISABLE_JJ=1` explicitly disable it.
 The old/new field combinations and generated inbound validation are covered in
 `packages/protocol/src/messages.wire-compat.test.ts`.
 

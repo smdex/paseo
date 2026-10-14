@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -115,6 +115,25 @@ describe("resolveJjRuntime", () => {
     const probe = await resolveJjRuntime();
     expect(probe.ok).toBe(false);
     expect(probe.reason).toBe("disabled");
+  });
+
+  it("rejects a jj binary below the supported runtime version", async () => {
+    const previousPath = process.env.PATH;
+    const binDir = mkdtempSync(join(tmpdir(), "paseo-old-jj-bin-"));
+    writeFileSync(join(binDir, "jj"), "#!/bin/sh\nprintf 'jj 0.44.9\\n'\n");
+    chmodSync(join(binDir, "jj"), 0o755);
+    process.env.PATH = binDir;
+    try {
+      await expect(resolveJjRuntime()).resolves.toMatchObject({
+        ok: false,
+        version: "0.44.9",
+        reason: "version",
+      });
+    } finally {
+      process.env.PATH = previousPath;
+      rmSync(binDir, { recursive: true, force: true });
+      resetJjRuntimeCache();
+    }
   });
 
   describe.skipIf(!jjAvailable)("with the real binary", () => {
