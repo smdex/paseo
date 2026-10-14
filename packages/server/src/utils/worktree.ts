@@ -30,6 +30,7 @@ import {
   isQualifiedRef,
   type PaseoWorktreeChangeRequestHint,
   readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
   readPaseoWorktreeRuntimePort,
   writePaseoWorktreeMetadata,
   writePaseoWorktreeRuntimeMetadata,
@@ -46,6 +47,7 @@ import {
   getRelativePathInsideRoot,
   isPathInsideRoot,
 } from "./path.js";
+import { resolveJjRepoIdentity } from "./vcs-backend.js";
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
@@ -954,6 +956,22 @@ export async function isPaseoOwnedWorktreeCwd(
   options?: PaseoWorktreeOwnershipOptions,
 ): Promise<PaseoWorktreeOwnership> {
   const resolvedCwd = await normalizePathForOwnership(cwd);
+  const jjIdentity = resolveJjRepoIdentity(resolvedCwd);
+  if (
+    jjIdentity &&
+    (await normalizePathForOwnership(jjIdentity.workspaceRoot)) !==
+      (await normalizePathForOwnership(jjIdentity.primaryRoot)) &&
+    readJjWorkspaceIncarnation(jjIdentity.workspaceRoot) &&
+    (await readPaseoWorktreeMetadata(jjIdentity.workspaceRoot))?.version === 2
+  ) {
+    // Sibling jj workspaces carry creation authority; their location alone proves nothing.
+    return {
+      allowed: true,
+      repoRoot: jjIdentity.primaryRoot,
+      worktreeRoot: dirname(jjIdentity.workspaceRoot),
+      worktreePath: jjIdentity.workspaceRoot,
+    };
+  }
 
   // repoRoot is best-effort: git may be unreachable from the worktree (e.g. a
   // previous archive attempt removed the admin dir before the working tree

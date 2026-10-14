@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,6 +14,7 @@ import {
   type WebSocketLike,
 } from "@getpaseo/client/internal/daemon-client";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
+import { createScratchJjRepo } from "../test-utils/jj.js";
 
 // The reshaped workspace.create.request forwards its worktree `source`
 // (action/refName/branchName/githubPrNumber/worktreeSlug) into createWorktreeCore.
@@ -901,6 +902,73 @@ const timer = setInterval(() => {
     await daemon.close();
     await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
+test("jj workspace creation defaults to the source parent and preserves sibling recovery authority", async () => {
+  const previousDispatch = process.env.PASEO_JJ_DISPATCH;
+  process.env.PASEO_JJ_DISPATCH = "1";
+  const repo = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+  const daemon = await createTestPaseoDaemon();
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.11.2",
+  });
+  onTestFinished(async () => {
+    await client.close();
+    await daemon.close();
+    repo.dispose();
+    if (previousDispatch === undefined) delete process.env.PASEO_JJ_DISPATCH;
+    else process.env.PASEO_JJ_DISPATCH = previousDispatch;
+  });
+  const revision = (cwd: string, ref: string, template = "commit_id") =>
+    repo.jj(["log", "--no-graph", "-r", ref, "-T", template], cwd).stdout.trim();
+  repo.jj(["new", "-m", "parent beyond trunk"]);
+  repo.jj(["new", "-m", "current work"]);
+  writeFileSync(path.join(repo.repoDir, "current.txt"), "preserve current\n");
+  const current = revision(repo.repoDir, "@", "change_id");
+  const parent = revision(repo.repoDir, "@-");
+  await client.connect();
+  const status = await client.getCheckoutStatus(repo.repoDir);
+  expect(status.defaultWorkspaceBase).toEqual({ refName: "@-", displayName: "Current parent" });
+  const request = {
+    source: { kind: "worktree" as const, cwd: repo.repoDir, worktreeSlug: "first" },
+    idempotencyKey: "native-sibling-retry",
+  };
+  const cwd = path.join(repo.dir, "repo-first");
+  mkdirSync(cwd);
+  const collision = await client.createWorkspace(request);
+  expect(collision.error).toContain(`Workspace path already exists: ${cwd}`);
+  expect(collision.errorCode).toBe("workspace_path_exists");
+  expect(collision.creation?.outcomeUnknown).toBe(false);
+  rmSync(cwd, { recursive: true });
+  const created = await client.createWorkspace(request);
+  expect(created.error).toBeNull();
+  const replayed = await client.createWorkspace(request);
+  expect(replayed.workspace?.id).toBe(created.workspace?.id);
+  const workspace = created.workspace!;
+  expect(workspace.workspaceDirectory).toBe(cwd);
+  expect(revision(cwd, "@-")).toBe(parent);
+  expect(revision(repo.repoDir, "@", "change_id")).toBe(current);
+  expect(readFileSync(path.join(repo.repoDir, "current.txt"), "utf8")).toBe("preserve current\n");
+  expect((await client.getCheckoutStatus(cwd)).isPaseoOwnedWorktree).toBe(true);
+  const nestedGit = path.join(cwd, "nested-git");
+  execFileSync("git", ["init", "-b", "main", nestedGit], { stdio: "pipe" });
+  expect((await client.getCheckoutStatus(nestedGit)).isPaseoOwnedWorktree).toBe(false);
+  rmSync(nestedGit, { recursive: true });
+
+  repo.jj(["commit", "-m", "secondary parent"], cwd);
+  const secondaryParent = revision(cwd, "@-");
+  const secondaryCurrent = revision(cwd, "@", "change_id");
+  const secondary = await client.createWorkspace({
+    source: { kind: "worktree", cwd, worktreeSlug: "second" },
+  });
+  expect(secondary.error).toBeNull();
+  expect(secondary.workspace?.workspaceDirectory).toBe(path.join(repo.dir, "repo-second"));
+  expect(revision(secondary.workspace!.workspaceDirectory, "@-")).toBe(secondaryParent);
+  expect(revision(cwd, "@", "change_id")).toBe(secondaryCurrent);
+  expect((await client.archiveWorkspace(workspace.id)).error).toBeNull();
+  expect(existsSync(cwd)).toBe(false);
+  await client.restoreWorkspace(workspace.id);
+  expect(revision(cwd, "@", "change_id")).toBe(secondaryCurrent);
+  expect((await client.getCheckoutStatus(cwd)).isPaseoOwnedWorktree).toBe(true);
 }, 180000);
 
 test("agent creation rejects legacy worktree intent without provisioning or executing setup", async () => {

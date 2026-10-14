@@ -1377,7 +1377,7 @@ describeIfJj("jj local core parity", () => {
     expect(history.commits.map((commit) => commit.subject)).toEqual(["dirty current", "initial"]);
     expect(history.commits.every((commit) => !commit.isOnBase)).toBe(true);
     await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
-      defaultWorkspaceBase: { refName: "@", displayName: "Current change" },
+      defaultWorkspaceBase: { refName: "@-", displayName: "Current parent" },
       hasRemote: true,
     });
   });

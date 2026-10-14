@@ -597,7 +597,7 @@ describeIfJj("workspace recovery on jj", () => {
     });
     const cwd = join(created.worktreePath, "different-subproject-name");
     mkdirSync(cwd);
-    fixture.jj(["bookmark", "create", "paseo/recovery/subproject", "-r", "root-name@"]);
+    fixture.jj(["bookmark", "create", "paseo/recovery/subproject", "-r", "repo-root-name@"]);
     const record = createWorkspace({
       workspaceId: "wks_subproject",
       jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
@@ -693,13 +693,13 @@ describeIfJj("workspace recovery on jj", () => {
     });
     // The workspace is back at the pin's change...
     const description = fixture
-      .jj(["log", "--no-graph", "-r", "restorable@-", "-T", "description"])
+      .jj(["log", "--no-graph", "-r", "repo-restorable@-", "-T", "description"])
       .stdout.trim();
     expect(description).toBe("pinned work");
     // ...and the surviving directory was preserved as an orphan sibling.
     const orphanParent = join(created.worktreePath, "..");
     const orphans = readdirSync(orphanParent).filter((name) =>
-      name.startsWith("restorable.orphan-"),
+      name.startsWith("repo-restorable.orphan-"),
     );
     expect(orphans.length).toBe(1);
     expect(existsSync(join(orphanParent, orphans[0] ?? "", "orphaned.txt"))).toBe(true);
@@ -715,7 +715,7 @@ describeIfJj("workspace recovery on jj", () => {
       source: { kind: "branch-off", baseBranch: "main", branchName: "feat/shared-a" },
       worktreesRoot,
     });
-    fixture.jj(["bookmark", "create", pinShared, "-r", "shared-a@"]);
+    fixture.jj(["bookmark", "create", pinShared, "-r", "repo-shared-a@"]);
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: createdA.worktreePath,
@@ -895,8 +895,8 @@ describeIfJj("workspace recovery on jj", () => {
       "keep live\n",
     );
     expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name).sort()).toEqual([
-      "concurrent",
       "default",
+      "repo-concurrent",
     ]);
     expect(harness.records.get("restore-a")?.archivedAt).toBeNull();
     expect(harness.records.get("restore-b")?.archivedAt).toBeNull();
@@ -1014,7 +1014,7 @@ describeIfJj("workspace recovery on jj", () => {
     writeFileSync(join(root, "sub", "saved.txt"), "approved subproject bytes\n");
     fixture.jj(["describe", "-m", "old work"], root);
     const pin = "paseo/recovery/missing-selection";
-    fixture.jj(["bookmark", "create", pin, "-r", "original@"]);
+    fixture.jj(["bookmark", "create", pin, "-r", "repo-original@"]);
     const record = createWorkspace({
       workspaceId: "missing-selection",
       projectId: project.projectId,
@@ -1037,7 +1037,7 @@ describeIfJj("workspace recovery on jj", () => {
     "surviving replacement backing refuses recovery even with missing selected cwd (subproject=%s, backend=%s)",
     async (subproject, backend) => {
       const h = await missingSelectionFixture(subproject);
-      h.fixture.jj(["workspace", "forget", "original"]);
+      h.fixture.jj(["workspace", "forget", "repo-original"]);
       renameSync(h.root, `${h.root}.original`);
       if (backend === "git") {
         mkdirSync(h.root);
@@ -1101,7 +1101,7 @@ describeIfJj("workspace recovery on jj", () => {
     "missing subproject recovery preserves authorized %s backing restoration",
     async (mode) => {
       const h = await missingSelectionFixture(true);
-      h.fixture.jj(["workspace", "forget", "original"]);
+      h.fixture.jj(["workspace", "forget", "repo-original"]);
       renameSync(h.root, `${h.root}.original`);
       if (mode === "plain-partial") {
         mkdirSync(h.root);
@@ -1132,7 +1132,7 @@ describeIfJj("workspace recovery on jj", () => {
     "immediate pre-rename check refuses checkout materialized after absent-root planning (subproject=%s)",
     async (subproject) => {
       const h = await missingSelectionFixture(subproject);
-      h.fixture.jj(["workspace", "forget", "original"]);
+      h.fixture.jj(["workspace", "forget", "repo-original"]);
       renameSync(h.root, `${h.root}.original`);
       let materialized = false;
       const orphans: string[] = [];
@@ -1159,7 +1159,7 @@ describeIfJj("workspace recovery on jj", () => {
   );
   test("a surviving backing file cannot be treated as an absent checkout", async () => {
     const h = await missingSelectionFixture(true);
-    h.fixture.jj(["workspace", "forget", "original"]);
+    h.fixture.jj(["workspace", "forget", "repo-original"]);
     renameSync(h.root, `${h.root}.original`);
     writeFileSync(h.root, "unrelated file at backing pathname\n");
     const service = createWorkspaceRecoveryService({
