@@ -209,7 +209,30 @@ describe("git-actions-policy", () => {
       "new-change",
       "archive-workspace",
     ]);
-    expect(jjActions.secondary.at(-2)).toMatchObject({ id: "new-change", label: "New change" });
+    expect(jjActions.secondary.at(-2)).toMatchObject({
+      id: "new-change",
+      label: "New change",
+      closeOnSelect: true,
+    });
+  });
+
+  it("offers native Create PR as a form action while Git creation keeps its progress in the menu", () => {
+    const base = {
+      hasRemote: true,
+      isOnBaseBranch: false,
+      aheadCount: 2,
+      shipDefault: "pr" as const,
+    };
+    const native = buildGitActions(createInput({ ...base, isJj: true }));
+    const git = buildGitActions(createInput(base));
+    expect(native.secondary.find((action) => action.id === "pr")).toMatchObject({
+      label: "Create PR",
+      closeOnSelect: true,
+    });
+    expect(git.secondary.find((action) => action.id === "pr")).toMatchObject({
+      label: "Create PR",
+      closeOnSelect: false,
+    });
   });
 
   it("hides deferred merge actions on jj checkouts", () => {

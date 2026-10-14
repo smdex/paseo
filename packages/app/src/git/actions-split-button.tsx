@@ -163,12 +163,7 @@ export function GitActionsSplitButton({
               archiveShortcutKeys={archiveShortcutKeys}
               needsSeparator={action.startsGroup}
               showSeparator={index > 0}
-              closeOnSelect={
-                action.status === "idle" &&
-                action.id === "pr" &&
-                action.label === action.pendingLabel &&
-                action.label === action.successLabel
-              }
+              closeOnSelect={action.closeOnSelect === true}
             />
           ))}
         </DropdownMenuContent>
@@ -228,12 +223,7 @@ export function GitActionsSplitButton({
                     archiveShortcutKeys={archiveShortcutKeys}
                     needsSeparator={action.startsGroup}
                     showSeparator={index > 0}
-                    closeOnSelect={
-                      action.status === "idle" &&
-                      action.id === "pr" &&
-                      action.label === action.pendingLabel &&
-                      action.label === action.successLabel
-                    }
+                    closeOnSelect={action.closeOnSelect === true}
                   />
                 ))}
               </DropdownMenuContent>
@@ -258,7 +248,7 @@ export function GitActionsSplitButton({
                 key={action.id}
                 action={action}
                 onSelect={runGitAction}
-                closeOnSelect={false}
+                closeOnSelect={action.closeOnSelect === true}
               />
             ))}
           </DropdownMenuContent>
