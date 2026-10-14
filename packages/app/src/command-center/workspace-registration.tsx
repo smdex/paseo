@@ -1,4 +1,3 @@
-import { CheckoutActionFormsHost } from "@/git/action-forms";
 import { useCallback, useMemo, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -336,5 +335,5 @@ export function useWorkspaceCommandCenterActions(): void {
 
 export function CommandCenterWorkspaceActions(): ReactElement | null {
   useWorkspaceCommandCenterActions();
-  return <CheckoutActionFormsHost />;
+  return null;
 }

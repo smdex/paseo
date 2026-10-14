@@ -2,6 +2,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
+import { CheckoutActionFormsHost } from "@/git/action-forms";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -645,6 +646,8 @@ function AppContainerLifetime({
         <MobileGestureWrapper chromeEnabled={compactGesturesEnabled}>
           {children}
         </MobileGestureWrapper>
+        {/* Responsive chrome is reparented above; opened form models must stay mounted. */}
+        <CheckoutActionFormsHost />
       </CommandCenterProvider>
     </ComposerEditingSessionsProvider>
   );
