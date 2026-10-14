@@ -1,3 +1,5 @@
+import { JjPrCreateFormHost } from "@/git/jj-pr-create-form";
+import type { JjPrCreateSnapshot } from "@/git/jj-pr-create-form-model";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useState, useCallback, useEffect, useMemo, type ReactElement } from "react";
 import { Info } from "lucide-react-native";
@@ -209,7 +211,7 @@ interface UseGitActionsResult {
   gitActions: GitActions;
   branchLabel: string;
   isGit: boolean;
-  newChangeForm: ReactElement;
+  actionForms: ReactElement;
 }
 
 interface UseWorkspaceScreenArchiveControllerInput {
@@ -327,6 +329,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const activeWorkspaceSelection = useActiveWorkspaceSelection();
   const [postShipArchiveSuggested, setPostShipArchiveSuggested] = useState(false);
   const [shipDefault, setShipDefault] = useState<"merge" | "pr">("pr");
+  const [prCreateSnapshot, setPrCreateSnapshot] = useState<JjPrCreateSnapshot | null>(null);
   const [newChangeSnapshot, setNewChangeSnapshot] = useState<JjChangeFormSnapshot | null>(null);
 
   const { status, isLoading: isStatusLoading } = useCheckoutStatusQuery({ serverId, cwd });
@@ -573,6 +576,11 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
 
   const handleCreatePr = useCallback(() => {
     void persistShipDefault("pr");
+    if (isJj) {
+      if (!gitStatus?.changeId) return;
+      setPrCreateSnapshot({ serverId, cwd, changeId: gitStatus.changeId, bookmark: branchLabel });
+      return;
+    }
     void runCreatePr({ serverId, cwd })
       .then(() => {
         toastActionSuccess(t("workspace.git.actions.createPr.success", forgeVocabulary(forge)));
@@ -582,6 +590,9 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         toastActionError(err, t("workspace.git.actions.toasts.failedCreatePr"));
       });
   }, [
+    isJj,
+    gitStatus,
+    branchLabel,
     cwd,
     forge,
     persistShipDefault,
@@ -933,11 +944,15 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   );
 
   const closeNewChangeForm = useCallback(() => setNewChangeSnapshot(null), []);
-  const newChangeForm = (
-    <NewChangeFormHost snapshot={newChangeSnapshot} onClose={closeNewChangeForm} />
+  const closePrCreateForm = useCallback(() => setPrCreateSnapshot(null), []);
+  const actionForms = (
+    <>
+      <NewChangeFormHost snapshot={newChangeSnapshot} onClose={closeNewChangeForm} />
+      <JjPrCreateFormHost snapshot={prCreateSnapshot} forge={forge} onClose={closePrCreateForm} />
+    </>
   );
 
-  return { gitActions, branchLabel, isGit, newChangeForm };
+  return { gitActions, branchLabel, isGit, actionForms };
 }
 
 function NewChangeFormHost({

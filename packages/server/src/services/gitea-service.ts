@@ -2166,6 +2166,12 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     async createPullRequest(input: CreatePullRequestOptions): Promise<PullRequestCreateResult> {
+      const repository = requireForgeRepositoryContext(input);
+      const crossRepository =
+        repository && repository.sourceRepository !== repository.targetRepository;
+      const head = crossRepository
+        ? `${repository.sourceRepository.split("/")[0]}:${input.head}`
+        : input.head;
       const args = [
         "pr",
         "create",
@@ -2174,7 +2180,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         "--description",
         input.body ?? "",
         "--head",
-        input.head,
+        head,
         "--base",
         input.base,
       ];

@@ -809,6 +809,12 @@ export const en = {
         viewPr: "View PR",
         viewPr_mr: "View MR",
         createPr: {
+          form: {
+            title: "Title",
+            body: "Description",
+            base: "Base bookmark (optional)",
+            automatic: "Generate automatically",
+          },
           label: "Create PR",
           pending: "Creating PR...",
           success: "PR Created",

@@ -821,6 +821,12 @@ export const ru: TranslationResources = {
         },
         viewPr: "Посмотреть PR",
         createPr: {
+          form: {
+            title: "Заголовок",
+            body: "Описание",
+            base: "Базовая закладка (необязательно)",
+            automatic: "Создать автоматически",
+          },
           label: "Создать PR",
           pending: "Создание PR...",
           success: "PR создан",

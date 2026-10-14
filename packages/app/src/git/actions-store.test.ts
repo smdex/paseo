@@ -1,3 +1,4 @@
+import { openJjPrCreateForm } from "./jj-pr-create-form-model";
 import { openJjChangeForm, type JjChangeFormPorts } from "./jj-change-form-model";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CheckoutOperationError, type DaemonClient } from "@getpaseo/client/internal/daemon-client";
@@ -601,6 +602,67 @@ describe("native change form", () => {
       status: "success",
       canSubmit: false,
     });
+    model.close();
+  });
+});
+
+describe("native pull request form", () => {
+  it("keeps title, body, base and change on failure, blocks duplicates and exposes the created PR", async () => {
+    const snapshot = {
+      serverId: "host",
+      cwd: "/native",
+      changeId: "captured",
+      bookmark: "feature",
+    };
+    const pending = createDeferred<{ url: string; number: number }>();
+    const requests: unknown[] = [];
+    let attempts = 0;
+    const model = openJjPrCreateForm(snapshot, {
+      create: async (input) => {
+        requests.push(input);
+        attempts++;
+        if (attempts === 1) return pending.promise;
+        return { url: "https://github.com/acme/native/pull/12", number: 12 };
+      },
+      refresh: async () => {},
+    });
+    model.setTitle("Kept title");
+    model.setBody("Kept body");
+    model.setBaseRef("main");
+    const submitting = model.submit();
+    await model.submit();
+    expect(model.getState().status).toBe("pending");
+    expect(requests).toEqual([
+      {
+        cwd: "/native",
+        title: "Kept title",
+        body: "Kept body",
+        baseRef: "main",
+        expectedChangeId: "captured",
+      },
+    ]);
+    pending.reject(new Error("Describe the unpublished change before pushing."));
+    await submitting;
+    expect(model.getState()).toMatchObject({
+      ...snapshot,
+      title: "Kept title",
+      body: "Kept body",
+      baseRef: "main",
+      status: "error",
+      error: "Describe the unpublished change before pushing.",
+      result: null,
+    });
+    await model.submit();
+    expect(model.getState()).toMatchObject({
+      title: "Kept title",
+      body: "Kept body",
+      baseRef: "main",
+      status: "success",
+      error: null,
+      result: { url: "https://github.com/acme/native/pull/12", number: 12 },
+    });
+    await model.submit();
+    expect(requests).toHaveLength(2);
     model.close();
   });
 });

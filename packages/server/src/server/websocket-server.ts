@@ -1953,6 +1953,7 @@ export class VoiceAssistantWebSocketServer {
         // never disagree. Warm-up runs at server construction.
         checkoutJj: isJjFeatureAvailable(),
         checkoutJjCheckpoint: isJjFeatureAvailable(),
+        checkoutJjPrCreate: isJjFeatureAvailable(),
         checkoutJjRewriteApproval: isJjFeatureAvailable(),
         checkoutJjGraphSelections: isJjFeatureAvailable(),
         // COMPAT(agentProfiles): added in v0.3.2, remove gate after 2027-02-11.

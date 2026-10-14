@@ -11,7 +11,7 @@ import {
   type CheckoutSessionHost,
 } from "./checkout-session.js";
 import type { GitMutationService } from "../git-mutation/git-mutation-service.js";
-import { createGitHubService } from "../../../services/github-service.js";
+import { createGitHubService, GitHubCommandError } from "../../../services/github-service.js";
 import { ForgeCliMissingError } from "../../../services/forge-cli-command.js";
 import {
   ForgeRepositoryContextError,
@@ -971,41 +971,52 @@ describe("CheckoutSession", () => {
   });
 
   describe("pull request deferral on jj", () => {
-    itIfJj("rejects PR creation with the typed deferral before any forge or git work", async () => {
-      const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
-      sessionDisposables.push(fixture.dispose);
-      const forgeCalls: string[] = [];
-      const { checkout, emitted, generatorCalls } = makeCheckoutSession({
-        git: {
-          resolveForge: async () => {
-            forgeCalls.push("resolveForge");
-            return { forge: "github", host: "github.com", service: null };
+    itIfJj.each([
+      {
+        error: new ForgeRepositoryContextError("Select the intended publication remote."),
+        message: "Select the intended publication remote.",
+      },
+      {
+        error: new GitHubCommandError({
+          args: ["api", "repos/acme/native/pulls"],
+          cwd: "/native",
+          exitCode: 1,
+          stderr: "Choose a valid target branch.",
+        }),
+        message:
+          "GitHub CLI command failed: gh api repos/acme/native/pulls\nChoose a valid target branch.",
+      },
+    ])(
+      "reports native PR publication failure without claiming success: $message",
+      async ({ error, message }) => {
+        const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+        sessionDisposables.push(fixture.dispose);
+        const { checkout, emitted } = makeCheckoutSession({
+          git: {
+            resolveForge: async () => {
+              throw error;
+            },
           },
-        },
-      });
-
-      await checkout.handleCheckoutPrCreateRequest({
-        type: "checkout_pr_create_request",
-        cwd: fixture.repoDir,
-        baseRef: "main",
-        title: "Feature",
-        body: "Description",
-        requestId: "pr1",
-      });
-
-      expect(forgeCalls).toEqual([]);
-      expect(generatorCalls.generatePullRequestText).toEqual([]);
-      expect(emitted.at(-1)).toMatchObject({
-        type: "checkout_pr_create_response",
-        payload: {
+        });
+        await checkout.handleCheckoutPrCreateRequest({
+          type: "checkout_pr_create_request",
           cwd: fixture.repoDir,
-          url: null,
-          number: null,
-          requestId: "pr1",
-          error: { code: "NOT_ALLOWED", message: expect.stringContaining("not supported on jj") },
-        },
-      });
-    });
+          title: "Kept title",
+          body: "Kept body",
+          requestId: "native-create",
+        });
+        expect(emitted.at(-1)).toEqual({
+          type: "checkout_pr_create_response",
+          payload: {
+            cwd: fixture.repoDir,
+            url: null,
+            number: null,
+            error: { code: "UNKNOWN", message },
+            requestId: "native-create",
+          },
+        });
+      },
+    );
 
     itIfJj("rejects PR merge with the typed deferral", async () => {
       const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
