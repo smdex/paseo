@@ -887,6 +887,7 @@ export const ar: TranslationResources = {
         },
         viewPr_mr: "عرض MR",
         autoMerge: {
+          disable: "تعطيل الدمج التلقائي",
           enableSquash: "دمج تلقائي (squash)",
           enableMerge: "دمج تلقائي (merge)",
           enableRebase: "دمج تلقائي (rebase)",

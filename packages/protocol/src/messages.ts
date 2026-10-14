@@ -2333,10 +2333,15 @@ export const CheckoutPrCreateRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const CheckoutPrTargetSchema = z.object({ host: z.string(), targetRepository: z.string() });
+export const CheckoutPrIdentitySchema = CheckoutPrTargetSchema.extend({ number: z.number() });
+export type CheckoutPrIdentity = z.infer<typeof CheckoutPrIdentitySchema>;
+
 export const CheckoutPrMergeRequestSchema = z.object({
   type: z.literal("checkout_pr_merge_request"),
   cwd: z.string(),
   mergeMethod: z.enum(["merge", "squash", "rebase"]),
+  expectedPullRequest: CheckoutPrIdentitySchema.optional(),
   requestId: z.string(),
 });
 
@@ -2345,6 +2350,7 @@ export const CheckoutForgeSetAutoMergeRequestSchema = z.object({
   cwd: z.string(),
   enabled: z.boolean(),
   mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
+  expectedPullRequest: CheckoutPrIdentitySchema.optional(),
   requestId: z.string(),
 });
 
@@ -3827,6 +3833,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutJjPrCreate: z.boolean().optional(),
         // COMPAT(checkoutJjPrWorkspace): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native PR workspace creation.
         checkoutJjPrWorkspace: z.boolean().optional(),
+        // COMPAT(checkoutJjPrMutations): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports selected native PR commands.
+        checkoutJjPrMutations: z.boolean().optional(),
         // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
         checkoutJjRewriteApproval: z.boolean().optional(),
         // COMPAT(checkoutJjFetchRebase): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native fetch/rebase.
@@ -5561,6 +5569,7 @@ export const CheckoutPrStatusSchema = z.object({
   // COMPAT(forge): added in v0.2.0-beta.1. Remove the GitHub default after
   // 2027-01-17 once the supported daemon floor is >= v0.2.0.
   forge: z.string().optional().default("github"),
+  repository: CheckoutPrTargetSchema.optional(),
   projectPath: z.string().optional(),
   number: z.number().optional(),
   url: z.string(),

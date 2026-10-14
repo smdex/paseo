@@ -891,6 +891,7 @@ export const ptBR: TranslationResources = {
         },
         viewPr_mr: "Ver MR",
         autoMerge: {
+          disable: "Desativar mesclagem automática",
           enableSquash: "Merge automático",
           enableMerge: "Merge automático",
           enableRebase: "Merge automático",

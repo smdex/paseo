@@ -1,3 +1,4 @@
+import type { CheckoutPrIdentity } from "@getpaseo/protocol/messages";
 import { ForgeRepositoryContextError } from "../../../services/forge-service.js";
 import { jjCreatePullRequest } from "../../../utils/checkout-jj.js";
 import type pino from "pino";
@@ -32,7 +33,6 @@ import {
 import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitService,
-  WorkspaceGitSnapshotOptions,
 } from "../../workspace-git-service.js";
 import { assertSafeGitRef } from "../../worktree-session.js";
 import type { GitMutationService } from "../git-mutation/git-mutation-service.js";
@@ -63,7 +63,6 @@ import {
   dispatchPushCurrentBranch,
   dispatchStashPop,
   dispatchStashSave,
-  NotSupportedOnJjError,
   resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
 import { getJjSnapshotFacts } from "../../../utils/checkout-jj.js";
@@ -88,12 +87,6 @@ export interface CheckoutSessionHost {
     branch: string,
   ): Promise<{ previousBranch: string | null; currentBranch: string | null }>;
 }
-
-type CurrentWorkspacePullRequest = NonNullable<
-  WorkspaceGitRuntimeSnapshot["forge"]["pullRequest"]
-> & {
-  number: number;
-};
 
 class NoResolvedForgeServiceError extends Error {
   readonly authState = "no_remote" satisfies ForgeAuthState;
@@ -1212,23 +1205,16 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      // Same deferral as PR creation (jj plan §7): reject before forge
-      // resolution or any merge-side git plumbing.
-      if ((await resolveEffectiveBackend(cwd)) === "jj") {
-        throw new NotSupportedOnJjError(
-          "Merging pull requests is not supported on jj repositories yet",
-        );
-      }
-      const pullRequest = await this.resolveCurrentPullRequest(cwd, "merge", {
-        force: true,
-        includeForge: true,
-        reason: "merge-pr-validation",
-      });
-      const { service } = await this.requireForgeService(cwd);
+      const { pullRequest, service, repository } = await this.resolvePullRequestCommand(
+        cwd,
+        "merge",
+        msg.expectedPullRequest,
+      );
       await service.mergePullRequest({
         cwd,
         prNumber: pullRequest.number,
         mergeMethod: msg.mergeMethod,
+        ...(repository ? { repository } : {}),
         status: pullRequest,
       });
       await this.gitMutation.notifyGitMutation(cwd, "merge-pr", { invalidateForge: true });
@@ -1270,15 +1256,11 @@ export class CheckoutSession {
         : "checkout.github.set_auto_merge.response";
 
     try {
-      if ((await resolveEffectiveBackend(cwd)) === "jj") {
-        throw new NotSupportedOnJjError("Pull request auto-merge");
-      }
-      const pullRequest = await this.resolveCurrentPullRequest(cwd, "auto-merge", {
-        force: true,
-        includeForge: true,
-        reason: "auto-merge-validation",
-      });
-      const { service } = await this.requireForgeService(cwd);
+      const { pullRequest, service, repository } = await this.resolvePullRequestCommand(
+        cwd,
+        "auto-merge",
+        msg.type === "checkout.forge.set_auto_merge.request" ? msg.expectedPullRequest : undefined,
+      );
       if (msg.enabled) {
         const mergeMethod = msg.mergeMethod;
         if (!mergeMethod) {
@@ -1287,6 +1269,7 @@ export class CheckoutSession {
         await service.enablePullRequestAutoMerge({
           cwd,
           prNumber: pullRequest.number,
+          ...(repository ? { repository } : {}),
           mergeMethod,
           status: pullRequest,
         });
@@ -1297,6 +1280,7 @@ export class CheckoutSession {
         await service.disablePullRequestAutoMerge({
           cwd,
           prNumber: pullRequest.number,
+          ...(repository ? { repository } : {}),
           status: pullRequest,
         });
       }
@@ -1332,17 +1316,43 @@ export class CheckoutSession {
     }
   }
 
-  private async resolveCurrentPullRequest(
+  private async resolvePullRequestCommand(
     cwd: string,
     operation: "merge" | "auto-merge",
-    options?: WorkspaceGitSnapshotOptions,
-  ): Promise<CurrentWorkspacePullRequest> {
-    const snapshot = await this.workspaceGitService.getSnapshot(cwd, options);
+    expected?: CheckoutPrIdentity,
+  ) {
+    const native = (await resolveEffectiveBackend(cwd)) === "jj";
+    const snapshot = await this.workspaceGitService.getSnapshot(cwd, {
+      force: true,
+      includeForge: true,
+      reason: operation === "merge" ? "merge-pr-validation" : "auto-merge-validation",
+    });
+    if (native && snapshot.forge.error) throw new Error(snapshot.forge.error.message);
     const pullRequest = snapshot.forge.pullRequest;
-    if (!pullRequest || typeof pullRequest.number !== "number") {
+    if (!pullRequest || typeof pullRequest.number !== "number")
       throw new Error(`Unable to determine current change request number for ${operation}`);
+    const { service, repository } = await this.requireForgeService(cwd);
+    if (native) {
+      if (!expected || !repository || !snapshot.forge.repository)
+        throw new ForgeRepositoryContextError(
+          "Reopen this action from refreshed PR status so its exact repository and number are captured.",
+        );
+      const sameTarget = (target: Pick<ForgeRepositoryContext, "host" | "targetRepository">) =>
+        target.host === expected.host && target.targetRepository === expected.targetRepository;
+      if (
+        pullRequest.number !== expected.number ||
+        !sameTarget(snapshot.forge.repository) ||
+        !sameTarget(repository)
+      )
+        throw new ForgeRepositoryContextError(
+          "The selected pull request changed since this action opened. Dismiss it and refresh PR status before trying again.",
+        );
     }
-    return { ...pullRequest, number: pullRequest.number };
+    return {
+      pullRequest: { ...pullRequest, number: pullRequest.number },
+      service,
+      repository: native ? repository : undefined,
+    };
   }
 
   async handleCheckoutPrStatusRequest(

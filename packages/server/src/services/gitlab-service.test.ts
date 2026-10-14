@@ -1811,3 +1811,56 @@ it("creates a native fork MR with an explicit source project and target host", a
     ],
   ]);
 });
+
+it.each(["merge", "enable", "disable"] as const)(
+  "routes native GitLab %s to the exact target project and host",
+  async (operation) => {
+    const { service, calls } = makeService(() => ok(""));
+    const repository: ForgeRepositoryContext = {
+      host: "gl.private",
+      targetRepository: "upstream/group/project",
+      sourceRepository: "fork/project",
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "b".repeat(40),
+    };
+    const input = { cwd: "/native", repository, prNumber: 14 };
+    if (operation === "merge")
+      await service.mergePullRequest({
+        ...input,
+        mergeMethod: "squash",
+        status: gitlabAutoMergeStatus({
+          detailedMergeStatus: "mergeable",
+          pipelineStatus: "success",
+        }),
+      });
+    else if (operation === "enable")
+      await service.enablePullRequestAutoMerge({
+        ...input,
+        mergeMethod: "squash",
+        status: gitlabAutoMergeStatus(),
+      });
+    else await service.disablePullRequestAutoMerge(input);
+    expect(calls).toEqual([
+      operation === "disable"
+        ? [
+            "api",
+            "--method",
+            "POST",
+            "projects/upstream%2Fgroup%2Fproject/merge_requests/14/cancel_merge_when_pipeline_succeeds",
+            "--hostname",
+            "gl.private",
+          ]
+        : [
+            "mr",
+            "merge",
+            "14",
+            operation === "merge" ? "--auto-merge=false" : "--auto-merge",
+            "--yes",
+            "--squash",
+            "--repo",
+            "https://gl.private/upstream/group/project",
+          ],
+    ]);
+  },
+);

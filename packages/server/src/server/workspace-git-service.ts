@@ -199,6 +199,7 @@ export interface WorkspaceGitRuntimeSnapshot {
     >["defaultWorkspaceBase"];
   };
   forge: {
+    repository?: Pick<ForgeRepositoryContext, "host" | "targetRepository">;
     featuresEnabled: boolean;
     authState: ForgeAuthState;
     /**
@@ -3921,7 +3922,17 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     return {
       cwd: target.cwd,
       git: target.latestGit,
-      forge: target.latestForge ?? buildForgeUnavailableSnapshot(),
+      forge: {
+        ...(target.latestForge ?? buildForgeUnavailableSnapshot()),
+        ...(target.jjForgeResolution?.repository
+          ? {
+              repository: {
+                host: target.jjForgeResolution.repository.host,
+                targetRepository: target.jjForgeResolution.repository.targetRepository,
+              },
+            }
+          : {}),
+      },
     };
   }
 

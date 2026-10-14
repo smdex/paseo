@@ -2577,7 +2577,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     async mergePullRequest(input) {
       assertDirectPullRequestMergeReady(input);
       await run(["pr", "merge", String(input.prNumber), `--${input.mergeMethod}`], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
@@ -2586,7 +2586,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     async enablePullRequestAutoMerge(input) {
       assertPullRequestAutoMergeEnableReady(input);
       await run(["pr", "merge", String(input.prNumber), "--auto", `--${input.mergeMethod}`], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
@@ -2595,7 +2595,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     async disablePullRequestAutoMerge(input) {
       assertPullRequestAutoMergeDisableReady(input);
       await run(["pr", "merge", String(input.prNumber), "--disable-auto"], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
