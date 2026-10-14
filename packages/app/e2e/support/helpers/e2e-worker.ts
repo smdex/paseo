@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -73,7 +72,7 @@ const origin = spawnSync("git", ["config", "--get", "remote.origin.url"], {
   stdio: ["ignore", "pipe", "ignore"]
 }).stdout?.trim();
 
-const handlePrMutations = require(${JSON.stringify(fileURLToPath(new URL("./github-pr-mutations-cli.cjs", import.meta.url)))});
+const handlePrMutations = require(${JSON.stringify(path.resolve(__dirname, "github-pr-mutations-cli.cjs"))});
 if (handlePrMutations(args, origin)) process.exit(process.exitCode ?? 0);
 
 if (origin === fixtureRemote) {
