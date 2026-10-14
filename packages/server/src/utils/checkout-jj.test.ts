@@ -1300,14 +1300,17 @@ describeIfJj("checkout-jj diff and history hardening", () => {
       "--config",
       'experimental-advance-branches.enabled-branches=["main"]',
     ]);
-    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "backup"]);
+    fixture.jj(["bookmark", "track", "main@backup"]);
+    const backupPush = fixture.jj(["git", "push", "--bookmark", "main", "--remote", "backup"]);
+    expect(backupPush.status, backupPush.stderr).toBe(0);
     fixture.jj(["git", "fetch", "--remote", "origin"]);
     fixture.jj(["git", "fetch", "--remote", "backup"]);
     await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
       aheadOfOrigin: 1,
       behindOfOrigin: 0,
     });
-    fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]);
+    const pushed = fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]);
+    expect(pushed.status, pushed.stderr).toBe(0);
     await expect(getJjStatus(fixture.repoDir)).resolves.toMatchObject({
       aheadOfOrigin: 0,
       behindOfOrigin: 0,
