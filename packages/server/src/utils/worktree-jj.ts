@@ -15,6 +15,7 @@ import { hasJjBookmark } from "./checkout-jj.js";
 import { validateBranchSlug } from "@getpaseo/protocol/branch-slug";
 import {
   deriveShortAlphanumericHash,
+  isPaseoOwnedWorktreeCwd,
   deriveWorktreeProjectHash,
   normalizePathForOwnership,
   removeDirectoryWithRetries,
@@ -29,14 +30,12 @@ import {
   type WorktreeSource,
 } from "./worktree.js";
 import { readPaseoWorktreeMetadata, writeJjWorkspaceIncarnation } from "./worktree-metadata.js";
-import { getRealpathAwareRelativePath } from "./path.js";
 
 /**
  * jj workspaces as Paseo worktrees (plan §6).
  *
- * A Paseo worktree on jj is `jj workspace add` under the same
- * `<worktrees-root>/<project-hash>/<slug>` layout git worktrees use, so the
- * path-shape ownership check (`isPaseoOwnedWorktreeCwd`) applies unchanged.
+ * New jj workspaces are siblings of the source checkout. Their incarnation
+ * and worktree metadata establish ownership independently of their location.
  * The workspace-owned feature bookmark follows the plan §2 ownership rules;
  * the base bookmark is recorded in metadata and never advanced.
  *
@@ -142,6 +141,17 @@ async function pinRevision(cwd: string, revset: string): Promise<string> {
   return commitId;
 }
 
+export class JjWorkspacePathExistsError extends Error {
+  readonly code = "workspace_path_exists";
+
+  constructor(path: string) {
+    super(
+      `Workspace path already exists: ${path}. Choose a different worktree name or remove the existing directory before retrying.`,
+    );
+    this.name = "JjWorkspacePathExistsError";
+  }
+}
+
 export async function createJjWorktree(options: {
   cwd: string;
   worktreeSlug: string;
@@ -158,17 +168,14 @@ export async function createJjWorktree(options: {
     throw new Error(`Invalid worktree name: ${slugValidation.error}`);
   }
 
-  const primaryRoot = normalizePathForOwnership(options.cwd);
-  const worktreesRootPath = await getJjPaseoWorktreesRoot(options.cwd, options);
-  let worktreePath = join(worktreesRootPath, options.worktreeSlug);
-  mkdirSync(dirname(worktreePath), { recursive: true });
-  let pathSuffix = 1;
-  while (existsSync(worktreePath)) {
-    worktreePath = `${join(worktreesRootPath, options.worktreeSlug)}-${pathSuffix}`;
-    pathSuffix += 1;
-  }
-  // The jj workspace NAME must be unique; the suffixed directory basename is
-  // exactly that, so path and name can never collide independently.
+  const identity = resolveJjRepoIdentity(options.cwd);
+  if (!identity) throw new Error("Unable to resolve jj repository identity");
+  const primaryRoot = normalizePathForOwnership(identity.workspaceRoot);
+  const projectRoot = normalizePathForOwnership(identity.primaryRoot);
+  const worktreePath = join(
+    dirname(primaryRoot),
+    `${basename(projectRoot)}-${options.worktreeSlug}`,
+  );
   const workspaceName = basename(worktreePath);
 
   return withWorkspaceLifecycle(worktreePath, async () => {
@@ -192,8 +199,7 @@ async function createJjWorkspaceAtPath(
   worktreePath: string,
   workspaceName: string,
 ): Promise<CreatedWorktree> {
-  if (existsSync(worktreePath))
-    throw new Error("Workspace path was created concurrently; retry creation");
+  if (existsSync(worktreePath)) throw new JjWorkspacePathExistsError(worktreePath);
   // Base selection: branch-off cuts from the requested base (bookmark or
   // revset); checkout-branch continues at the existing bookmark. The base is
   // pinned to its commit id before anything is created so later bookmark
@@ -353,7 +359,7 @@ export async function listJjWorkspaces(cwd: string): Promise<JjWorkspaceListEntr
 }
 
 /**
- * Paseo-owned jj workspaces under the project worktrees root. The primary
+ * Registered jj workspaces with Paseo ownership evidence. The primary
  * (default) workspace is skipped: it is the user's own checkout, not a Paseo
  * worktree, mirroring `git worktree list` filtering.
  */
@@ -363,7 +369,6 @@ export async function listJjPaseoWorktrees(options: {
   worktreesRoot?: string;
 }): Promise<PaseoWorktreeInfo[]> {
   const primaryRoot = normalizePathForOwnership(options.cwd);
-  const worktreesRootPath = await getJjPaseoWorktreesRoot(options.cwd, options);
   const entries = await listJjWorkspaces(primaryRoot);
   const paseoOwned: PaseoWorktreeInfo[] = [];
   for (const entry of entries) {
@@ -371,8 +376,8 @@ export async function listJjPaseoWorktrees(options: {
       continue;
     }
     const path = normalizePathForOwnership(entry.root);
-    const relative = getRealpathAwareRelativePath(worktreesRootPath, path);
-    if (relative === null || relative.length === 0) {
+    const ownership = await isPaseoOwnedWorktreeCwd(path, { ...options, knownGitCommonDir: null });
+    if (!ownership.allowed) {
       continue;
     }
     paseoOwned.push({
@@ -477,12 +482,12 @@ async function deleteJjWorkspaceUnderLifecycle(
     throw new PrimaryWorkspaceDeleteError(resolvedWorktree);
   }
 
-  const worktreesRootPath = await getJjPaseoWorktreesRoot(primaryRoot, {
+  const ownership = await isPaseoOwnedWorktreeCwd(resolvedWorktree, {
     paseoHome: options.paseoHome,
     worktreesRoot: options.worktreesRoot ?? options.worktreesBaseRoot,
+    knownGitCommonDir: null,
   });
-  const relativeWorktree = getRealpathAwareRelativePath(worktreesRootPath, resolvedWorktree);
-  if (relativeWorktree === null || relativeWorktree === "") {
+  if (!ownership.allowed) {
     throw new Error("Refusing to delete non-Paseo worktree");
   }
 

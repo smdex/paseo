@@ -660,25 +660,6 @@ async function getJjUpstreamStatus(
   return { ref: `${remote.name}/${bookmark}`, aheadBehind: { ahead, behind } };
 }
 
-async function getJjDefaultWorkspaceBase({
-  cwd,
-  currentBranch,
-  context,
-}: {
-  cwd: string;
-  currentBranch: string | null;
-  context?: JjCheckoutContext;
-}): Promise<{ refName: string; displayName: string }> {
-  const suggestions = currentBranch
-    ? await listJjBookmarkSuggestions(cwd, { query: currentBranch }, context)
-    : [];
-  const current = suggestions.find((suggestion) => suggestion.name === currentBranch);
-  const defaultWorkspaceBase = current
-    ? { refName: current.remoteRef ?? current.localRef ?? "@", displayName: current.name }
-    : { refName: "@", displayName: "Current change" };
-  return defaultWorkspaceBase;
-}
-
 export async function getJjForgeRepositoryContext(
   cwd: string,
   context?: JjCheckoutContext,
@@ -791,7 +772,7 @@ export async function getJjStatus(
     factsContext,
   );
 
-  const defaultWorkspaceBase = await getJjDefaultWorkspaceBase({ cwd, currentBranch, context });
+  const defaultWorkspaceBase = { refName: "@-", displayName: "Current parent" };
   const common = {
     defaultWorkspaceBase,
     repoRoot: identity.workspaceRoot,
