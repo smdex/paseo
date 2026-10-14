@@ -65,6 +65,9 @@ import {
   jjNew,
   jjPull,
   jjFetchAndRebase,
+  jjIntegrateIntoBase,
+  type JjIntegrationIntent,
+  type JjIntegrationResult,
   jjPush,
   jjRenameBookmark,
   jjSwitchBookmark,
@@ -515,6 +518,16 @@ export async function dispatchPullCurrentBranch(
     return pullCurrentBranch(cwd, forgeService);
   }
   return jjPull(cwd, toJjContext(context));
+}
+
+export async function dispatchIntegrateIntoBase(
+  cwd: string,
+  options: JjIntegrationIntent,
+  context?: JjCheckoutContext,
+): Promise<JjIntegrationResult> {
+  if ((await resolveEffectiveBackend(cwd)) !== "jj")
+    throw new Error("Integration is only available for a jj checkout.");
+  return jjIntegrateIntoBase(cwd, options, context);
 }
 
 export async function dispatchFetchAndRebase(

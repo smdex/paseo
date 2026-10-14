@@ -36,6 +36,7 @@ import {
   CheckoutNewChangeResponseSchema,
   CheckoutDescribeChangeResponseSchema,
   CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   parseServerInfoStatusPayload,
   RenameTerminalResponseSchema,
   RestartRequestedStatusPayloadSchema,
@@ -562,6 +563,7 @@ type PullRequestTimelinePayload = PullRequestTimelineResponse["payload"];
 type CheckoutSwitchBranchPayload = CheckoutSwitchBranchResponse["payload"];
 export type RenameBranchResult = z.infer<typeof CheckoutRenameBranchResponseSchema>["payload"];
 export type NewChangeResult = z.infer<typeof CheckoutNewChangeResponseSchema>["payload"];
+export type IntegrateBaseResult = z.infer<typeof CheckoutIntegrateBaseResponseSchema>["payload"];
 export type FetchRebaseResult = z.infer<typeof CheckoutFetchRebaseResponseSchema>["payload"];
 export type DescribeChangeResult = z.infer<typeof CheckoutDescribeChangeResponseSchema>["payload"];
 type StashSavePayload = StashSaveResponse["payload"];
@@ -5033,6 +5035,26 @@ export class DaemonClient {
         acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout.describe_change.response",
+    });
+  }
+
+  async integrateIntoBase(input: {
+    cwd: string;
+    baseRef: string;
+    expectedChangeId: string;
+    expectedCommitId?: string;
+    expectedBaseCommitId?: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<IntegrateBaseResult> {
+    this.requireJjCheckpointCapability();
+    if (this.lastServerInfoMessage?.features?.checkoutJjIntegrate !== true)
+      throw new Error("Update the host to integrate jj work into its base.");
+    const { requestId, ...message } = input;
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "checkout.jj.integrate_base.request", ...message },
+      responseType: "checkout.jj.integrate_base.response",
     });
   }
 

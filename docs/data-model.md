@@ -43,7 +43,10 @@ ancestor bookmark. Native Edit/Describe keep change IDs and can rebase descendan
 snapshots; retained heads and result journals support recovery, but do not provide a cross-process
 lock or authorize automatic operation undo. Resolve mutation recovery pins at their captured full
 operation: live bookmarks follow native rewrites. Manually abandoning that operation history can
-make retained states unavailable; missing or moved archive pins refuse restoration.
+make retained states unavailable; missing or moved archive pins refuse restoration. Integration
+advances the base bookmark or an owned workspace's comparison pin: rewriting an existing base
+would also rewrite unrelated workspace descendants. Approval captures both exact heads; external
+selection or authority changes require reconciliation instead of automatic undo.
 
 Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries.
 

@@ -714,6 +714,21 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       return;
     }
     void persistShipDefault("merge");
+    if (isJj) {
+      if (!gitStatus?.changeId) return;
+      openCheckoutActionForm({
+        kind: "change",
+        snapshot: {
+          serverId,
+          cwd,
+          changeId: gitStatus.changeId,
+          description: gitStatus.jjDescription ?? "",
+          mode: "integrate",
+          baseRef,
+        },
+      });
+      return;
+    }
     void runMergeBranch({ serverId, cwd, baseRef })
       .then(() => {
         setPostShipArchiveSuggested(true);
@@ -727,6 +742,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     baseRef,
     cwd,
     persistShipDefault,
+    gitStatus,
+    isJj,
     runMergeBranch,
     serverId,
     t,

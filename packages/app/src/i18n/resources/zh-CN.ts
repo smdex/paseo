@@ -800,6 +800,13 @@ export const zhCN: TranslationResources = {
           pending: "正在 commit...",
           success: "已 commit",
         },
+        integrateBase: {
+          pending: "正在集成到基线…",
+          approve: "批准集成",
+          detail: "将所选更改集成到 {{base}}。所选工作副本和其他工作区的修订版本保持不变。",
+          integrated: "基线现已包含所选工作。",
+          noop: "基线已包含所选工作。",
+        },
         fetchRebase: {
           label: "获取并变基",
           pending: "正在获取并变基…",

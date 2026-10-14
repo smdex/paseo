@@ -1,6 +1,9 @@
 import type { CheckoutPrIdentity } from "@getpaseo/protocol/messages";
 import { ForgeRepositoryContextError } from "../../../services/forge-service.js";
-import { jjCreatePullRequest } from "../../../utils/checkout-jj.js";
+import {
+  jjCreatePullRequest,
+  JjIntegrationApprovalRequiredError,
+} from "../../../utils/checkout-jj.js";
 import type pino from "pino";
 import type { SessionDelivery } from "../owned-subscriptions/index.js";
 import { isAbsolute } from "node:path";
@@ -52,6 +55,7 @@ import {
   dispatchCommitChanges,
   dispatchDescribeChange,
   dispatchFetchAndRebase,
+  dispatchIntegrateIntoBase,
   dispatchEditChange,
   dispatchGetCommitFileDiff,
   dispatchDiscardChanges,
@@ -891,6 +895,62 @@ export class CheckoutSession {
           bookmark: null,
           error: toCheckoutError(error),
           requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutIntegrateBaseRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.jj.integrate_base.request" }>,
+  ): Promise<void> {
+    const {
+      cwd,
+      requestId,
+      baseRef,
+      expectedChangeId,
+      expectedCommitId,
+      expectedBaseCommitId,
+      acknowledgeRewrites,
+    } = msg;
+    try {
+      const result = await dispatchIntegrateIntoBase(
+        cwd,
+        { baseRef, expectedChangeId, expectedCommitId, expectedBaseCommitId, acknowledgeRewrites },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "merge-to-base", { invalidateForge: true });
+      this.scheduleDiffRefresh(cwd);
+      const conflict = result.outcome === "conflicts";
+      this.host.emit({
+        type: "checkout.jj.integrate_base.response",
+        payload: {
+          cwd,
+          requestId,
+          ...result,
+          success: !conflict,
+          error: conflict
+            ? {
+                code: "MERGE_CONFLICT",
+                message: `Integration has conflicts in retained commit ${result.integrationCommitId}. Resolve that change on the host, then reopen integration. The base was not advanced.`,
+              }
+            : null,
+        },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.jj.integrate_base.response",
+        payload: {
+          cwd,
+          requestId,
+          success: false,
+          changeId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.source.changeId : null,
+          commitId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.source.commitId : null,
+          baseCommitId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.base.commitId : null,
+          bookmark: null,
+          error: toCheckoutError(error),
         },
       });
     }

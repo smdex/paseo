@@ -337,6 +337,9 @@ describe("native change form", () => {
       newOn: async () => {
         throw new Error("Unexpected New change");
       },
+      integrate: async () => {
+        throw new Error("Unexpected integration");
+      },
       fetchAndRebase: async () => "unchanged",
       refresh: async () => {
         refreshed++;
@@ -388,6 +391,9 @@ describe("native change form", () => {
         newOn: async () => {
           throw new Error("Unexpected New change");
         },
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -422,6 +428,9 @@ describe("native change form", () => {
           throw new Error("Unexpected New change");
         },
         newOn: async () => {},
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -470,6 +479,9 @@ describe("native change form", () => {
         newChange: async () => {
           throw new Error("Unexpected New change");
         },
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -508,6 +520,9 @@ describe("native change form", () => {
         newOn: async (request) => {
           calls.push(request);
         },
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -545,6 +560,9 @@ describe("native change form", () => {
           await pending.promise;
         },
         newOn: async () => {},
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -587,6 +605,9 @@ describe("native change form", () => {
           if (shouldFail) throw new Error("Host disconnected");
         },
         newOn: async () => {},
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
@@ -693,6 +714,9 @@ describe("jj fetch-and-rebase form", () => {
         edit: async () => {},
         newChange: async () => {},
         newOn: async () => {},
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async (input) => {
           calls.push(input);
           if (calls.length === 1) return pending.promise;
@@ -739,6 +763,9 @@ describe("jj fetch-and-rebase approval", () => {
         newChange: async () => {},
         newOn: async () => {},
         refresh: async () => {},
+        integrate: async () => {
+          throw new Error("Unexpected integration");
+        },
         fetchAndRebase: async (input) => {
           calls.push(input.acknowledgeRewrites);
           if (!input.acknowledgeRewrites)
@@ -833,4 +860,149 @@ describe("native selected PR mutation form", () => {
       form.close();
     },
   );
+});
+
+describe("native integration form", () => {
+  it("captures both heads for explicit approval, blocks duplicate submissions, and keeps the result", async () => {
+    const requests: unknown[] = [];
+    const pending = createDeferred<Awaited<ReturnType<JjChangeFormPorts["integrate"]>>>();
+    const response = {
+      cwd: "/native",
+      requestId: "integration",
+      success: false,
+      changeId: "captured",
+      commitId: "source-sha",
+      bookmark: "feature",
+      baseCommitId: "base-sha",
+      error: {
+        code: "NOT_ALLOWED" as const,
+        reason: "rewrite_approval_required" as const,
+        message: "Review source-sha into base-sha",
+      },
+    };
+    const model = openJjChangeForm(
+      {
+        serverId: "host",
+        cwd: "/native",
+        changeId: "captured",
+        description: "Selected work",
+        mode: "integrate",
+        baseRef: "main",
+      },
+      {
+        describe: async () => {},
+        edit: async () => {},
+        newChange: async () => {},
+        newOn: async () => {},
+        fetchAndRebase: async () => "unchanged",
+        refresh: async () => {},
+        integrate: async (input) => {
+          requests.push(input);
+          return requests.length === 1 ? response : pending.promise;
+        },
+      },
+    );
+    await model.submit();
+    expect(model.getState()).toMatchObject({
+      status: "error",
+      error: "Review source-sha into base-sha",
+      needsRewriteApproval: true,
+      changeId: "captured",
+      description: "Selected work",
+      baseRef: "main",
+    });
+    const confirming = model.submit();
+    await model.submit();
+    expect(model.getState()).toMatchObject({ status: "pending", canSubmit: false });
+    expect(requests).toEqual([
+      { cwd: "/native", baseRef: "main", expectedChangeId: "captured", acknowledgeRewrites: false },
+      {
+        cwd: "/native",
+        baseRef: "main",
+        expectedChangeId: "captured",
+        expectedCommitId: "source-sha",
+        expectedBaseCommitId: "base-sha",
+        acknowledgeRewrites: true,
+      },
+    ]);
+    pending.resolve({
+      ...response,
+      success: true,
+      error: null,
+      outcome: "integrated",
+      baseCommitId: "source-sha",
+      integrationCommitId: "source-sha",
+    });
+    await confirming;
+    expect(model.getState()).toMatchObject({
+      status: "success",
+      canSubmit: false,
+      integrationOutcome: "integrated",
+      description: "Selected work",
+    });
+    model.close();
+  });
+});
+
+it("native integration preserves actionable conflicts for retry and cancellation sends nothing", async () => {
+  let attempts = 0;
+  const ports: JjChangeFormPorts = {
+    describe: async () => {},
+    edit: async () => {},
+    newChange: async () => {},
+    newOn: async () => {},
+    fetchAndRebase: async () => "unchanged",
+    refresh: async () => {},
+    integrate: async () => {
+      attempts++;
+      return {
+        cwd: "/native",
+        requestId: "integration",
+        success: attempts > 1,
+        changeId: "captured",
+        commitId: "source",
+        bookmark: "feature",
+        baseCommitId: "base",
+        integrationCommitId: "retained-merge",
+        outcome: attempts === 1 ? "conflicts" : "noop",
+        error:
+          attempts === 1
+            ? {
+                code: "MERGE_CONFLICT",
+                message: "Resolve retained-merge on the host; base unchanged",
+              }
+            : null,
+      };
+    },
+  };
+  const snapshot = {
+    serverId: "host",
+    cwd: "/native",
+    changeId: "captured",
+    description: "Selected work",
+    mode: "integrate" as const,
+    baseRef: "main",
+  };
+  const cancelled = openJjChangeForm(snapshot, ports);
+  cancelled.close();
+  await cancelled.submit();
+  expect(attempts).toBe(0);
+  const model = openJjChangeForm(snapshot, ports);
+  await model.submit();
+  expect(model.getState()).toMatchObject({
+    status: "error",
+    error: "Resolve retained-merge on the host; base unchanged",
+    needsRewriteApproval: false,
+    canSubmit: true,
+    changeId: "captured",
+    baseRef: "main",
+  });
+  await model.submit();
+  expect(model.getState()).toMatchObject({
+    status: "success",
+    integrationOutcome: "noop",
+    canSubmit: false,
+  });
+  expect(attempts).toBe(2);
+  model.close();
 });

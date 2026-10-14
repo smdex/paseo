@@ -2512,6 +2512,17 @@ export const CheckoutDescribeChangeRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const CheckoutIntegrateBaseRequestSchema = z.object({
+  type: z.literal("checkout.jj.integrate_base.request"),
+  cwd: z.string(),
+  baseRef: z.string(),
+  expectedChangeId: z.string().optional(),
+  expectedCommitId: z.string().optional(),
+  expectedBaseCommitId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
 export const CheckoutFetchRebaseRequestSchema = z.object({
   type: z.literal("checkout.jj.fetch_rebase.request"),
   cwd: z.string(),
@@ -3475,6 +3486,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutDescribeChangeRequestSchema,
   CheckoutEditChangeRequestSchema,
   CheckoutFetchRebaseRequestSchema,
+  CheckoutIntegrateBaseRequestSchema,
   StashSaveRequestSchema,
   StashPopRequestSchema,
   StashListRequestSchema,
@@ -3839,6 +3851,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutJjRewriteApproval: z.boolean().optional(),
         // COMPAT(checkoutJjFetchRebase): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native fetch/rebase.
         checkoutJjFetchRebase: z.boolean().optional(),
+        // COMPAT(checkoutJjIntegrate): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports captured native integration.
+        checkoutJjIntegrate: z.boolean().optional(),
         // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.
         checkoutJjGraphSelections: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
@@ -6098,6 +6112,25 @@ export const CheckoutDescribeChangeResponseSchema = z.object({
   }),
 });
 
+export const CheckoutIntegrationOutcomeSchema = z.enum(["integrated", "noop", "conflicts"]);
+export type CheckoutIntegrationOutcome = z.infer<typeof CheckoutIntegrationOutcomeSchema>;
+
+export const CheckoutIntegrateBaseResponseSchema = z.object({
+  type: z.literal("checkout.jj.integrate_base.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    baseCommitId: z.string().nullable().optional(),
+    integrationCommitId: z.string().nullable().optional(),
+    outcome: CheckoutIntegrationOutcomeSchema.optional(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
 export const CheckoutFetchRebaseOutcomeSchema = z.enum(["rebased", "unchanged", "conflicts"]);
 export type CheckoutFetchRebaseOutcome = z.infer<typeof CheckoutFetchRebaseOutcomeSchema>;
 
@@ -7334,6 +7367,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutDescribeChangeResponseSchema,
   CheckoutEditChangeResponseSchema,
   CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   StashSaveResponseSchema,
   StashPopResponseSchema,
   StashListResponseSchema,

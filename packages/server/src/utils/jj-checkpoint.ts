@@ -19,7 +19,16 @@ const HeadSchema = z.object({
 });
 const OperationSchema = z.object({
   id: z.string(),
-  kind: z.enum(["describe", "finish", "new", "edit", "rename", "restore", "fetch-rebase"]),
+  kind: z.enum([
+    "describe",
+    "finish",
+    "new",
+    "edit",
+    "rename",
+    "restore",
+    "fetch-rebase",
+    "integrate",
+  ]),
   before: HeadSchema,
   target: HeadSchema.optional(),
   impact: z

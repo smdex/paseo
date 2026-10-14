@@ -812,6 +812,14 @@ export const es: TranslationResources = {
           pending: "Comprometiéndose...",
           success: "Comprometido",
         },
+        integrateBase: {
+          pending: "Integrando en la base…",
+          approve: "Aprobar integración",
+          detail:
+            "Integra el cambio seleccionado en {{base}}. La copia de trabajo seleccionada y las revisiones de los demás espacios no cambian.",
+          integrated: "La base ahora contiene el trabajo seleccionado.",
+          noop: "La base ya contiene el trabajo seleccionado.",
+        },
         fetchRebase: {
           label: "Obtener y rebasar",
           pending: "Obteniendo y rebasando…",

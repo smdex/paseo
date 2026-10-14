@@ -2519,3 +2519,143 @@ itIfJj(
     checkout.cleanup();
   },
 );
+
+itIfJj(
+  "integration captures explicit approval and advances the base with native outcomes",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+    sessionDisposables.push(fixture.dispose);
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "selected.txt"), "selected\n");
+    const sourceId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    const sourceCommit = fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    const baseCommit = fixture
+      .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+      .stdout.trim();
+    const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+      paseoHome: join(fixture.dir, "home"),
+    });
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      requestId: "capture",
+    });
+    expect(emitted[0]).toMatchObject({
+      type: "checkout.jj.integrate_base.response",
+      payload: {
+        success: false,
+        changeId: sourceId,
+        commitId: sourceCommit,
+        baseCommitId: baseCommit,
+        error: { code: "NOT_ALLOWED", reason: "rewrite_approval_required" },
+        requestId: "capture",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([]);
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      baseCommit,
+    );
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      expectedCommitId: sourceCommit,
+      expectedBaseCommitId: baseCommit,
+      acknowledgeRewrites: true,
+      requestId: "approve",
+    });
+    expect(emitted[1]).toMatchObject({
+      type: "checkout.jj.integrate_base.response",
+      payload: {
+        success: true,
+        changeId: sourceId,
+        commitId: sourceCommit,
+        baseCommitId: sourceCommit,
+        outcome: "integrated",
+        error: null,
+        requestId: "approve",
+      },
+    });
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      sourceCommit,
+    );
+    expect(gitMutationCalls.notifyGitMutation).toEqual([
+      { cwd: fixture.repoDir, reason: "merge-to-base", options: { invalidateForge: true } },
+    ]);
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      requestId: "noop",
+    });
+    expect(emitted[2]).toMatchObject({ payload: { success: true, outcome: "noop" } });
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: "stale-source",
+      requestId: "stale",
+    });
+    expect(emitted[3]).toMatchObject({
+      payload: {
+        success: false,
+        error: { message: expect.stringContaining("selected change changed") },
+      },
+    });
+    checkout.cleanup();
+  },
+);
+
+itIfJj("integration reports retained conflicts as failure without advancing the base", async () => {
+  const fixture = createScratchJjRepo({ colocate: false, files: { "shared.txt": "base\n" } });
+  sessionDisposables.push(fixture.dispose);
+  expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+  writeFileSync(join(fixture.repoDir, "shared.txt"), "selected\n");
+  const sourceId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+  const sourceCommit = fixture
+    .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+    .stdout.trim();
+  expect(fixture.jj(["new", "-r", "main", "-m", "upstream"]).status).toBe(0);
+  writeFileSync(join(fixture.repoDir, "shared.txt"), "upstream\n");
+  expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+  const baseCommit = fixture
+    .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+    .stdout.trim();
+  expect(fixture.jj(["edit", sourceId]).status).toBe(0);
+  const { checkout, emitted } = makeCheckoutSession({ paseoHome: join(fixture.dir, "home") });
+  await checkout.handleCheckoutIntegrateBaseRequest({
+    type: "checkout.jj.integrate_base.request",
+    cwd: fixture.repoDir,
+    baseRef: "main",
+    expectedChangeId: sourceId,
+    expectedCommitId: sourceCommit,
+    expectedBaseCommitId: baseCommit,
+    acknowledgeRewrites: true,
+    requestId: "conflicts",
+  });
+  expect(emitted[0]).toMatchObject({
+    type: "checkout.jj.integrate_base.response",
+    payload: {
+      success: false,
+      changeId: sourceId,
+      commitId: sourceCommit,
+      baseCommitId: baseCommit,
+      outcome: "conflicts",
+      integrationCommitId: expect.any(String),
+      error: { code: "MERGE_CONFLICT", message: expect.stringContaining("base was not advanced") },
+    },
+  });
+  expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+    baseCommit,
+  );
+  expect(fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+    sourceCommit,
+  );
+  checkout.cleanup();
+});
