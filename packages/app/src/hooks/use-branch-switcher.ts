@@ -225,7 +225,7 @@ export function useBranchSwitcher({
           ...intent,
           acknowledgeRewrites: false,
         });
-        if (payload.error?.message.startsWith("Native rewrite approval required:")) {
+        if (payload.error?.reason === "rewrite_approval_required") {
           const approved = await confirmDialog({
             title: t("branchSwitcher.jjSwitchTitle", { branchName: branchId }),
             message: payload.error.message,

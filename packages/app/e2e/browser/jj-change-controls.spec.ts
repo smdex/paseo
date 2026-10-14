@@ -53,7 +53,13 @@ test.describe("native jj changes", () => {
     jj(["new"]);
     expect(currentId()).not.toBe(firstId);
     await page.getByTestId("jj-change-submit").click();
+    await expect(page.getByTestId("jj-change-submit")).toBeDisabled();
+    await expect(page.getByTestId("jj-change-submit")).toContainText("Saving");
     await expect(page.getByText(/changed since this form opened/)).toBeVisible();
+    await expect(page.getByTestId("jj-change-submit")).toBeEnabled();
+    await expect(
+      page.getByRole("button", { name: "Approve native rewrite", exact: true }),
+    ).toHaveCount(0);
     await expect(input).toHaveValue("Retained native description");
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await panel.getByTestId("changes-refresh").click();
@@ -88,9 +94,12 @@ test.describe("native jj changes", () => {
       .click({ timeout: 20_000 });
     await page.getByTestId("jj-change-submit").click();
     await expect(page.getByTestId("jj-form-error")).toContainText(
-      "Native rewrite approval required:",
+      "Confirm the native rewrite warning",
     );
     await expect(page.getByTestId("jj-form-error")).toContainText(describedId);
+    await expect(
+      page.getByRole("button", { name: "Approve native rewrite", exact: true }),
+    ).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath("native-edit-approval-wide.png") });
     await page.getByRole("button", { name: "Approve native rewrite", exact: true }).click();
     await expect.poll(currentId).toBe(describedId);
@@ -191,6 +200,12 @@ test.describe("native jj changes", () => {
     await page.getByTestId("jj-change-submit").click();
     await expect(page.getByTestId("jj-form-error")).toContainText("refused-native.txt");
     await expect(input).toHaveValue("Compact native draft");
+    await expect(page.getByTestId("jj-change-submit")).toBeEnabled();
+    await expect(
+      page.getByRole("button", { name: "Approve native rewrite", exact: true }),
+    ).toHaveCount(0);
+    await input.focus();
+    await expect(page.getByTestId("jj-form-error")).toContainText("refused-native.txt");
     const formBounds = await page.getByTestId("jj-change-form").boundingBox();
     expect(formBounds).not.toBeNull();
     expect(formBounds!.x).toBeGreaterThanOrEqual(0);

@@ -1,3 +1,4 @@
+import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
 import type { CheckoutPrMergeMethod } from "@getpaseo/protocol/messages";
 import { create } from "zustand";
 import { queryClient as appQueryClient } from "@/data/query-client";
@@ -218,7 +219,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           acknowledgeRewrites,
         });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -233,7 +234,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPull(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -248,7 +249,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPush(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -263,7 +264,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutRefresh(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -278,11 +279,11 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const pullPayload = await client.checkoutPull(cwd);
         if (pullPayload.error) {
-          throw new Error(pullPayload.error.message);
+          throw new CheckoutOperationError(pullPayload.error);
         }
         const pushPayload = await client.checkoutPush(cwd);
         if (pushPayload.error) {
-          throw new Error(pushPayload.error.message);
+          throw new CheckoutOperationError(pushPayload.error);
         }
       },
     });
@@ -297,7 +298,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPrCreate(cwd, {});
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -312,7 +313,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPrMerge(cwd, { method });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -334,7 +335,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
             ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: true, method })
             : await client.checkoutGithubSetAutoMerge(cwd, { enabled: true, method });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -356,7 +357,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
             ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: false })
             : await client.checkoutGithubSetAutoMerge(cwd, { enabled: false });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -375,7 +376,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           requireCleanTarget: true,
         });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -393,7 +394,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           requireCleanTarget: true,
         });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -424,7 +425,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.newChange({ cwd, expectedChangeId, acknowledgeRewrites });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });

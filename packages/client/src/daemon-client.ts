@@ -20,7 +20,7 @@ import {
   type TimelineSubscription,
 } from "./connection/index.js";
 import { CreationClient } from "./creation/index.js";
-import type { CreationSnapshot } from "@getpaseo/protocol/messages";
+import type { CheckoutError, CreationSnapshot } from "@getpaseo/protocol/messages";
 import type { z } from "zod";
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { LocalSpeechModel } from "@getpaseo/protocol/speech/rpc-schemas";
@@ -1061,6 +1061,13 @@ type PluginCatalogResponseEntry =
 export type PluginCatalogEntry = Omit<PluginCatalogResponseEntry, "clientBundle"> & {
   clientBundle: string;
 };
+
+export class CheckoutOperationError extends Error {
+  constructor(readonly checkoutError: CheckoutError) {
+    super(checkoutError.message);
+    this.name = "CheckoutOperationError";
+  }
+}
 
 export class DaemonConnectionError extends Error {
   readonly serverId?: string;
@@ -4951,11 +4958,15 @@ export class DaemonClient {
   }
 
   private requireJjCheckpointCapability(): void {
+    // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
+    if (this.lastServerInfoMessage?.features?.checkoutJjRewriteApproval !== true)
+      throw new Error("Update the host to use structured jj rewrite approval.");
     if (this.lastServerInfoMessage?.features?.checkoutJjCheckpoint !== true)
       throw new Error("Update the host to use checkpointed jj change actions.");
   }
 
   private requireJjGraphSelectionCapability(): void {
+    this.requireJjCheckpointCapability();
     if (this.lastServerInfoMessage?.features?.checkoutJjGraphSelections !== true)
       throw new Error("Update the host to use captured jj graph selections.");
   }

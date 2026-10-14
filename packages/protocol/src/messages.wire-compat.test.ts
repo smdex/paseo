@@ -10,6 +10,7 @@ import {
   AgentTimelineItemPayloadSchema,
   BranchSuggestionsResponseSchema,
   CheckoutStatusResponseSchema,
+  CheckoutEditChangeResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   UsageReportEntrySchema,
@@ -665,6 +666,44 @@ test("exact workspace refs and default bases remain optional across checkout wir
   expect(BranchSuggestionsResponseSchema.parse(newBranches)).toEqual(newBranches);
   expect(legacyBranches.parse(newBranches)).toEqual(oldBranches);
   for (const message of [oldStatus, newStatus, oldBranches, newBranches]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
+});
+
+test("structured jj rewrite refusals remain compatible with legacy checkout errors", () => {
+  const oldMessage = {
+    type: "checkout.edit_change.response",
+    payload: {
+      requestId: "edit",
+      cwd: "/native",
+      success: false,
+      changeId: null,
+      commitId: null,
+      bookmark: null,
+      error: { code: "NOT_ALLOWED", message: "Review the affected native descendants." },
+    },
+  };
+  const newMessage = {
+    ...oldMessage,
+    payload: {
+      ...oldMessage.payload,
+      error: { ...oldMessage.payload.error, reason: "rewrite_approval_required" },
+    },
+  };
+  const legacyError = z.object({
+    code: z.enum(["NOT_GIT_REPO", "NOT_ALLOWED", "MERGE_CONFLICT", "UNKNOWN"]),
+    message: z.string(),
+  });
+  const legacyResponse = CheckoutEditChangeResponseSchema.extend({
+    payload: CheckoutEditChangeResponseSchema.shape.payload.extend({
+      error: legacyError.nullable(),
+    }),
+  });
+  expect(legacyResponse.parse(newMessage)).toEqual(oldMessage);
+  expect(SessionOutboundMessageSchema.parse(oldMessage)).toEqual(oldMessage);
+  expect(SessionOutboundMessageSchema.parse(newMessage)).toEqual(newMessage);
+  for (const message of [oldMessage, newMessage]) {
     const envelope = { type: "session", message };
     expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
   }

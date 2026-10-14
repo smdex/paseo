@@ -2238,10 +2238,12 @@ const CheckoutErrorCodeSchema = z.enum([
   "UNKNOWN",
 ]);
 
-const CheckoutErrorSchema = z.object({
+export const CheckoutErrorSchema = z.object({
   code: CheckoutErrorCodeSchema,
   message: z.string(),
+  reason: z.literal("rewrite_approval_required").optional(),
 });
+export type CheckoutError = z.infer<typeof CheckoutErrorSchema>;
 
 const CheckoutDiffCompareSchema = z.object({
   mode: z.enum(["uncommitted", "base", "all"]),
@@ -3821,6 +3823,8 @@ export const ServerInfoStatusPayloadSchema = z
         // gate once the client floor ships jj-aware UI.
         checkoutJj: z.boolean().optional(),
         checkoutJjCheckpoint: z.boolean().optional(),
+        // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
+        checkoutJjRewriteApproval: z.boolean().optional(),
         // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.
         checkoutJjGraphSelections: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97

@@ -1,3 +1,4 @@
+import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -117,18 +118,20 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
       describe: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.describeChange(input);
-        if (!result.success) throw new Error(result.error?.message ?? "Describe did not complete");
+        if (result.error) throw new CheckoutOperationError(result.error);
+        if (!result.success) throw new Error("Describe did not complete");
       },
       edit: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.editChange(input);
-        if (!result.success) throw new Error(result.error?.message ?? "Edit did not complete");
+        if (result.error) throw new CheckoutOperationError(result.error);
+        if (!result.success) throw new Error("Edit did not complete");
       },
       newOn: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.newChange(input);
-        if (!result.success)
-          throw new Error(result.error?.message ?? "New change did not complete");
+        if (result.error) throw new CheckoutOperationError(result.error);
+        if (!result.success) throw new Error("New change did not complete");
       },
       refresh: () =>
         invalidateCheckoutGitQueriesForClient(queryClient, {

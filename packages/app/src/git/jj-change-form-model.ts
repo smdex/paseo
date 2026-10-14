@@ -1,3 +1,5 @@
+import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
+
 export interface JjChangeFormSnapshot {
   serverId: string;
   cwd: string;
@@ -56,7 +58,6 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
     state = {
       ...next,
       canSubmit: valid && next.status !== "pending" && next.status !== "success",
-      needsRewriteApproval: next.error?.startsWith("Native rewrite approval required:") ?? false,
     };
     for (const listener of listeners) listener();
   }
@@ -68,18 +69,25 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
       return () => listeners.delete(listener);
     },
     setDraft(draft: string) {
-      if (state.status !== "pending") publish({ ...state, draft, status: "idle", error: null });
+      if (state.status !== "pending")
+        publish({ ...state, draft, status: "idle", error: null, needsRewriteApproval: false });
     },
     selectChange(targetChangeId: string) {
       if (state.status !== "pending")
-        publish({ ...state, targetChangeId, status: "idle", error: null });
+        publish({
+          ...state,
+          targetChangeId,
+          status: "idle",
+          error: null,
+          needsRewriteApproval: false,
+        });
     },
     async submit() {
       if (!state.canSubmit) return;
       const submitted = state;
       // Approval applies only to the visible known scope and this captured intent.
       const acknowledgeRewrites = submitted.needsRewriteApproval;
-      publish({ ...state, status: "pending", error: null });
+      publish({ ...state, status: "pending", error: null, needsRewriteApproval: false });
       try {
         if (submitted.mode === "describe") {
           await ports.describe({
@@ -112,6 +120,9 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
           ...state,
           status: "error",
           error: error instanceof Error ? error.message : String(error),
+          needsRewriteApproval:
+            error instanceof CheckoutOperationError &&
+            error.checkoutError.reason === "rewrite_approval_required",
         });
       }
     },
