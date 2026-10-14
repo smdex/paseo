@@ -449,6 +449,7 @@ export type SearchIssuesAndPrsOptions = {
 
 export interface CreatePullRequestOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   title: string;
   head: string;
   base: string;

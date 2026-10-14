@@ -107,6 +107,14 @@ Current change-request lookup uses two identities deliberately:
   selecting the newest terminal request by branch alone can silently attach an
   old promotion or feature request to new work.
 
+Native PR creation publishes with jj before invoking the forge adapter. Pass the explicit
+`ForgeRepositoryContext` through create options and every CLI call: a secondary jj workspace
+can sit inside an unrelated Git checkout, so cwd discovery can target a different project.
+Keep the published source distinct from the PR target, including renamed forks and self-hosted
+hosts. [GitHub’s `head_repo`](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request) disambiguates
+same-organization forks and takes the source repository name. GitLab’s
+`--head` takes the source project; [Gitea’s `head`](https://docs.gitea.com/api/operations/repo-create-pull-request/) uses `owner:bookmark` for a fork.
+
 Thread the checkout head SHA through adapter cache and poll identities as well
 as the lookup itself. Otherwise a commit made on the same branch can inherit the
 previous commit's cached terminal status until the cache expires.

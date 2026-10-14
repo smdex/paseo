@@ -822,6 +822,12 @@ export const zhCN: TranslationResources = {
         },
         viewPr: "查看 PR",
         createPr: {
+          form: {
+            title: "标题",
+            body: "描述",
+            base: "基础书签（可选）",
+            automatic: "自动生成",
+          },
           label: "创建 PR",
           pending: "正在创建 PR...",
           success: "PR 已创建",

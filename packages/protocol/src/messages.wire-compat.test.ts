@@ -10,6 +10,7 @@ import {
   AgentTimelineItemPayloadSchema,
   BranchSuggestionsResponseSchema,
   CheckoutStatusResponseSchema,
+  CheckoutPrCreateRequestSchema,
   CheckoutEditChangeResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
@@ -707,4 +708,18 @@ test("structured jj rewrite refusals remain compatible with legacy checkout erro
     const envelope = { type: "session", message };
     expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
   }
+});
+
+test("native PR capture is optional across request wire versions", () => {
+  const oldRequest = {
+    type: "checkout_pr_create_request",
+    cwd: "/workspace",
+    title: "Kept title",
+    requestId: "create",
+  };
+  const newRequest = { ...oldRequest, expectedChangeId: "captured" };
+  const legacy = CheckoutPrCreateRequestSchema.omit({ expectedChangeId: true });
+  expect(CheckoutPrCreateRequestSchema.parse(oldRequest)).toEqual(oldRequest);
+  expect(CheckoutPrCreateRequestSchema.parse(newRequest)).toEqual(newRequest);
+  expect(legacy.parse(newRequest)).toEqual(oldRequest);
 });

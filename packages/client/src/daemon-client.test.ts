@@ -9076,3 +9076,58 @@ test("routed channels inherit an origin without drain support", async () => {
   expect(route.supportsDrain).toBe(false);
   route.close();
 });
+
+test("native PR creation refuses a host without the publication capability", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "native-pr",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.checkoutPrCreate("/native", { title: "Kept title", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host");
+  expect(mock.sent).toEqual([]);
+});
+
+test("native PR creation sends the captured change and retains the forge result", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "native-pr-capable",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjPrCreate: true } });
+  await connecting;
+  const creating = client.checkoutPrCreate(
+    "/native",
+    { title: "Kept title", body: "Kept body", baseRef: "main", expectedChangeId: "captured" },
+    "create-native",
+  );
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout_pr_create_request",
+    cwd: "/native",
+    title: "Kept title",
+    body: "Kept body",
+    baseRef: "main",
+    expectedChangeId: "captured",
+    requestId: "create-native",
+  });
+  const payload = {
+    cwd: "/native",
+    requestId: "create-native",
+    error: null,
+    number: 12,
+    url: "https://github.com/acme/native/pull/12",
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "checkout_pr_create_response", payload }));
+  expect(await creating).toEqual(payload);
+});

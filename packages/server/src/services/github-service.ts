@@ -2535,7 +2535,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       // transient `gh repo view` failure can't block PR creation on github.com.
       // `gh repo view` is the fallback: it auto-routes to the cwd remote's host
       // (covering GitHub Enterprise Server) and survives a renamed repo.
-      let slug = await resolveGitHubSlugFromOrigin(input.cwd);
+      const repository = requireForgeRepositoryContext(input);
+      let slug = repository?.targetRepository ?? (await resolveGitHubSlugFromOrigin(input.cwd));
       if (!slug) {
         const repoView = await getGitHubRepoView({ cwd: input.cwd, run });
         slug =
@@ -2547,8 +2548,15 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         throw new Error("Unable to resolve GitHub repository for pull request creation");
       }
       const args = ["api", "-X", "POST", `repos/${slug}/pulls`, "-f", `title=${input.title}`];
-      args.push("-f", `head=${input.head}`);
+      const crossRepository =
+        repository && repository.sourceRepository !== repository.targetRepository;
+      const head = crossRepository
+        ? `${repository.sourceRepository.split("/")[0]}:${input.head}`
+        : input.head;
+      args.push("-f", `head=${head}`);
       args.push("-f", `base=${input.base}`);
+      if (crossRepository)
+        args.push("-f", `head_repo=${repository.sourceRepository.split("/")[1]}`);
       if (input.body) {
         args.push("-f", `body=${input.body}`);
       }
@@ -2557,11 +2565,13 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         input,
         z.object({
           url: z.string(),
+          html_url: z.string().optional(),
           number: z.number(),
         }),
         "{}",
       );
-      return parsed;
+      const nativeWebUrl = repository ? parsed.html_url : undefined;
+      return { url: nativeWebUrl ?? parsed.url, number: parsed.number };
     },
 
     async mergePullRequest(input) {

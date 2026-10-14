@@ -4756,9 +4756,15 @@ export class DaemonClient {
 
   async checkoutPrCreate(
     cwd: string,
-    input: { title?: string; body?: string; baseRef?: string },
+    input: { title?: string; body?: string; baseRef?: string; expectedChangeId?: string },
     requestId?: string,
   ): Promise<CheckoutPrCreatePayload> {
+    // COMPAT(checkoutJjPrCreate): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports native publication.
+    if (
+      input.expectedChangeId !== undefined &&
+      this.lastServerInfoMessage?.features?.checkoutJjPrCreate !== true
+    )
+      throw new Error("Update the host to create pull requests from jj workspaces.");
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
@@ -4767,6 +4773,7 @@ export class DaemonClient {
         title: input.title,
         body: input.body,
         baseRef: input.baseRef,
+        expectedChangeId: input.expectedChangeId,
       },
       responseType: "checkout_pr_create_response",
     });

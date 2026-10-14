@@ -827,6 +827,12 @@ export const ko: TranslationResources = {
         viewPr: "PR 보기",
         viewPr_mr: "MR 보기",
         createPr: {
+          form: {
+            title: "제목",
+            body: "설명",
+            base: "기준 북마크(선택 사항)",
+            automatic: "자동 생성",
+          },
           label: "PR 생성",
           pending: "PR 생성 중...",
           success: "PR 생성됨",

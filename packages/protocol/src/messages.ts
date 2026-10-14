@@ -2335,6 +2335,7 @@ export const CheckoutPrCreateRequestSchema = z.object({
   title: z.string().optional(),
   body: z.string().optional(),
   baseRef: z.string().optional(),
+  expectedChangeId: z.string().optional(),
   requestId: z.string(),
 });
 
@@ -3823,6 +3824,8 @@ export const ServerInfoStatusPayloadSchema = z
         // gate once the client floor ships jj-aware UI.
         checkoutJj: z.boolean().optional(),
         checkoutJjCheckpoint: z.boolean().optional(),
+        // COMPAT(checkoutJjPrCreate): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports native publication.
+        checkoutJjPrCreate: z.boolean().optional(),
         // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
         checkoutJjRewriteApproval: z.boolean().optional(),
         // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.

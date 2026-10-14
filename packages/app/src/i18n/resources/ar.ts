@@ -826,6 +826,12 @@ export const ar: TranslationResources = {
         },
         viewPr: "عرض PR",
         createPr: {
+          form: {
+            title: "العنوان",
+            body: "الوصف",
+            base: "العلامة المرجعية الأساسية (اختياري)",
+            automatic: "إنشاء تلقائيًا",
+          },
           label: "إنشاء PR",
           pending: "إنشاء PR...",
           success: "تم إنشاء PR",
