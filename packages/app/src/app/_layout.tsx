@@ -3,6 +3,7 @@ import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspac
 import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import { SheetHostScope } from "@/components/ui/isolated-bottom-sheet-modal";
+import { CheckoutActionFormsHost } from "@/git/action-forms";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -527,6 +528,8 @@ function AppContainerLifetime({
         <MobileGestureWrapper chromeEnabled={compactGesturesEnabled}>
           {children}
         </MobileGestureWrapper>
+        {/* Responsive chrome is reparented above; opened form models must stay mounted. */}
+        <CheckoutActionFormsHost />
       </CommandCenterProvider>
     </ComposerEditingSessionsProvider>
   );
