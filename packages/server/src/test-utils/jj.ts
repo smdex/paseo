@@ -69,6 +69,18 @@ export function createScratchJjRepo(options?: {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`jj git init failed: ${init.stderr}`);
   }
+  // Production helpers run their own jj commands without the fixture's CLI overrides.
+  // Persist identity so those mutations also work with an empty user config.
+  for (const [key, value] of [
+    ["user.name", "Paseo Test"],
+    ["user.email", "paseo-test@example.invalid"],
+  ] as const) {
+    const configured = run(["config", "set", "--repo", key, value], repoDir);
+    if (configured.status !== 0) {
+      rmSync(dir, { recursive: true, force: true });
+      throw new Error(`jj config set failed: ${configured.stderr}`);
+    }
+  }
   const files = options?.files ?? {};
   for (const [path, content] of Object.entries(files)) {
     const absolute = join(repoDir, path);
