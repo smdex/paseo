@@ -1,6 +1,6 @@
 import { openJjChangeForm, type JjChangeFormPorts } from "./jj-change-form-model";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { CheckoutOperationError, type DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient as appQueryClient } from "@/data/query-client";
 import { useSessionStore } from "@/stores/session-store";
 import {
@@ -307,7 +307,10 @@ describe("checkout-git-actions-store", () => {
 });
 
 describe("native change form", () => {
-  it("keeps draft and captured cwd/change on refusal, blocks duplicates and refreshes success", async () => {
+  it.each([
+    "Current change moved; reopen",
+    "Native rewrite approval required: remote rejected this literal description",
+  ])("retains an ordinary refusal without offering rewrite approval: %s", async (message) => {
     const input = {
       serverId: "host",
       cwd: "/native/sub",
@@ -345,14 +348,14 @@ describe("native change form", () => {
         acknowledgeRewrites: false,
       },
     ]);
-    pending.reject(new Error("Current change moved; reopen"));
+    pending.reject(new CheckoutOperationError({ code: "UNKNOWN", message }));
     await submitting;
     expect(model.getState()).toEqual({
       ...input,
       draft: "My draft",
       targetChangeId: null,
       status: "error",
-      error: "Current change moved; reopen",
+      error: message,
       canSubmit: true,
       needsRewriteApproval: false,
     });
@@ -396,7 +399,7 @@ describe("native change form", () => {
   it("requires visible known-scope approval and binds it to the captured selection", async () => {
     const calls: Parameters<JjChangeFormPorts["edit"]>[0][] = [];
     const warning =
-      "Native rewrite approval required: selected; 1 descendant; shared workspaces: true; published history: true.";
+      "Review selected; 1 descendant; shared workspaces: true; published history: true.";
     const model = openJjChangeForm(
       { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "edit" },
       {
@@ -408,7 +411,12 @@ describe("native change form", () => {
         },
         edit: async (input) => {
           calls.push(input);
-          if (!input.acknowledgeRewrites) throw new Error(warning);
+          if (!input.acknowledgeRewrites)
+            throw new CheckoutOperationError({
+              code: "NOT_ALLOWED",
+              reason: "rewrite_approval_required",
+              message: warning,
+            });
         },
         refresh: async () => {},
       },

@@ -7660,7 +7660,7 @@ test("checkpointed jj actions refuse unsupported hosts before sending intent", a
   });
   clients.push(client);
   const connecting = client.connect();
-  mock.triggerOpen();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjGraphSelections: true } });
   await connecting;
   await expect(
     client.describeChange({ cwd: "/native", message: "draft", expectedChangeId: "captured" }),
@@ -7712,7 +7712,13 @@ test("jj P2 bookmark intent preserves the legacy requestId position and exact ca
   });
   clients.push(client);
   const connecting = client.connect();
-  mock.triggerOpen({ features: { checkoutJjGraphSelections: true } });
+  mock.triggerOpen({
+    features: {
+      checkoutJjGraphSelections: true,
+      checkoutJjCheckpoint: true,
+      checkoutJjRewriteApproval: true,
+    },
+  });
   await connecting;
   const result = client.checkoutSwitchBranch("/native/sub", "main", "captured-switch", {
     mode: "new-on",
@@ -7745,7 +7751,14 @@ test("jj P2 bookmark intent preserves the legacy requestId position and exact ca
   expect((await result).success).toBe(true);
 });
 
-test("checkpointed jj Edit sends captured stable IDs and handles a visible refusal", async () => {
+test.each([
+  { code: "UNKNOWN", message: "Immutable change: select a mutable change." },
+  {
+    code: "NOT_ALLOWED",
+    reason: "rewrite_approval_required",
+    message: "Review descendants before continuing.",
+  },
+])("checkpointed jj Edit retains the structured refusal %j", async (error) => {
   const mock = createMockTransport();
   const client = new DaemonClient({
     url: "ws://test",
@@ -7755,7 +7768,13 @@ test("checkpointed jj Edit sends captured stable IDs and handles a visible refus
   });
   clients.push(client);
   const connecting = client.connect();
-  mock.triggerOpen({ features: { ownedSubscriptions: true, checkoutJjCheckpoint: true } });
+  mock.triggerOpen({
+    features: {
+      ownedSubscriptions: true,
+      checkoutJjCheckpoint: true,
+      checkoutJjRewriteApproval: true,
+    },
+  });
   await connecting;
   const result = client.editChange({
     cwd: "/native/sub",
@@ -7778,7 +7797,7 @@ test("checkpointed jj Edit sends captured stable IDs and handles a visible refus
     changeId: null,
     commitId: null,
     bookmark: null,
-    error: { code: "UNKNOWN", message: "Immutable change" },
+    error,
     requestId: "native-edit",
   };
   mock.triggerMessage(wrapSessionMessage({ type: "checkout.edit_change.response", payload }));

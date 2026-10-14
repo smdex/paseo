@@ -34,6 +34,11 @@ not reinterpreted as Git branches. This does not enable jj by default or establi
 The old/new field combinations and generated inbound validation are covered in
 `packages/protocol/src/messages.wire-compat.test.ts`.
 
+Checkout error codes keep their existing enum values: adding a code would fail older clients'
+parsers. Native rewrite refusals use the optional `reason` field and retain the full actionable
+message. The client gates checkpointed jj actions on `checkoutJjRewriteApproval` before sending
+intent; callers never infer approval from message text.
+
 Schemas live in `packages/protocol/src/messages.ts`. New RPC names follow [rpc-namespacing.md](rpc-namespacing.md).
 
 ## The feature contract: per feature, gated once
