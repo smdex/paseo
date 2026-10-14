@@ -1,5 +1,8 @@
 import { openCheckoutActionForm } from "./action-forms-store";
-import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
+import {
+  CheckoutOperationError,
+  type NewChangeResult,
+} from "@getpaseo/client/internal/daemon-client";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -20,6 +23,7 @@ import {
   openJjChangeForm,
   type JjChangeFormState,
   type JjChangeFormSnapshot,
+  type JjChangeSelection,
 } from "./jj-change-form-model";
 
 interface JjChangeControlsProps {
@@ -119,13 +123,12 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   );
 }
 
-export function JjChangeForm({
-  snapshot,
-  onClose,
-}: {
+interface JjChangeFormProps {
   snapshot: JjChangeFormSnapshot;
   onClose(): void;
-}) {
+}
+
+export function JjChangeForm({ snapshot, onClose }: JjChangeFormProps) {
   const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
   const client = useHostRuntimeClient(snapshot.serverId);
@@ -134,26 +137,22 @@ export function JjChangeForm({
       describe: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.describeChange(input);
-        if (result.error) throw new CheckoutOperationError(result.error);
-        if (!result.success) throw new Error("Describe did not complete");
+        assertCheckoutOperationSucceeded(result, "Describe");
       },
       edit: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.editChange(input);
-        if (result.error) throw new CheckoutOperationError(result.error);
-        if (!result.success) throw new Error("Edit did not complete");
+        assertCheckoutOperationSucceeded(result, "Edit");
       },
       newChange: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.newChange(input);
-        if (result.error) throw new CheckoutOperationError(result.error);
-        if (!result.success) throw new Error("New change did not complete");
+        assertCheckoutOperationSucceeded(result, "New change");
       },
       newOn: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.newChange(input);
-        if (result.error) throw new CheckoutOperationError(result.error);
-        if (!result.success) throw new Error("New change did not complete");
+        assertCheckoutOperationSucceeded(result, "New change");
       },
       integrate: async (input) => {
         if (!client) throw new Error("Host disconnected");
@@ -162,9 +161,8 @@ export function JjChangeForm({
       fetchAndRebase: async (input) => {
         if (!client) throw new Error("Host disconnected");
         const result = await client.fetchAndRebase(input);
-        if (result.error) throw new CheckoutOperationError(result.error);
-        if (!result.success || !result.outcome)
-          throw new Error("Fetch and rebase did not complete");
+        assertCheckoutOperationSucceeded(result, "Fetch and rebase");
+        if (!result.outcome) throw new Error("Fetch and rebase did not complete");
         return result.outcome;
       },
       refresh: () =>
@@ -190,8 +188,7 @@ export function JjChangeForm({
   const header = useMemo(() => ({ title }), [title]);
   const submit = useCallback(() => void model.submit(), [model]);
   const selectChange = useCallback(
-    (selection: { changeId: string; label: string; commitId?: string }) =>
-      model.selectChange(selection),
+    (selection: JjChangeSelection) => model.selectChange(selection),
     [model],
   );
   const close = useCallback(() => {
@@ -275,6 +272,25 @@ interface JjChangeHistoryProps {
   size: "sm" | "md";
   selectChange: ReturnType<typeof openJjChangeForm>["selectChange"];
 }
+interface ChangeSelectionProps {
+  changeId: string;
+  commitId: string | null;
+  label: string;
+  testID: string;
+  selected: boolean;
+  size: "sm" | "md";
+  disabled: boolean;
+  select(selection: JjChangeSelection): void;
+}
+
+function assertCheckoutOperationSucceeded(
+  result: Pick<NewChangeResult, "success" | "error">,
+  operation: string,
+) {
+  if (result.error) throw new CheckoutOperationError(result.error);
+  if (!result.success) throw new Error(`${operation} did not complete`);
+}
+
 function getJjChangeFormLabels(state: JjChangeFormState, title: string, t: TFunction) {
   const pending = state.status === "pending";
   let submitLabel = title;
@@ -324,16 +340,14 @@ function JjChangeHistory({ snapshot, state, size, selectChange }: JjChangeHistor
         </View>
       ) : null}
       {commits.status === "loaded" ? (
-        commits.data.commits
-          .filter((commit) =>
-            snapshot.mode === "new-on"
-              ? Boolean(commit.changeId)
-              : Boolean(commit.changeId) && commit.changeId !== snapshot.changeId,
-          )
-          .map((commit) => (
+        commits.data.commits.flatMap((commit) => {
+          const changeId = commit.changeId;
+          if (!changeId || (snapshot.mode !== "new-on" && changeId === snapshot.changeId))
+            return [];
+          return [
             <ChangeSelection
               key={commit.sha}
-              changeId={commit.changeId!}
+              changeId={changeId}
               commitId={snapshot.mode === "new-on" ? commit.sha : null}
               label={commit.subject || commit.shortSha}
               testID={
@@ -349,8 +363,9 @@ function JjChangeHistory({ snapshot, state, size, selectChange }: JjChangeHistor
               size={size}
               disabled={pending}
               select={selectChange}
-            />
-          ))
+            />,
+          ];
+        })
       ) : (
         <Text style={styles.identity}>{t("workspace.git.actions.jj.loadingHistory")}</Text>
       )}
@@ -370,16 +385,7 @@ function ChangeSelection({
   size,
   disabled,
   select,
-}: {
-  changeId: string;
-  commitId: string | null;
-  label: string;
-  testID: string;
-  selected: boolean;
-  size: "sm" | "md";
-  disabled: boolean;
-  select(selection: { changeId: string; label: string; commitId?: string }): void;
-}) {
+}: ChangeSelectionProps) {
   const onPress = useCallback(
     () => select({ changeId, label, ...(commitId ? { commitId } : {}) }),
     [changeId, commitId, label, select],

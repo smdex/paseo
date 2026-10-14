@@ -2635,7 +2635,15 @@ async function resolveJjIntegrationBase(
   context: JjCheckoutContext,
 ): Promise<{ base: JjChangeMeta; baseBookmark: string | null; baseName: string }> {
   const baseName = checkpoint.comparison.liveBase ?? baseRef;
-  const exactPin = baseName === "@" || baseName === "@-" || /^[0-9a-f]{40,64}$/.test(baseName);
+  const isOwnedPullRequestBase =
+    checkpoint.metadata?.changeRequestLookupTarget !== undefined &&
+    checkpoint.publication !== null &&
+    checkpoint.comparison.liveBase !== null;
+  const exactPin =
+    baseName === "@" ||
+    baseName === "@-" ||
+    /^[0-9a-f]{40,64}$/.test(baseName) ||
+    isOwnedPullRequestBase;
   const baseBookmark = exactPin ? null : baseName;
   if (baseBookmark && !(await hasJjBookmark(cwd, baseBookmark, context)))
     throw new JjCheckpointError(

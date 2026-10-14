@@ -44,6 +44,7 @@ import {
   writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
   readPaseoWorktreeMetadata,
 } from "./worktree-metadata.js";
+import { createJjWorktree } from "./worktree-jj.js";
 
 const jjAvailable = isJjAvailable();
 const describeIfJj = describe.skipIf(!jjAvailable);
@@ -1454,7 +1455,6 @@ describeIfJj("jj local core parity", () => {
       hasRemote: true,
     });
     expect(suggestions.every((row) => row.committerDate < 100_000_000_000)).toBe(true);
-    const { createJjWorktree } = await import("./worktree-jj.js");
     const created = await createJjWorktree({
       cwd: target.repoDir,
       worktreeSlug: "from-picker",
@@ -2616,6 +2616,197 @@ describeIfJj("integrate native work into its base", () => {
       expect(readFileSync(join(workspacePath, "selected.txt"), "utf8")).toBe("selected\n");
     },
   );
+
+  it("integrates a PR-created workspace into its pinned remote base without moving remote refs", async () => {
+    const fixture = scratch({ files: { "base.txt": "base\n" } });
+    const base = (await getJjChangeMeta(fixture.repoDir, "@-"))!;
+    expect(fixture.jj(["bookmark", "create", "main", "-r", base.commitId]).status).toBe(0);
+    expect(fixture.jj(["new", "main", "-m", "published PR work"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "pr.txt"), "published PR content\n");
+    expect(fixture.jj(["describe", "-m", "published PR work"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+
+    const remote = scratchBareGitOrigin();
+    const remoteUrl = "https://github.com/acme/project.git";
+    expect(fixture.jj(["git", "remote", "add", "origin", remoteUrl]).status).toBe(0);
+    const rewrite = spawnSync(
+      "git",
+      [
+        "config",
+        "--file",
+        join(fixture.repoDir, ".git", "config"),
+        `url.file://${remote}.insteadOf`,
+        remoteUrl,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(rewrite.status).toBe(0);
+    expect(
+      fixture.jj([
+        "git",
+        "push",
+        "--bookmark",
+        "main",
+        "--bookmark",
+        "feature",
+        "--remote",
+        "origin",
+      ]).status,
+    ).toBe(0);
+    const remoteMain = spawnSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const remoteFeature = spawnSync(
+      "git",
+      ["--git-dir", remote, "rev-parse", "refs/heads/feature"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+    const peerPath = join(fixture.dir, "peer-workspace");
+    expect(
+      fixture.jj(["workspace", "add", "-r", base.commitId, peerPath, "--name", "peer"]).status,
+    ).toBe(0);
+    writeFileSync(join(peerPath, "peer.txt"), "peer workspace work\n");
+    const peer = (await getJjChangeMeta(peerPath, "@"))!;
+    const sourceHead = (await getJjChangeMeta(fixture.repoDir, "feature"))!;
+
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "pr-integration",
+      source: {
+        kind: "checkout-change-request",
+        forge: "github",
+        changeRequestNumber: 7,
+        headRef: "feature",
+        headRepositoryOwner: "acme",
+        headRepository: "acme/project",
+        baseRefName: "main",
+      },
+      forgeRepository: {
+        host: "github.com",
+        targetRepository: "acme/project",
+        sourceRepository: "acme/project",
+        headRef: "feature",
+        headSha: remoteFeature,
+        remoteHeadSha: remoteFeature,
+      },
+      paseoHome: join(fixture.dir, "home"),
+      worktreesRoot: fixture.worktreesRoot,
+    });
+    writeFileSync(join(created.worktreePath, "selected.txt"), "selected workspace work\n");
+    const selected = (await getJjChangeMeta(created.worktreePath, "@"))!;
+    const beforeWorkspace = (await getJjChangeMeta(created.worktreePath, "@"))!;
+    const beforePrimary = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const context = { paseoHome: join(fixture.dir, "home"), worktreesRoot: fixture.worktreesRoot };
+    const facts = await getJjSnapshotFacts(created.worktreePath, context);
+    expect(facts.isJj).toBe(true);
+    if (!facts.isJj || !facts.resolvedBaseRef) throw new Error("PR workspace base was unavailable");
+    const checkpoint = (await import("./jj-checkpoint.js")).readJjCheckpoint;
+    const initialCheckpoint = await checkpoint(created.worktreePath, context.paseoHome);
+    expect(initialCheckpoint?.comparison.liveBase).toContain('remote_bookmarks(exact:"main"');
+    const pinnedBase = initialCheckpoint!.comparison.pinnedCommitId!;
+    await expect(
+      jjIntegrateIntoBase(
+        created.worktreePath,
+        { baseRef: facts.resolvedBaseRef, expectedChangeId: selected.changeId },
+        context,
+      ),
+    ).rejects.toMatchObject({ name: "JjIntegrationApprovalRequiredError" });
+    const integrated = await jjIntegrateIntoBase(
+      created.worktreePath,
+      {
+        baseRef: facts.resolvedBaseRef,
+        expectedChangeId: selected.changeId,
+        expectedCommitId: selected.commitId,
+        expectedBaseCommitId: pinnedBase,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(integrated.outcome).toBe("integrated");
+    expect(integrated.baseCommitId).toBe(selected.commitId);
+    expect(await getJjChangeMeta(created.worktreePath, "@")).toMatchObject({
+      changeId: beforeWorkspace.changeId,
+      commitId: beforeWorkspace.commitId,
+      parents: beforeWorkspace.parents,
+    });
+    expect(await getJjChangeMeta(fixture.repoDir, "@")).toMatchObject({
+      changeId: beforePrimary.changeId,
+      commitId: beforePrimary.commitId,
+      parents: beforePrimary.parents,
+    });
+    expect(await getJjChangeMeta(peerPath, "@")).toMatchObject({
+      changeId: peer.changeId,
+      commitId: peer.commitId,
+      parents: peer.parents,
+    });
+    expect(await getJjChangeMeta(fixture.repoDir, "feature")).toMatchObject({
+      changeId: sourceHead.changeId,
+      commitId: sourceHead.commitId,
+      parents: sourceHead.parents,
+    });
+    expect(readFileSync(join(created.worktreePath, "selected.txt"), "utf8")).toBe(
+      "selected workspace work\n",
+    );
+    expect(readFileSync(join(created.worktreePath, "pr.txt"), "utf8")).toBe(
+      "published PR content\n",
+    );
+    expect(readFileSync(join(fixture.repoDir, "pr.txt"), "utf8")).toBe("published PR content\n");
+    expect(readFileSync(join(peerPath, "peer.txt"), "utf8")).toBe("peer workspace work\n");
+    const updatedFacts = await getJjSnapshotFacts(created.worktreePath, context);
+    expect(updatedFacts.isJj && updatedFacts.resolvedBaseRef).toBe(selected.commitId);
+    expect(
+      spawnSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], {
+        encoding: "utf8",
+      }).stdout.trim(),
+    ).toBe(remoteMain);
+    expect(
+      spawnSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/feature"], {
+        encoding: "utf8",
+      }).stdout.trim(),
+    ).toBe(remoteFeature);
+    const repeatFacts = await getJjSnapshotFacts(created.worktreePath, context);
+    if (!repeatFacts.isJj || !repeatFacts.resolvedBaseRef)
+      throw new Error("Integrated base was unavailable");
+    await expect(
+      jjIntegrateIntoBase(
+        created.worktreePath,
+        { baseRef: repeatFacts.resolvedBaseRef, expectedChangeId: selected.changeId },
+        context,
+      ),
+    ).resolves.toMatchObject({ outcome: "noop", baseCommitId: selected.commitId });
+  });
+
+  it("keeps refusing an ordinary named base after its local bookmark disappears", async () => {
+    const fixture = scratch({ files: { "base.txt": "base\n" } });
+    const context = { paseoHome: join(fixture.dir, "home"), worktreesRoot: fixture.worktreesRoot };
+    const base = (await getJjChangeMeta(fixture.repoDir, "@-"))!;
+    expect(fixture.jj(["bookmark", "create", "main", "-r", base.commitId]).status).toBe(0);
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "missing-local-base",
+      source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+      ...context,
+    });
+    writeFileSync(join(created.worktreePath, "selected.txt"), "selected\n");
+    const selected = (await getJjChangeMeta(created.worktreePath, "@"))!;
+    const facts = await getJjSnapshotFacts(created.worktreePath, context);
+    if (!facts.isJj || !facts.resolvedBaseRef) throw new Error("Workspace base was unavailable");
+    const { importJjCheckpoint } = await import("./jj-checkpoint.js");
+    await importJjCheckpoint({
+      backingRoot: created.worktreePath,
+      head: selected,
+      paseoHome: context.paseoHome,
+    });
+    expect(fixture.jj(["bookmark", "forget", "main"]).status).toBe(0);
+
+    await expect(
+      jjIntegrateIntoBase(
+        created.worktreePath,
+        { baseRef: facts.resolvedBaseRef, expectedChangeId: selected.changeId },
+        context,
+      ),
+    ).rejects.toThrow("The named local base bookmark is missing");
+  });
 
   it("retains a conflicting merge for recovery and leaves the base and selected files unchanged", async () => {
     const fixture = scratch({ colocate: false, files: { "base.txt": "base\n" } });
