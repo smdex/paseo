@@ -885,6 +885,7 @@ export const ja: TranslationResources = {
         },
         viewPr_mr: "MRを表示",
         autoMerge: {
+          disable: "自動マージを無効にする",
           enableSquash: "自動マージ（スカッシュ）",
           enableMerge: "自動マージ（マージ）",
           enableRebase: "自動マージ（リベース）",

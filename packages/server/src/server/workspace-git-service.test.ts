@@ -1556,6 +1556,10 @@ test.skipIf(!isJjAvailable())(
         reason: "manual-refresh",
       });
       expect(snapshot.git.vcs).toBe("jj");
+      expect(snapshot.forge.repository).toEqual({
+        host: "github.com",
+        targetRepository: "acme/repo",
+      });
       expect(snapshot.forge.featuresEnabled).toBe(true);
       expect(snapshot.forge.pullRequest).toBeNull();
       expect(lookups).toEqual([]);

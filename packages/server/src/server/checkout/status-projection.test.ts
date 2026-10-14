@@ -433,3 +433,25 @@ describe("checkout status projection: vcs/changeId propagation", () => {
     expect(serialized).not.toContain('"vcs":"jj"');
   });
 });
+
+test("projects the exact native target identity without deriving it from the PR URL or display casing", () => {
+  const target = { host: "forge.example", targetRepository: "UPSTREAM/Project" };
+  const status = {
+    number: 42,
+    url: "https://forge.example/upstream/project/pull/42",
+    repoOwner: "upstream",
+    repoName: "project",
+    title: "Published",
+    state: "open",
+    baseRefName: "main",
+    headRefName: "feature",
+    isMerged: false,
+  };
+  const payload = normalizeCheckoutPrStatusPayload(status, "github", target);
+  expect(payload).toMatchObject({ number: 42, repository: target });
+  expect(CheckoutPrStatusSchema.parse(payload)).toEqual(payload);
+  const legacy = CheckoutPrStatusSchema.omit({ repository: true });
+  expect(legacy.parse(payload)).toEqual(
+    legacy.parse(normalizeCheckoutPrStatusPayload(status, "github")),
+  );
+});

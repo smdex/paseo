@@ -1,3 +1,4 @@
+import type { JjPrMutationIntent } from "@/git/jj-pr-mutation-form-model";
 import { openCheckoutActionForm } from "@/git/action-forms-store";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useState, useCallback, useEffect, useMemo, type ReactElement } from "react";
@@ -604,9 +605,32 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     toastActionSuccess,
   ]);
 
+  const openPrMutation = useCallback(
+    (intent: JjPrMutationIntent) => {
+      openCheckoutActionForm({
+        kind: "mutate-pr",
+        forge,
+        snapshot: {
+          serverId,
+          cwd,
+          intent,
+          identity:
+            prStatus?.repository && typeof prStatus.number === "number"
+              ? { ...prStatus.repository, number: prStatus.number }
+              : null,
+        },
+      });
+    },
+    [serverId, cwd, forge, prStatus],
+  );
+
   const handleMergePr = useCallback(
     (method: CheckoutPrMergeMethod) => {
       void persistShipDefault("pr");
+      if (isJj) {
+        openPrMutation({ kind: "merge", method });
+        return;
+      }
       void runMergePr({ serverId, cwd, method })
         .then(() => {
           setPostShipArchiveSuggested(true);
@@ -617,12 +641,27 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
           toastActionError(err, t("workspace.git.actions.toasts.failedMergePr"));
         });
     },
-    [cwd, forge, persistShipDefault, runMergePr, serverId, t, toastActionError, toastActionSuccess],
+    [
+      isJj,
+      openPrMutation,
+      cwd,
+      forge,
+      persistShipDefault,
+      runMergePr,
+      serverId,
+      t,
+      toastActionError,
+      toastActionSuccess,
+    ],
   );
 
   const handleEnablePrAutoMerge = useCallback(
     (method: CheckoutPrMergeMethod) => {
       void persistShipDefault("pr");
+      if (isJj) {
+        openPrMutation({ kind: "enable-auto-merge", method });
+        return;
+      }
       void runEnablePrAutoMerge({ serverId, cwd, method })
         .then(() => {
           toastActionSuccess(t("workspace.git.actions.autoMerge.enabled"));
@@ -633,6 +672,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         });
     },
     [
+      isJj,
+      openPrMutation,
       cwd,
       persistShipDefault,
       runEnablePrAutoMerge,
@@ -644,6 +685,10 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   );
 
   const handleDisablePrAutoMerge = useCallback(() => {
+    if (isJj) {
+      openPrMutation({ kind: "disable-auto-merge" });
+      return;
+    }
     void runDisablePrAutoMerge({ serverId, cwd })
       .then(() => {
         toastActionSuccess(t("workspace.git.actions.autoMerge.disabled"));
@@ -652,7 +697,16 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       .catch((err) => {
         toastActionError(err, t("workspace.git.actions.toasts.failedDisableAutoMerge"));
       });
-  }, [cwd, runDisablePrAutoMerge, serverId, t, toastActionError, toastActionSuccess]);
+  }, [
+    isJj,
+    openPrMutation,
+    cwd,
+    runDisablePrAutoMerge,
+    serverId,
+    t,
+    toastActionError,
+    toastActionSuccess,
+  ]);
 
   const handleMergeBranch = useCallback(() => {
     if (!baseRef) {
@@ -1099,7 +1153,11 @@ function getTranslatedGitActionLabels(
       };
     case "disable-pr-auto-merge":
       return {
-        label: t("workspace.git.actions.autoMerge.enabled"),
+        label: t(
+          isJj
+            ? "workspace.git.actions.autoMerge.disable"
+            : "workspace.git.actions.autoMerge.enabled",
+        ),
         pendingLabel: t("workspace.git.actions.autoMerge.disabling"),
         successLabel: t("workspace.git.actions.autoMerge.disabled"),
       };

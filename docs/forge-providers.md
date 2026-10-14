@@ -111,11 +111,12 @@ Checkout adapters must return the source clone URL for fork requests. Native jj 
 branches; forge PR/MR ref namespaces alone cannot supply the fork's change. Keep that source
 identity separate from the target repository used for lookup and comparison.
 
-Native PR creation publishes with jj before invoking the forge adapter. Pass the explicit
-`ForgeRepositoryContext` through create options and every CLI call: a secondary jj workspace
+Native forge mutations require explicit `ForgeRepositoryContext` on every CLI call: a secondary jj workspace
 can sit inside an unrelated Git checkout, so cwd discovery can target a different project.
-Keep the published source distinct from the PR target, including renamed forks and self-hosted
-hosts. [GitHub’s `head_repo`](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request) disambiguates
+PR creation publishes with jj first. Merge and auto-merge act on the published PR without
+pushing local work. Capture its exact target and number when the action opens and compare
+them after the forced lookup; a stale action for PR 1 must never mutate a newly selected PR 2.
+Keep the published source distinct from the PR target, including renamed forks and self-hosted hosts. [GitHub’s `head_repo`](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request) disambiguates
 same-organization forks and takes the source repository name. GitLab’s
 `--head` takes the source project; [Gitea’s `head`](https://docs.gitea.com/api/operations/repo-create-pull-request/) uses `owner:bookmark` for a fork.
 

@@ -201,6 +201,7 @@ export interface PullRequestCommandStatus {
 
 export interface MergePullRequestOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
   status?: PullRequestCommandStatus | null;
@@ -208,6 +209,7 @@ export interface MergePullRequestOptions {
 
 export interface EnablePullRequestAutoMergeOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
   status?: PullRequestCommandStatus | null;
@@ -215,6 +217,7 @@ export interface EnablePullRequestAutoMergeOptions {
 
 export interface DisablePullRequestAutoMergeOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   status?: PullRequestCommandStatus | null;
 }

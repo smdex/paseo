@@ -881,6 +881,7 @@ export const ko: TranslationResources = {
           success_mr: "MR 병합됨",
         },
         autoMerge: {
+          disable: "자동 병합 비활성화",
           enableSquash: "자동 병합(스쿼시)",
           enableMerge: "자동 병합(병합)",
           enableRebase: "자동 병합(리베이스)",

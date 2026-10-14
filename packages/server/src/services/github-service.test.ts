@@ -4992,3 +4992,88 @@ it.each(["contributor/fork", "upstream/fork"])(
     ]);
   },
 );
+
+it("merges a native published PR on its explicit target host without Git discovery", async () => {
+  const runner = createRunner([""]);
+  const service = createGitHubService({
+    runner: runner.runner,
+    resolveRepoHost: async () => {
+      throw new Error("must not discover outer Git");
+    },
+  });
+  const repository: ForgeRepositoryContext = {
+    host: "forge.example",
+    targetRepository: "upstream/project",
+    sourceRepository: "contributor/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "b".repeat(40),
+  };
+  await expect(
+    service.mergePullRequest({
+      cwd: "/native",
+      repository,
+      prNumber: 42,
+      mergeMethod: "squash",
+      status: createCurrentPullRequestStatus({ forgeSpecific: githubStatusFacts() }),
+    }),
+  ).resolves.toEqual({ success: true });
+  expect(runner.calls).toEqual([
+    {
+      cwd: "/native",
+      envOverlay: { GH_HOST: "forge.example", GH_PROMPT_DISABLED: "1" },
+      args: ["pr", "merge", "42", "--squash", "--repo", "forge.example/upstream/project"],
+    },
+  ]);
+});
+
+it.each([true, false])(
+  "routes native auto-merge enabled=%s to the exact target",
+  async (enabled) => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => {
+        throw new Error("must not infer Git");
+      },
+    });
+    const repository: ForgeRepositoryContext = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      sourceRepository: "contributor/fork",
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "b".repeat(40),
+    };
+    const status = createCurrentPullRequestStatus({
+      forgeSpecific: githubStatusFacts(
+        enabled
+          ? { mergeStateStatus: "BLOCKED", viewerCanEnableAutoMerge: true }
+          : {
+              autoMergeRequest: { enabledAt: null, mergeMethod: "SQUASH", enabledBy: null },
+              viewerCanDisableAutoMerge: true,
+            },
+      ),
+    });
+    const input = { cwd: "/native", repository, prNumber: 42, status };
+    await expect(
+      enabled
+        ? service.enablePullRequestAutoMerge({ ...input, mergeMethod: "squash" })
+        : service.disablePullRequestAutoMerge(input),
+    ).resolves.toEqual({ success: true });
+    expect(runner.calls).toEqual([
+      {
+        cwd: "/native",
+        envOverlay: { GH_PROMPT_DISABLED: "1", GH_HOST: "forge.example" },
+        args: [
+          "pr",
+          "merge",
+          "42",
+          ...(enabled ? ["--auto", "--squash"] : ["--disable-auto"]),
+          "--repo",
+          "forge.example/upstream/project",
+        ],
+      },
+    ]);
+  },
+);

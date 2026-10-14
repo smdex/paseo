@@ -118,7 +118,11 @@ export function buildCheckoutPrStatusPayloadFromSnapshot({
   const forge = snapshot.forge.forge;
   return {
     cwd,
-    status: normalizeCheckoutPrStatusPayload(snapshot.forge.pullRequest, forge),
+    status: normalizeCheckoutPrStatusPayload(
+      snapshot.forge.pullRequest,
+      forge,
+      snapshot.forge.repository,
+    ),
     githubFeaturesEnabled: snapshot.forge.featuresEnabled,
     authState: snapshot.forge.authState,
     ...(forge ? { forge } : {}),
@@ -135,12 +139,14 @@ export function buildCheckoutPrStatusPayloadFromSnapshot({
 export function normalizeCheckoutPrStatusPayload(
   status: WorkspaceGitRuntimeSnapshot["forge"]["pullRequest"],
   forge?: string,
+  repository?: WorkspaceGitRuntimeSnapshot["forge"]["repository"],
 ): CheckoutPrStatusPayloadStatus | null {
   if (!status) {
     return null;
   }
   const payload: CheckoutPrStatusWireStatus = {
     ...(forge ? { forge } : {}),
+    ...(repository ? { repository } : {}),
     number: status.number,
     url: status.url,
     title: status.title,
