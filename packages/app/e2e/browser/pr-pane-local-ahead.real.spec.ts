@@ -1,5 +1,15 @@
-import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
+import {
+  assertNewWorkspaceSidebarAndHeader,
+  connectNewWorkspaceDaemonClient,
+  loadSessionMessageReaders,
+  openNewWorkspaceComposer,
+  openProjectViaDaemon as openWorkspaceProjectViaDaemon,
+  openBranchPicker,
+  selectGitHubPrInPicker,
+} from "../support/helpers/new-workspace";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -205,3 +215,159 @@ function runGit(cwd: string, args: string[]): string {
   }
   return result.stdout.trim();
 }
+
+test("selected PR creates a native workspace after a visible lookup failure and same-key retry", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const reference =
+    process.env.PASEO_E2E_REUSE_GITHUB_PR ??
+    "smdex/paseotmp-pr-pane-local-ahead-1791945916933-3kh0f#1";
+  const match = /^([^/]+\/[^#]+)#(\d+)$/.exec(reference);
+  if (!match) throw new Error("PASEO_E2E_REUSE_GITHUB_PR must be owner/repository#number");
+  const fullName = match[1];
+  const number = Number(match[2]);
+  const pr = z
+    .object({
+      title: z.string(),
+      baseRefName: z.string(),
+      headRefName: z.string(),
+      headRefOid: z.string(),
+      state: z.literal("OPEN"),
+    })
+    .parse(
+      JSON.parse(
+        execFileSync(
+          "gh",
+          [
+            "pr",
+            "view",
+            String(number),
+            "--repo",
+            fullName,
+            "--json",
+            "title,baseRefName,headRefName,headRefOid,state",
+          ],
+          { encoding: "utf8" },
+        ),
+      ),
+    );
+  const directory = await mkdtemp(path.join(tmpdir(), "paseo-e2e-jj-pr-workspace-"));
+  const repo = path.join(directory, "project");
+  await mkdir(repo);
+  const jj = (args: string[], cwd = repo) =>
+    execFileSync(
+      "jj",
+      [
+        "--no-pager",
+        "--color=never",
+        "--config",
+        "user.name=Paseo Test",
+        "--config",
+        "user.email=paseo-test@example.invalid",
+        ...args,
+      ],
+      { cwd, encoding: "utf8" },
+    ).trim();
+  const remoteUrl = `https://github.com/${fullName}.git`;
+  jj(["git", "init", "--no-colocate"]);
+  jj(["git", "remote", "add", "origin", remoteUrl]);
+  jj(["git", "fetch", "--remote", "exact:origin", "--branch", `exact:${pr.baseRefName}`]);
+  jj(["new", `${pr.baseRefName}@origin`, "-m", "Keep source workspace"]);
+  await writeFile(path.join(repo, "local-current.txt"), "Keep source work\n");
+  const sourceHead = jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+  const baseHead = jj(["log", "--no-graph", "-r", `${pr.baseRefName}@origin`, "-T", "commit_id"]);
+  expect(
+    jj([
+      "log",
+      "--no-graph",
+      "-r",
+      `remote_bookmarks(exact:${JSON.stringify(pr.headRefName)})`,
+      "-T",
+      "commit_id",
+    ]),
+  ).toBe("");
+  const client = await connectNewWorkspaceDaemonClient();
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const requests: { slug: string | undefined; key: string | undefined }[] = [];
+  try {
+    const project = await openWorkspaceProjectViaDaemon(client, repo);
+    const frames = await loadSessionMessageReaders();
+    await page.routeWebSocket(daemonWsRoutePattern(), (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage(async (message) => {
+        const request = frames.client(message);
+        if (request?.type === "workspace.create.request" && request.source?.kind === "worktree") {
+          expect(request.source.checkoutSource).toMatchObject({ kind: "change_request", number });
+          requests.push({ slug: request.source.worktreeSlug, key: request.idempotencyKey });
+          if (requests.length === 1) {
+            jj([
+              "git",
+              "remote",
+              "set-url",
+              "origin",
+              `https://github.com/${fullName}-missing.git`,
+            ]);
+            await gate;
+          }
+        }
+        server.send(message);
+      });
+      server.onMessage((message) => ws.send(message));
+    });
+    await gotoAppShell(page);
+    await waitForSidebarHydration(page);
+    await openNewWorkspaceComposer(page, project);
+    await page.getByTestId("workspace-create-isolation-trigger").click();
+    await page.getByTestId("workspace-create-isolation-worktree").click();
+    await openBranchPicker(page);
+    await selectGitHubPrInPicker(page, number);
+    const submit = page.getByTestId("workspace-create-submit").filter({ visible: true });
+    await submit.click();
+    await expect.poll(() => requests.length, { timeout: 15_000 }).toBe(1);
+    await expect(submit).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath("jj-pr-workspace-pending.png") });
+    release();
+    const error = page.getByText(/Unable to open the selected pull request:/).first();
+    await expect(error).toBeVisible({ timeout: 30_000 });
+    await expect(submit).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Starting ref" })).toContainText(`#${number}`);
+    await expect(page).toHaveURL(/\/new(?:\?.*)?$/);
+    await page.screenshot({ path: testInfo.outputPath("jj-pr-workspace-failure.png") });
+    jj(["git", "remote", "set-url", "origin", remoteUrl]);
+    await submit.click();
+    const result = await assertNewWorkspaceSidebarAndHeader(page, {
+      serverId: getServerId(),
+      client,
+      previousWorkspaceId: project.workspaceId,
+      projectDisplayName: project.projectDisplayName,
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[0].key).toBeTruthy();
+    expect(requests[1]).toEqual(requests[0]);
+    expect(result.workspaceDirectory).toBe(path.join(directory, `project-${requests[0].slug}`));
+    expect(
+      jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"], result.workspaceDirectory),
+    ).toBe(pr.headRefOid);
+    expect(jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])).toBe(sourceHead);
+    expect(await readFile(path.join(repo, "local-current.txt"), "utf8")).toBe("Keep source work\n");
+    const metadata = JSON.parse(
+      await readFile(path.join(result.workspaceDirectory, ".jj/paseo/worktree.json"), "utf8"),
+    );
+    expect(metadata).toMatchObject({
+      baseRef: baseHead,
+      changeRequestLookupTarget: { headRef: pr.headRefName, changeRequestNumber: number },
+    });
+    await openPrPane(page);
+    await expectPrPaneTitle(page, pr.title);
+    await expectPrPaneState(page, "open");
+    await page.screenshot({ path: testInfo.outputPath("jj-pr-workspace-success.png") });
+  } finally {
+    release();
+    await client.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

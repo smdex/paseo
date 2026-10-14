@@ -473,7 +473,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     expect(listed.map((entry) => entry.path)).toContain(created.worktreePath);
   });
 
-  it("rejects deferred worktree sources before spawning", async () => {
+  it("refuses PR creation without a forge remote before creating a workspace", async () => {
     const fixture = createFixture();
     await expect(
       createJjWorktree({
@@ -487,7 +487,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
         },
         worktreesRoot: fixture.worktreesRoot,
       }),
-    ).rejects.toThrow(/not supported on jj/i);
+    ).rejects.toMatchObject({ code: "workspace_source_unavailable" });
   });
 
   it("retains the directory when the workspace is no longer registered (fail closed)", async () => {

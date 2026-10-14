@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -1438,6 +1439,289 @@ test.skipIf(!isJjAvailable())(
   },
 );
 
+test.skipIf(!isJjAvailable())(
+  "opens a native PR through workspace creation with its own bookmark and pinned target base",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    const remote = path.join(h.fixture.dir, "remote.git");
+    execFileSync("git", ["init", "--bare", "-q", remote]);
+    expect(h.fixture.jj(["git", "remote", "add", "origin", remote]).status).toBe(0);
+    expect(h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "main"]).status).toBe(
+      0,
+    );
+    writeFileSync(path.join(h.fixture.repoDir, "pr.txt"), "the selected PR\n");
+    expect(h.fixture.jj(["commit", "-m", "PR work"]).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "create", "Feature/PR_7", "-r", "@-"]).status).toBe(0);
+    expect(
+      h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "Feature/PR_7"]).status,
+    ).toBe(0);
+    const base = h.fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    const sourceHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    const repository = {
+      host: "github.com",
+      targetRepository: "acme/repo",
+      sourceRepository: "acme/repo",
+      headRef: "main",
+      headSha: base,
+      remoteHeadSha: base,
+    };
+    let lookups = 0;
+    h.deps.github.getPullRequestCheckoutTarget = async (input) => {
+      expect(input.repository).toEqual(repository);
+      lookups++;
+      return {
+        number: input.number,
+        baseRefName: "main",
+        headRefName: "Feature/PR_7",
+        headOwnerLogin: "acme",
+        headRepositorySshUrl: null,
+        headRepositoryUrl: null,
+        isCrossRepository: false,
+      };
+    };
+    h.deps.workspaceGitService.resolveForge = async () => ({
+      forge: "github",
+      host: "github.com",
+      service: h.deps.github,
+      repository,
+    });
+    const input = {
+      cwd: h.fixture.repoDir,
+      projectId: "project",
+      worktreeSlug: "review-seven",
+      refName: "stale-head-from-picker",
+      checkoutSource: { kind: "change_request" as const, forge: "github", number: 7 },
+      runSetup: false,
+      paseoHome: h.fixture.dir,
+    };
+    const resolveTarget = h.deps.github.getPullRequestCheckoutTarget;
+    h.deps.github.getPullRequestCheckoutTarget = async () => {
+      throw new Error("Forge lookup unavailable");
+    };
+    await expect(createPaseoWorktree(input, h.deps)).rejects.toMatchObject({
+      code: "workspace_source_unavailable",
+      message: expect.stringContaining("Forge lookup unavailable"),
+    });
+    expect((await listJjWorkspaces(h.fixture.repoDir)).map((workspace) => workspace.name)).toEqual([
+      "default",
+    ]);
+    expect(h.deps.workspaces.size).toBe(0);
+    h.deps.github.getPullRequestCheckoutTarget = async ({ number }) => ({
+      number,
+      baseRefName: "main",
+      headRefName: "missing-head",
+      headOwnerLogin: "acme",
+      headRepositorySshUrl: null,
+      headRepositoryUrl: null,
+      isCrossRepository: false,
+    });
+    await expect(createPaseoWorktree(input, h.deps)).rejects.toMatchObject({
+      code: "workspace_source_unavailable",
+      message: expect.stringContaining("missing-head"),
+    });
+    expect((await listJjWorkspaces(h.fixture.repoDir)).map((workspace) => workspace.name)).toEqual([
+      "default",
+    ]);
+    expect(h.deps.workspaces.size).toBe(0);
+    h.deps.github.getPullRequestCheckoutTarget = resolveTarget;
+    const result = await createPaseoWorktree(input, h.deps);
+    expect(lookups).toBe(1);
+    expect(readFileSync(path.join(result.workspace.cwd, "pr.txt"), "utf8")).toBe(
+      "the selected PR\n",
+    );
+    expect(result.workspace.cwd).toBe(path.join(h.fixture.dir, "repo-review-seven"));
+    expect(result.worktree.comparisonBaseRef).toBe(base);
+    expect(result.worktree.branchName).not.toBe("Feature/PR_7");
+    expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+      sourceHead,
+    );
+    expect(readPaseoWorktreeMetadata(result.workspace.cwd)).toMatchObject({
+      baseRef: base,
+      jjBookmark: result.worktree.branchName,
+      changeRequestLookupTarget: {
+        headRef: "Feature/PR_7",
+        changeRequestNumber: 7,
+        localBranchName: result.worktree.branchName,
+      },
+    });
+    const { readJjCheckpoint } = await import("../utils/jj-checkpoint.js");
+    expect((await readJjCheckpoint(result.workspace.cwd, h.fixture.dir))?.publication).toEqual({
+      remoteName: "origin",
+      remoteUrl: remote,
+      localBookmark: result.worktree.branchName,
+      remoteBookmark: "Feature/PR_7",
+      sourceRepository: "acme/repo",
+      targetRepository: "acme/repo",
+    });
+  },
+);
+
+test.skipIf(!isJjAvailable() || isPlatform("win32"))(
+  "opens a fork PR without Git discovery and preserves a bookmarkless source's forge context",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    execFileSync("git", ["init", "-q", h.fixture.dir]);
+    const origin = path.join(h.fixture.dir, "origin.git");
+    const fork = path.join(h.fixture.dir, "fork.git");
+
+    execFileSync("git", ["init", "--bare", "-q", origin]);
+    expect(h.fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "main"]).status).toBe(
+      0,
+    );
+    execFileSync("git", ["clone", "--bare", "--quiet", origin, fork]);
+    const publisher = path.join(h.fixture.dir, "publisher");
+    expect(h.fixture.jj(["git", "clone", "--no-colocate", origin, publisher]).status).toBe(0);
+    expect(h.fixture.jj(["new", "main@origin"], publisher).status).toBe(0);
+    writeFileSync(path.join(publisher, "fork-only.txt"), "intended fork work\n");
+    expect(h.fixture.jj(["commit", "-m", "fork PR"], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "create", "review/PR_7", "-r", "@-"], publisher).status).toBe(
+      0,
+    );
+    expect(h.fixture.jj(["git", "remote", "add", "fork", fork], publisher).status).toBe(0);
+    expect(
+      h.fixture.jj(["git", "push", "--remote", "fork", "--bookmark", "review/PR_7"], publisher)
+        .status,
+    ).toBe(0);
+    for (const remote of [origin, fork])
+      execFileSync("git", ["--git-dir", remote, "update-server-info"]);
+    const server = createServer((request, response) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      const prefix = pathname.startsWith("/acme/repo.git/")
+        ? "/acme/repo.git"
+        : "/contributor/fork.git";
+      try {
+        response.end(
+          readFileSync(
+            path.join(prefix === "/acme/repo.git" ? origin : fork, pathname.slice(prefix.length)),
+          ),
+        );
+      } catch {
+        response.writeHead(404).end();
+      }
+    });
+    server.unref();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected HTTP fixture address");
+    const originUrl = `http://127.0.0.1:${address.port}/acme/repo.git`;
+    const forkUrl = `http://127.0.0.1:${address.port}/contributor/fork.git`;
+    const forkSshUrl = "git@github.com:contributor/fork.git";
+    execFileSync("git", [
+      "--git-dir",
+      path.join(h.fixture.repoDir, ".jj/repo/store/git"),
+      "config",
+      `url.${forkUrl}.insteadOf`,
+      forkSshUrl,
+    ]);
+    expect(h.fixture.jj(["git", "remote", "set-url", "origin", originUrl]).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "forget", "main"]).status).toBe(0);
+    const { getJjForgeRepositoryContext } = await import("../utils/checkout-jj.js");
+    const before = await getJjForgeRepositoryContext(h.fixture.repoDir, {
+      paseoHome: h.fixture.dir,
+    });
+    expect(before.headRef).toBeNull();
+    const head = h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim();
+    const userRemote = path.join(h.fixture.dir, "user-remote.git");
+    h.deps.github.getPullRequestCheckoutTarget = async ({ number, repository }) => {
+      expect(repository).toEqual(before);
+      return {
+        number,
+        baseRefName: "main",
+        headRefName: "review/PR_7",
+        headOwnerLogin: "contributor",
+        headRepositorySshUrl: forkSshUrl,
+        headRepositoryUrl: forkUrl,
+        isCrossRepository: true,
+      };
+    };
+    h.deps.workspaceGitService.resolveForge = async (cwd) => ({
+      forge: "github",
+      host: "github.com",
+      service: h.deps.github,
+      repository: await getJjForgeRepositoryContext(cwd, { paseoHome: h.fixture.dir }),
+    });
+    const bin = path.join(h.fixture.dir, "guard-bin");
+    mkdirSync(bin);
+    const calls = path.join(h.fixture.dir, "git-calls");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      path.join(bin, "git"),
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realGit}' "$@"\n`,
+    );
+    chmodSync(path.join(bin, "git"), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath}`;
+    try {
+      const result = await createPaseoWorktree(
+        {
+          cwd: h.fixture.repoDir,
+          projectId: "project",
+          worktreeSlug: "fork-review",
+          action: "checkout",
+          checkoutSource: { kind: "change_request", forge: "github", number: 7 },
+          runSetup: false,
+          paseoHome: h.fixture.dir,
+        },
+        h.deps,
+      );
+      expect(readFileSync(path.join(result.workspace.cwd, "fork-only.txt"), "utf8")).toBe(
+        "intended fork work\n",
+      );
+      expect(result.workspace.untrustedSource).toEqual({
+        kind: "change_request",
+        forge: "github",
+        number: 7,
+        headRepository: "contributor/fork",
+      });
+      expect(
+        await getJjForgeRepositoryContext(h.fixture.repoDir, { paseoHome: h.fixture.dir }),
+      ).toEqual(before);
+      expect(
+        await getJjForgeRepositoryContext(result.workspace.cwd, { paseoHome: h.fixture.dir }),
+      ).toMatchObject({
+        targetRepository: "acme/repo",
+        sourceRepository: "contributor/fork",
+        headRef: "review/PR_7",
+        remoteUrl: forkUrl,
+      });
+      expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+        head,
+      );
+      const transportCalls = readFileSync(calls, "utf8").trim().split("\n");
+      expect(transportCalls).toHaveLength(2);
+      expect(
+        transportCalls.every((call) =>
+          call.includes(`--git-dir ${path.join(h.fixture.repoDir, ".jj/repo/store/git")} fetch `),
+        ),
+      ).toBe(true);
+      const { readJjCheckpoint } = await import("../utils/jj-checkpoint.js");
+      expect((await readJjCheckpoint(h.fixture.repoDir, h.fixture.dir))?.forgeRemote).toEqual({
+        remoteName: "origin",
+        remoteUrl: originUrl,
+      });
+      expect(h.fixture.jj(["git", "remote", "set-url", "origin", userRemote]).status).toBe(0);
+      await expect(
+        getJjForgeRepositoryContext(h.fixture.repoDir, { paseoHome: h.fixture.dir }),
+      ).rejects.toThrow("unambiguous");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        }),
+      );
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  },
+);
+
 interface JjLifecycleTestFixture {
   fixture: ReturnType<typeof createScratchJjRepo>;
   deps: TestDeps;
@@ -1761,10 +2045,10 @@ test.skipIf(!isJjAvailable() || isPlatform("win32"))(
             },
             h.deps,
           ),
-        ).rejects.toThrow("not supported on jj");
+        ).rejects.toThrow("forge resolution must not run");
         await expect(
           createPaseoWorktree({ cwd, githubPrNumber: 1, runSetup: false }, h.deps),
-        ).rejects.toThrow("not supported on jj");
+        ).rejects.toThrow("forge resolution must not run");
       }
       writeFileSync(path.join(secondary, "only-secondary.txt"), "selected workspace\n");
       expect(h.fixture.jj(["describe", "-m", "secondary selection"], secondary).status).toBe(0);

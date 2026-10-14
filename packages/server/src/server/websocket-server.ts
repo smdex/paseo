@@ -2184,6 +2184,7 @@ export class VoiceAssistantWebSocketServer {
         checkoutJj: isJjFeatureAvailable(),
         checkoutJjCheckpoint: isJjFeatureAvailable(),
         checkoutJjPrCreate: isJjFeatureAvailable(),
+        checkoutJjPrWorkspace: isJjFeatureAvailable(),
         checkoutJjRewriteApproval: isJjFeatureAvailable(),
         checkoutJjFetchRebase: isJjFeatureAvailable(),
         checkoutJjGraphSelections: isJjFeatureAvailable(),

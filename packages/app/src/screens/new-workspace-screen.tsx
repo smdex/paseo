@@ -888,6 +888,7 @@ export function NewWorkspaceScreen({
   // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
   const supportsWorkspaceMultiplicity = useHostFeature(selectedServerId, "workspaceMultiplicity");
   const supportsForgeSearch = useHostFeature(selectedServerId, "forgeSearch");
+  const supportsJjPrWorkspace = useHostFeature(selectedServerId, "checkoutJjPrWorkspace");
   const [creationIdentity] = useState(() => ({
     draftId: draftId ?? generateDraftId(),
     worktreeSlug: createNameId(),
@@ -1080,6 +1081,7 @@ export function NewWorkspaceScreen({
     enabled: canSearchRefPickerChangeRequests({
       status: checkoutStatus,
       enabled: pickerQueryEnabled,
+      supportsJjPrWorkspace,
     }),
   });
 
@@ -1092,8 +1094,17 @@ export function NewWorkspaceScreen({
     !githubPrSearchQuery.data || githubPrSearchQuery.data.authState === "authenticated";
   const prItems: ForgeSearchItem[] = useMemo(() => {
     if (!forgeSearchAuthenticated) return [];
-    return refPickerChangeRequests(checkoutStatus, githubPrSearchQuery.data?.items);
-  }, [checkoutStatus, forgeSearchAuthenticated, githubPrSearchQuery.data?.items]);
+    return refPickerChangeRequests(
+      checkoutStatus,
+      githubPrSearchQuery.data?.items,
+      supportsJjPrWorkspace,
+    );
+  }, [
+    checkoutStatus,
+    forgeSearchAuthenticated,
+    githubPrSearchQuery.data?.items,
+    supportsJjPrWorkspace,
+  ]);
 
   const baseItem = useMemo(
     () => selectedItem ?? (checkoutStatus ? defaultBasePickerItem(checkoutStatus) : null),
