@@ -92,9 +92,14 @@ export function createBottomSheetVisibilityTracker(opts: {
 
   return {
     attachController(next) {
+      const previous = controller;
       controller = next;
-      // A sheet that left the tree cannot answer, so it lets go of the press without changing
-      // phase: the parent has not acknowledged the dismissal yet.
+      // React detaches the compact ref before the layout effect disables presentation.
+      // Its portal can outlive that tree, so dismiss it while its handle is available.
+      // Clear the controller first: teardown must not request closing the owner's form.
+      if (!next && (phase === "presenting" || phase === "presented")) {
+        previous?.dismiss();
+      }
       syncBackPress();
       if (next && visible && isEnabled !== false) {
         present();
@@ -104,7 +109,8 @@ export function createBottomSheetVisibilityTracker(opts: {
       visible = next.visible;
       isEnabled = next.isEnabled;
       if (isEnabled === false) {
-        // Desktop replaces compact presentation without dismissing the opened form.
+        // Desktop replaces compact presentation while the owner's form stays open.
+        dismiss();
         setPhase("closed");
         hasNotifiedClose = false;
         return;

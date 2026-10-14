@@ -289,8 +289,10 @@ test("native direct merge acts on the captured published PR and preserves local 
       `${fullName} #${pr.number}`,
     );
     await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(1);
     await expect(page.getByTestId("jj-pr-mutation-identity")).toContainText(`#${pr.number}`);
     await page.setViewportSize({ width: 1400, height: 900 });
+    await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(1);
     await page.getByTestId("jj-pr-mutation-submit").click();
     await expect(page.getByTestId("jj-pr-mutation-submit")).toBeDisabled();
     await expect(page.getByTestId("jj-pr-mutation-submit")).toContainText("Merging PR");
@@ -323,10 +325,14 @@ test("native direct merge acts on the captured published PR and preserves local 
     );
     await expect(page).toHaveURL(new RegExp(created.workspace.id));
     await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(1);
     await expect(page.getByTestId("jj-pr-mutation-success")).toHaveText("PR merged");
     await expect(page.getByTestId("jj-pr-mutation-identity")).toContainText(`#${pr.number}`);
     await page.screenshot({ path: testInfo.outputPath("native-direct-merge-success-narrow.png") });
-    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await page
+      .getByTestId("jj-pr-mutation-form")
+      .getByRole("button", { name: "Dismiss", exact: true })
+      .click();
     await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(0);
   } finally {
     try {

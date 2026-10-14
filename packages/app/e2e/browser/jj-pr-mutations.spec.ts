@@ -100,6 +100,7 @@ for (const operation of ["merge", "enable", "disable"] as const) {
       const failed = stateSchema.parse(JSON.parse(await readFile(statePath, "utf8")));
       expect(failed.commands.map((command) => command.operation)).toEqual([operation]);
       await page.setViewportSize({ width: 390, height: 844 });
+      await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(1);
       await expect(page.getByTestId("jj-pr-mutation-error")).toContainText(
         "Provider refused the captured PR",
       );
@@ -115,6 +116,7 @@ for (const operation of ["merge", "enable", "disable"] as const) {
       await expect(page.getByTestId("jj-pr-mutation-success")).toHaveText(success);
       await expect(page.getByTestId("jj-pr-mutation-submit")).toBeDisabled();
       await page.setViewportSize({ width: 1400, height: 900 });
+      await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(1);
       await expect(page.getByTestId("jj-pr-mutation-success")).toHaveText(success);
       const completed = stateSchema.parse(JSON.parse(await readFile(statePath, "utf8")));
       expect(completed.commands.map((command) => command.operation)).toEqual([
@@ -126,7 +128,10 @@ for (const operation of ["merge", "enable", "disable"] as const) {
         "Local work stays untouched\n",
       );
       await expect(page).toHaveURL(new RegExp(created.workspace.id));
-      await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await page
+        .getByTestId("jj-pr-mutation-form")
+        .getByRole("button", { name: "Dismiss", exact: true })
+        .click();
       await expect(page.getByTestId("jj-pr-mutation-form")).toHaveCount(0);
     } finally {
       await client.close();
