@@ -14,6 +14,7 @@ import {
   writeJjCheckpoint,
   validateJjCheckpoint,
   JjCheckpointError,
+  JjRewriteApprovalRequiredError,
   type JjCheckpoint,
   type JjCheckpointHead,
   type JjCheckpointOperation,
@@ -1709,7 +1710,7 @@ async function prepareJjChange(
     freshContext,
   );
   if ((affectedHeads.length || published || shared) && intent.acknowledgeRewrites !== true)
-    throw new JjCheckpointError(
+    throw new JjRewriteApprovalRequiredError(
       `Native rewrite approval required: ${impactSubject.changeId}; ${affectedHeads.length} known descendant(s)${
         affectedHeads.length
           ? ` (${affectedHeads

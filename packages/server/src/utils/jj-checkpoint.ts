@@ -71,6 +71,13 @@ export class JjCheckpointError extends Error {
   }
 }
 
+export class JjRewriteApprovalRequiredError extends JjCheckpointError {
+  constructor(message: string) {
+    super(message);
+    this.name = "JjRewriteApprovalRequiredError";
+  }
+}
+
 export function jjCheckpointPath(
   backingRoot: string,
   paseoHome?: string,

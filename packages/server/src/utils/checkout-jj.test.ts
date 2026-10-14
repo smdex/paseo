@@ -31,6 +31,7 @@ import {
   jjSwitchBookmark,
   jjCreateBranchOnBase,
 } from "./checkout-jj.js";
+import { toCheckoutError } from "../server/checkout-git-utils.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
 import {
   writePaseoWorktreeMetadata,
@@ -1505,9 +1506,12 @@ describeIfJj("durable native change checkpoint", () => {
     const context = { paseoHome: join(fixture.dir, "home") };
     expect(fixture.jj(["describe", "-m", "Existing description"]).status).toBe(0);
     const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
-    await expect(
-      jjDescribe(fixture.repoDir, { message: "", expectedChangeId: before.changeId }, context),
-    ).rejects.toThrow("Description is required");
+    const refused = await jjDescribe(
+      fixture.repoDir,
+      { message: "", expectedChangeId: before.changeId },
+      context,
+    ).catch(toCheckoutError);
+    expect(refused).toEqual({ code: "UNKNOWN", message: "Description is required." });
     expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(before.commitId);
   });
 
@@ -1555,9 +1559,14 @@ describeIfJj("durable native change checkpoint", () => {
     const context = { paseoHome: join(fixture.dir, "home") };
     const selected = await getJjChangeMeta(fixture.repoDir, "@-");
     const before = await getJjChangeMeta(fixture.repoDir, "@");
-    await expect(
-      jjEdit(fixture.repoDir, { changeId: selected!.changeId }, context),
-    ).rejects.toThrow("native rewrite warning");
+    const refused = await jjEdit(fixture.repoDir, { changeId: selected!.changeId }, context).catch(
+      toCheckoutError,
+    );
+    expect(refused).toMatchObject({
+      code: "NOT_ALLOWED",
+      reason: "rewrite_approval_required",
+      message: expect.stringContaining("native rewrite warning"),
+    });
     await jjEdit(
       fixture.repoDir,
       { changeId: selected!.changeId, acknowledgeRewrites: true },

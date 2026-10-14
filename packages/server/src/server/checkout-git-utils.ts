@@ -1,3 +1,5 @@
+import type { CheckoutError } from "@getpaseo/protocol/messages";
+import { JjRewriteApprovalRequiredError } from "../utils/jj-checkpoint.js";
 import {
   MergeConflictError,
   MergeFromBaseConflictError,
@@ -9,13 +11,6 @@ import { runGitCommand } from "../utils/run-git-command.js";
 export const READ_ONLY_GIT_ENV = {
   GIT_OPTIONAL_LOCKS: "0",
 } as const;
-
-export type CheckoutErrorCode = "NOT_GIT_REPO" | "NOT_ALLOWED" | "MERGE_CONFLICT" | "UNKNOWN";
-
-export interface CheckoutErrorPayload {
-  code: CheckoutErrorCode;
-  message: string;
-}
 
 export async function resolveCheckoutGitDir(cwd: string): Promise<string | null> {
   try {
@@ -30,7 +25,10 @@ export async function resolveCheckoutGitDir(cwd: string): Promise<string | null>
   }
 }
 
-export function toCheckoutError(error: unknown): CheckoutErrorPayload {
+export function toCheckoutError(error: unknown): CheckoutError {
+  if (error instanceof JjRewriteApprovalRequiredError) {
+    return { code: "NOT_ALLOWED", message: error.message, reason: "rewrite_approval_required" };
+  }
   if (error instanceof NotSupportedOnJjError) {
     return { code: "NOT_ALLOWED", message: error.message };
   }
