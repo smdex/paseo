@@ -332,16 +332,36 @@ describe("createGitLabService", () => {
     expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
     sourceId = 101;
     sha = "2".repeat(40);
-    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    expect(await service.getCurrentPullRequestStatus(input)).toMatchObject({
+      number: 14,
+      state: "open",
+    });
     sha = OPEN_MR.sha;
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+        headSha: "3".repeat(40),
+        force: true,
+        reason: "terminal-head-proof",
+      }),
+    ).toMatchObject({ number: 14, state: "open" });
     state = "merged";
     expect(
       await service.getCurrentPullRequestStatus({
         ...input,
-        repository: { ...repository, remoteHeadSha: null },
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
       }),
     ).toBeNull();
-    expect((await service.getCurrentPullRequestStatus(input))?.state).toBe("merged");
+    expect(
+      (
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        })
+      )?.state,
+    ).toBe("merged");
   });
   it("maps a glab merge request view to the neutral current PR status", async () => {
     const { service, calls } = makeService((args) =>

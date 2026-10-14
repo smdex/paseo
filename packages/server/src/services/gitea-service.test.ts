@@ -534,16 +534,36 @@ describe("createGiteaService", () => {
     expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
     source = repository.sourceRepository;
     sha = "2".repeat(40);
-    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    expect(await service.getCurrentPullRequestStatus(input)).toMatchObject({
+      number: 5,
+      state: "open",
+    });
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
+        force: true,
+        reason: "terminal-head-proof",
+      }),
+    ).toMatchObject({ number: 5, state: "open" });
     sha = repository.headSha ?? "";
     state = "closed";
     expect(
       await service.getCurrentPullRequestStatus({
         ...input,
-        repository: { ...repository, remoteHeadSha: null },
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
       }),
     ).toBeNull();
-    expect((await service.getCurrentPullRequestStatus(input))?.state).toBe("closed");
+    expect(
+      (
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        })
+      )?.state,
+    ).toBe("closed");
     await expect(
       service.getCheckDetails?.({
         cwd: input.cwd,

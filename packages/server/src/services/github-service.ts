@@ -3051,10 +3051,9 @@ async function resolveExplicitPullRequestView(options: {
   const matches = refs.filter(
     (ref) =>
       ref.head.ref === repository.headRef &&
-      ref.head.sha === repository.headSha &&
       ref.head.repo?.full_name === repository.sourceRepository &&
       ref.base.repo.full_name === repository.targetRepository &&
-      (ref.state === "open" || repository.remoteHeadSha === repository.headSha),
+      (ref.state === "open" || ref.head.sha === repository.headSha),
   );
   if (matches.length !== 1) return null;
   const candidate = await tryCurrentPullRequestView({
@@ -3064,13 +3063,13 @@ async function resolveExplicitPullRequestView(options: {
   });
   if (
     !candidate ||
-    candidate.headSha !== repository.headSha ||
     candidate.status.headRefName !== repository.headRef ||
     candidate.headRepositoryOwner !== repository.sourceRepository.split("/")[0] ||
-    `${candidate.status.repoOwner}/${candidate.status.repoName}` !== repository.targetRepository
+    `${candidate.status.repoOwner}/${candidate.status.repoName}` !== repository.targetRepository ||
+    (candidate.status.state !== "open" && candidate.headSha !== repository.headSha)
   )
     return null;
-  return candidate.status.state === "open" || repository.remoteHeadSha === repository.headSha
+  return candidate.status.state === "open" || candidate.headSha === repository.headSha
     ? candidate.status
     : null;
 }
