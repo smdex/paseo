@@ -336,6 +336,7 @@ describe("native change form", () => {
       newOn: async () => {
         throw new Error("Unexpected New change");
       },
+      fetchAndRebase: async () => "unchanged",
       refresh: async () => {
         refreshed++;
       },
@@ -386,6 +387,7 @@ describe("native change form", () => {
         newOn: async () => {
           throw new Error("Unexpected New change");
         },
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -419,6 +421,7 @@ describe("native change form", () => {
           throw new Error("Unexpected New change");
         },
         newOn: async () => {},
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -466,6 +469,7 @@ describe("native change form", () => {
         newChange: async () => {
           throw new Error("Unexpected New change");
         },
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -503,6 +507,7 @@ describe("native change form", () => {
         newOn: async (request) => {
           calls.push(request);
         },
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -539,6 +544,7 @@ describe("native change form", () => {
           await pending.promise;
         },
         newOn: async () => {},
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -580,6 +586,7 @@ describe("native change form", () => {
           if (shouldFail) throw new Error("Host disconnected");
         },
         newOn: async () => {},
+        fetchAndRebase: async () => "unchanged",
         refresh: async () => {},
       },
     );
@@ -665,4 +672,111 @@ describe("native pull request form", () => {
     expect(requests).toHaveLength(2);
     model.close();
   });
+});
+
+describe("jj fetch-and-rebase form", () => {
+  it("keeps a failed captured request available for retry and prevents duplicate submissions", async () => {
+    const pending = createDeferred<"rebased" | "unchanged" | "conflicts">();
+    const calls: Array<{ cwd: string; expectedChangeId: string; acknowledgeRewrites: boolean }> =
+      [];
+    const model = openJjChangeForm(
+      {
+        serverId: "host",
+        cwd: "/native",
+        changeId: "captured",
+        description: "Selected native work",
+        mode: "fetch-rebase",
+      },
+      {
+        describe: async () => {},
+        edit: async () => {},
+        newChange: async () => {},
+        newOn: async () => {},
+        fetchAndRebase: async (input) => {
+          calls.push(input);
+          if (calls.length === 1) return pending.promise;
+          return "rebased";
+        },
+        refresh: async () => {},
+      },
+    );
+    const submitting = model.submit();
+    await model.submit();
+    expect(model.getState().status).toBe("pending");
+    expect(model.getState().canSubmit).toBe(false);
+    expect(calls).toEqual([
+      { cwd: "/native", expectedChangeId: "captured", acknowledgeRewrites: false },
+    ]);
+    pending.reject(new Error("upstream is unavailable; repair its URL and retry"));
+    await submitting;
+    expect(model.getState()).toMatchObject({
+      status: "error",
+      error: "upstream is unavailable; repair its URL and retry",
+      canSubmit: true,
+      changeId: "captured",
+      needsRewriteApproval: false,
+    });
+    await model.submit();
+    expect(model.getState()).toMatchObject({
+      status: "success",
+      outcome: "rebased",
+      canSubmit: false,
+      changeId: "captured",
+    });
+    model.close();
+  });
+});
+
+describe("jj fetch-and-rebase approval", () => {
+  it.each(["rebased", "unchanged", "conflicts"] as const)(
+    "requires an explicit approval choice before reporting %s",
+    async (outcome) => {
+      const calls: boolean[] = [];
+      const ports: JjChangeFormPorts = {
+        describe: async () => {},
+        edit: async () => {},
+        newChange: async () => {},
+        newOn: async () => {},
+        refresh: async () => {},
+        fetchAndRebase: async (input) => {
+          calls.push(input.acknowledgeRewrites);
+          if (!input.acknowledgeRewrites)
+            throw new CheckoutOperationError({
+              code: "NOT_ALLOWED",
+              reason: "rewrite_approval_required",
+              message: "Review all mutable branches.",
+            });
+          return outcome;
+        },
+      };
+      const snapshot = {
+        serverId: "host",
+        cwd: "/native",
+        changeId: "captured",
+        description: "Captured work",
+        mode: "fetch-rebase" as const,
+      };
+      const cancelled = openJjChangeForm(snapshot, ports);
+      await cancelled.submit();
+      expect(cancelled.getState()).toMatchObject({
+        status: "error",
+        needsRewriteApproval: true,
+        error: "Review all mutable branches.",
+        canSubmit: true,
+      });
+      cancelled.close();
+      expect(calls).toEqual([false]);
+      const approved = openJjChangeForm(snapshot, ports);
+      await approved.submit();
+      await approved.submit();
+      expect(calls).toEqual([false, false, true]);
+      expect(approved.getState()).toMatchObject({
+        status: "success",
+        outcome,
+        changeId: "captured",
+        description: "Captured work",
+      });
+      approved.close();
+    },
+  );
 });

@@ -2448,6 +2448,14 @@ export const CheckoutDescribeChangeRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const CheckoutFetchRebaseRequestSchema = z.object({
+  type: z.literal("checkout.jj.fetch_rebase.request"),
+  cwd: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
 export const CheckoutEditChangeRequestSchema = z.object({
   type: z.literal("checkout.edit_change.request"),
   cwd: z.string(),
@@ -3389,6 +3397,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutNewChangeRequestSchema,
   CheckoutDescribeChangeRequestSchema,
   CheckoutEditChangeRequestSchema,
+  CheckoutFetchRebaseRequestSchema,
   StashSaveRequestSchema,
   StashPopRequestSchema,
   StashListRequestSchema,
@@ -3734,6 +3743,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutJjPrCreate: z.boolean().optional(),
         // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
         checkoutJjRewriteApproval: z.boolean().optional(),
+        // COMPAT(checkoutJjFetchRebase): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native fetch/rebase.
+        checkoutJjFetchRebase: z.boolean().optional(),
         // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.
         checkoutJjGraphSelections: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
@@ -5961,6 +5972,23 @@ export const CheckoutDescribeChangeResponseSchema = z.object({
   }),
 });
 
+export const CheckoutFetchRebaseOutcomeSchema = z.enum(["rebased", "unchanged", "conflicts"]);
+export type CheckoutFetchRebaseOutcome = z.infer<typeof CheckoutFetchRebaseOutcomeSchema>;
+
+export const CheckoutFetchRebaseResponseSchema = z.object({
+  type: z.literal("checkout.jj.fetch_rebase.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    outcome: CheckoutFetchRebaseOutcomeSchema.optional(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
 export const CheckoutEditChangeResponseSchema = z.object({
   type: z.literal("checkout.edit_change.response"),
   payload: z.object({
@@ -7168,6 +7196,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutNewChangeResponseSchema,
   CheckoutDescribeChangeResponseSchema,
   CheckoutEditChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
   StashSaveResponseSchema,
   StashPopResponseSchema,
   StashListResponseSchema,

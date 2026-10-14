@@ -9,6 +9,7 @@ import {
   CheckoutStatusResponseSchema,
   CheckoutPrCreateRequestSchema,
   CheckoutEditChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   UsageReportEntrySchema,
@@ -610,4 +611,50 @@ test("native PR capture is optional across request wire versions", () => {
   expect(CheckoutPrCreateRequestSchema.parse(oldRequest)).toEqual(oldRequest);
   expect(CheckoutPrCreateRequestSchema.parse(newRequest)).toEqual(newRequest);
   expect(legacy.parse(newRequest)).toEqual(oldRequest);
+});
+
+test("jj fetch-rebase additions remain optional and generated wire parsing retains native outcomes", () => {
+  const legacy = {
+    type: "checkout.jj.fetch_rebase.response",
+    payload: {
+      requestId: "fetch-rebase",
+      cwd: "/native",
+      success: true,
+      changeId: "change",
+      commitId: "commit",
+      bookmark: null,
+      error: null,
+    },
+  };
+  const current = { ...legacy, payload: { ...legacy.payload, outcome: "unchanged" } };
+  expect(CheckoutFetchRebaseResponseSchema.parse(legacy)).toEqual(legacy);
+  const oldResponse = CheckoutFetchRebaseResponseSchema.extend({
+    payload: CheckoutFetchRebaseResponseSchema.shape.payload.omit({ outcome: true }),
+  });
+  expect(oldResponse.parse(current)).toEqual(legacy);
+  for (const message of [legacy, current]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
+  const oldInfo = {
+    status: "server_info",
+    serverId: "host",
+    hostname: null,
+    version: null,
+    features: { checkoutJj: true },
+  };
+  const currentInfo = {
+    ...oldInfo,
+    features: { ...oldInfo.features, checkoutJjFetchRebase: true },
+  };
+  expect(ServerInfoStatusPayloadSchema.parse(oldInfo)).toEqual(oldInfo);
+  expect(ServerInfoStatusPayloadSchema.parse(currentInfo)).toEqual(currentInfo);
+  const oldInfoSchema = z.object({
+    status: z.literal("server_info"),
+    serverId: z.string(),
+    hostname: z.string().nullable(),
+    version: z.string().nullable(),
+    features: z.object({ checkoutJj: z.boolean().optional() }),
+  });
+  expect(oldInfoSchema.parse(currentInfo)).toEqual(oldInfo);
 });

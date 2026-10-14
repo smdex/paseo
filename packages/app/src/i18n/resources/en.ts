@@ -792,6 +792,14 @@ export const en = {
           pending: "Committing...",
           success: "Committed",
         },
+        fetchRebase: {
+          label: "Fetch and rebase",
+          pending: "Fetching and rebasing…",
+          detail: "Fetch every remote, then rebase all mutable branches onto trunk.",
+          rebased: "Fetched all remotes and rebased mutable work onto trunk.",
+          unchanged: "Fetched all remotes. Mutable work is already on trunk.",
+          conflicts: "Rebased with conflicts. Resolve conflicts on the host before continuing.",
+        },
         fetch: {
           label: "Fetch",
           pending: "Fetching...",
