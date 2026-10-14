@@ -1,4 +1,5 @@
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
+import { CheckoutActionFormsHost } from "@/git/action-forms";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -628,7 +629,11 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
 
   return (
     <ComposerEditingSessionsProvider>
-      <CommandCenterProvider>{content}</CommandCenterProvider>
+      <CommandCenterProvider>
+        {content}
+        {/* Responsive chrome is reparented above; opened form models must stay mounted. */}
+        <CheckoutActionFormsHost />
+      </CommandCenterProvider>
     </ComposerEditingSessionsProvider>
   );
 }
