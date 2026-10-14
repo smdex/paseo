@@ -7858,3 +7858,69 @@ test("native PR creation sends the captured change and retains the forge result"
   mock.triggerMessage(wrapSessionMessage({ type: "checkout_pr_create_response", payload }));
   expect(await creating).toEqual(payload);
 });
+
+test("jj fetch-and-rebase refuses a host without its capability before sending", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-fetch-rebase",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.fetchAndRebase({ cwd: "/native", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host to fetch all remotes and rebase jj work.");
+  expect(mock.sent).toEqual([]);
+});
+
+test.each(["rebased", "unchanged", "conflicts"] as const)(
+  "jj fetch-and-rebase preserves its captured intent and %s outcome",
+  async (outcome) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "jj-fetch-rebase",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({
+      features: {
+        checkoutJjCheckpoint: true,
+        checkoutJjRewriteApproval: true,
+        checkoutJjFetchRebase: true,
+      },
+    });
+    await connecting;
+    const result = client.fetchAndRebase({
+      cwd: "/native",
+      expectedChangeId: "captured",
+      acknowledgeRewrites: true,
+      requestId: "fetch-rebase",
+    });
+    expect(parseSentFrame(mock.sent[0])).toEqual({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: "/native",
+      expectedChangeId: "captured",
+      acknowledgeRewrites: true,
+      requestId: "fetch-rebase",
+    });
+    const payload = {
+      cwd: "/native",
+      success: true,
+      changeId: "captured",
+      commitId: "rebased-commit",
+      bookmark: "feature",
+      outcome,
+      error: null,
+      requestId: "fetch-rebase",
+    };
+    mock.triggerMessage(wrapSessionMessage({ type: "checkout.jj.fetch_rebase.response", payload }));
+    expect(await result).toEqual(payload);
+  },
+);

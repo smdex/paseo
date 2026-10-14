@@ -791,6 +791,16 @@ export const ko: TranslationResources = {
           pending: "커밋하는 중...",
           success: "커밋됨",
         },
+        fetchRebase: {
+          label: "가져오기 및 리베이스",
+          pending: "가져오기 및 리베이스 중…",
+          detail:
+            "모든 원격 저장소에서 가져온 후 변경 가능한 모든 브랜치를 trunk 위로 리베이스합니다.",
+          rebased: "모든 원격 저장소에서 가져와 변경 가능한 작업을 trunk 위로 리베이스했습니다.",
+          unchanged:
+            "모든 원격 저장소에서 가져왔습니다. 변경 가능한 작업이 이미 trunk 위에 있습니다.",
+          conflicts: "리베이스 중 충돌이 발생했습니다. 계속하기 전에 호스트에서 충돌을 해결하세요.",
+        },
         fetch: {
           label: "가져오기",
           pending: "가져오는 중...",

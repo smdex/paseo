@@ -2230,3 +2230,79 @@ it("creates a PR from a restored exact base using the host metadata and a forge 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+itIfJj(
+  "fetch-and-rebase emits structured approval, native completion and an actionable remote failure",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+    sessionDisposables.push(fixture.dispose);
+    const origin = join(fixture.dir, "origin.git");
+    execFileSync("git", ["init", "--bare", origin], { stdio: "pipe" });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    expect(fixture.jj(["describe", "-m", "selected local work"]).status).toBe(0);
+    const changeId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+      paseoHome: join(fixture.dir, "home"),
+    });
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      requestId: "approval",
+    });
+    expect(emitted[0]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: false,
+        error: { code: "NOT_ALLOWED", reason: "rewrite_approval_required" },
+        requestId: "approval",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([]);
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      acknowledgeRewrites: true,
+      requestId: "approved",
+    });
+    expect(emitted[1]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: true,
+        changeId,
+        outcome: "unchanged",
+        error: null,
+        requestId: "approved",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([
+      { cwd: fixture.repoDir, reason: "pull", options: { invalidateForge: true } },
+    ]);
+    expect(
+      fixture.jj(["git", "remote", "add", "upstream", join(fixture.dir, "missing.git")]).status,
+    ).toBe(0);
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      acknowledgeRewrites: true,
+      requestId: "failed",
+    });
+    expect(emitted[2]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: false,
+        error: { message: expect.stringContaining("missing.git") },
+        requestId: "failed",
+      },
+    });
+    checkout.cleanup();
+  },
+);

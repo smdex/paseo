@@ -795,6 +795,16 @@ export const ja: TranslationResources = {
           pending: "コミット中...",
           success: "コミットしました",
         },
+        fetchRebase: {
+          label: "取得してリベース",
+          pending: "取得してリベース中…",
+          detail:
+            "すべてのリモートから取得し、変更可能なすべてのブランチを trunk 上にリベースします。",
+          rebased: "すべてのリモートから取得し、変更可能な作業を trunk 上にリベースしました。",
+          unchanged:
+            "すべてのリモートから取得しました。変更可能な作業はすでに trunk 上にあります。",
+          conflicts: "リベースで競合が発生しました。続行する前にホストで競合を解決してください。",
+        },
         fetch: {
           label: "フェッチ",
           pending: "フェッチ中...",

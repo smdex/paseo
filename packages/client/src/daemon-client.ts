@@ -23,6 +23,7 @@ import {
   CheckoutRenameBranchResponseSchema,
   CheckoutNewChangeResponseSchema,
   CheckoutDescribeChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
   parseServerInfoStatusPayload,
   RenameTerminalResponseSchema,
   RestartRequestedStatusPayloadSchema,
@@ -524,6 +525,7 @@ type PullRequestTimelinePayload = PullRequestTimelineResponse["payload"];
 type CheckoutSwitchBranchPayload = CheckoutSwitchBranchResponse["payload"];
 export type RenameBranchResult = z.infer<typeof CheckoutRenameBranchResponseSchema>["payload"];
 export type NewChangeResult = z.infer<typeof CheckoutNewChangeResponseSchema>["payload"];
+export type FetchRebaseResult = z.infer<typeof CheckoutFetchRebaseResponseSchema>["payload"];
 export type DescribeChangeResult = z.infer<typeof CheckoutDescribeChangeResponseSchema>["payload"];
 type StashSavePayload = StashSaveResponse["payload"];
 type StashPopPayload = StashPopResponse["payload"];
@@ -4613,6 +4615,27 @@ export class DaemonClient {
         acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout.describe_change.response",
+    });
+  }
+
+  async fetchAndRebase(input: {
+    cwd: string;
+    expectedChangeId: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<FetchRebaseResult> {
+    this.requireJjCheckpointCapability();
+    if (this.lastServerInfoMessage?.features?.checkoutJjFetchRebase !== true)
+      throw new Error("Update the host to fetch all remotes and rebase jj work.");
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.jj.fetch_rebase.request",
+        cwd: input.cwd,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.jj.fetch_rebase.response",
     });
   }
 
