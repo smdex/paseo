@@ -1663,11 +1663,9 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
           ...candidates.filter(
             (pr) =>
               pr.head.ref === repository.headRef &&
-              pr.head.sha === repository.headSha &&
               pr.head.repo?.full_name === repository.sourceRepository &&
               pr.base.repo?.full_name === repository.targetRepository &&
-              (mapGiteaState(pr.state) === "open" ||
-                repository.remoteHeadSha === repository.headSha),
+              (mapGiteaState(pr.state) === "open" || pr.head.sha === repository.headSha),
           ),
         );
         if (matches.length > 1) return null;
@@ -1775,10 +1773,9 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       );
       if (
         repository &&
-        (pr.headSha !== repository.headSha ||
-          pr.head !== repository.headRef ||
+        (pr.head !== repository.headRef ||
           ((pr.hasMerged || mapGiteaState(pr.state) !== "open") &&
-            repository.remoteHeadSha !== repository.headSha))
+            pr.headSha !== repository.headSha))
       )
         return null;
       if (!pr.headSha) return status;
