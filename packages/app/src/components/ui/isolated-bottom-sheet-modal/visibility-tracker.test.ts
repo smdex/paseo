@@ -259,6 +259,8 @@ it("presents a replacement controller after compact presentation is disabled and
   const context = setup();
   openSheet(context);
   context.tracker.syncDesired({ visible: true, isEnabled: false });
+  context.tracker.syncDesired({ visible: true, isEnabled: false });
+  expect(context.sheet.events).toEqual([{ type: "present" }, { type: "dismiss" }]);
   expect(context.backPress.press()).toBe(false);
   context.tracker.handleSheetDismiss();
   context.tracker.attachController(null);
@@ -269,4 +271,19 @@ it("presents a replacement controller after compact presentation is disabled and
   context.tracker.syncDesired({ visible: true, isEnabled: true });
   expect(replacement.events).toEqual([{ type: "present" }]);
   expect(context.closeCount()).toBe(0);
+});
+
+it("dismisses the detached compact controller before desktop presentation takes over", () => {
+  const context = setup();
+  openSheet(context);
+  context.tracker.attachController(null);
+  expect(context.sheet.events).toEqual([{ type: "present" }, { type: "dismiss" }]);
+  context.tracker.handleSheetDismiss();
+  context.tracker.syncDesired({ visible: true, isEnabled: false });
+  expect(context.closeCount()).toBe(0);
+  expect(context.backPress.press()).toBe(false);
+  const replacement = new FakeBottomSheet();
+  context.tracker.attachController(replacement);
+  context.tracker.syncDesired({ visible: true, isEnabled: true });
+  expect(replacement.events).toEqual([{ type: "present" }]);
 });
