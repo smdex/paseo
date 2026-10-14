@@ -202,7 +202,7 @@ export function useWorkspaceCommandCenterActions(): ReactElement | null {
     supportsSetupObservation,
   );
   const { overrides } = useKeyboardShortcutOverrides();
-  const { gitActions, isGit, newChangeForm } = useGitActions({
+  const { gitActions, isGit, actionForms } = useGitActions({
     serverId: serverId ?? "",
     cwd: cwd ?? "",
     icons: GIT_ACTION_ICONS,
@@ -331,7 +331,7 @@ export function useWorkspaceCommandCenterActions(): ReactElement | null {
     enabled: Boolean(serverId && cwd),
     actions,
   });
-  return newChangeForm;
+  return actionForms;
 }
 
 export function CommandCenterWorkspaceActions(): ReactElement | null {

@@ -1,3 +1,5 @@
+import { createGitHubService, GitHubCommandError } from "../services/github-service.js";
+import { runJjCommand as executeJjCommand } from "./run-jj-command.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
@@ -22,6 +24,7 @@ import {
   resolveJjBranchCheckout,
   jjPull,
   jjPush,
+  jjCreatePullRequest,
   jjRenameBookmark,
   jjDiscard,
   jjNew,
@@ -327,6 +330,8 @@ describeIfJj("checkout-jj status", () => {
     fixture.jj(["git", "remote", "add", "origin", origin]);
     fixture.jj(["git", "push", "--bookmark", "feature", "--remote", "origin"]);
     fixture.jj(["git", "fetch", "--remote", "origin"]);
+    // Keep edits on a child explicitly, independently of user immutable-head config.
+    fixture.jj(["new", "feature"]);
 
     // A further edit makes @ diverge from the pushed bookmark by one change.
     writeFileSync(join(fixture.repoDir, "a.txt"), "changed\n");
@@ -2085,5 +2090,115 @@ describeIfJj("jj bookmark switch (P2)", () => {
     expect((await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.savedWip).toEqual([
       { commitId: savedChange.commitId, changeId: savedChange.changeId, bookmark: "main" },
     ]);
+  });
+});
+
+describeIfJj("native PR creation", () => {
+  it("keeps a provider refusal actionable after publication and preserves the selection for retry", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+    const remote = scratchBareGitOrigin();
+    expect(fixture.jj(["git", "remote", "add", "origin", remote]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "feature.txt"), "native feature\n");
+    expect(fixture.jj(["describe", "-m", "Native feature"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+    expect(fixture.jj(["new"]).status).toBe(0);
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!.changeId;
+    const service = createGitHubService({
+      runner: async (args, options) => {
+        throw new GitHubCommandError({
+          args,
+          cwd: options.cwd,
+          exitCode: 1,
+          stderr: "Provider rejected this target: choose a valid base.",
+        });
+      },
+    });
+    const context = {
+      paseoHome: fixture.dir,
+      runJjCommand: async (args: string[], options: Parameters<typeof executeJjCommand>[1]) => {
+        const result = await executeJjCommand(args, options);
+        return args.join(" ") === "git remote list"
+          ? { ...result, stdout: "origin https://github.com/acme/native.git\n" }
+          : result;
+      },
+    };
+    await expect(
+      jjCreatePullRequest(
+        fixture.repoDir,
+        { title: "Kept title", body: "Kept body", base: "missing", expectedChangeId: selected },
+        service,
+        context,
+      ),
+    ).rejects.toMatchObject({ stderr: "Provider rejected this target: choose a valid base." });
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(selected);
+  });
+
+  it("publishes the exact native bookmark before creating its PR without moving the workspace", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+    const remote = scratchBareGitOrigin();
+    expect(fixture.jj(["git", "remote", "add", "origin", remote]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "feature.txt"), "native feature\n");
+    expect(fixture.jj(["describe", "-m", "Native feature"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+    const headSha = commitIdOfRevset(fixture, "feature");
+    expect(fixture.jj(["new"]).status).toBe(0);
+    const selected = (await getJjChangeMeta(fixture.repoDir, "@"))!.changeId;
+    const requests: string[][] = [];
+    const service = createGitHubService({
+      resolveRepoHost: async () => {
+        throw new Error("must not infer Git context");
+      },
+      runner: async (args) => {
+        requests.push(args);
+        const published = spawnSync(
+          "git",
+          ["--git-dir", remote, "rev-parse", "refs/heads/feature"],
+          { encoding: "utf8" },
+        );
+        expect(published.status).toBe(0);
+        expect(published.stdout.trim()).toBe(headSha);
+        return {
+          stdout: JSON.stringify({ url: "https://github.com/acme/native/pull/12", number: 12 }),
+          stderr: "",
+        };
+      },
+    });
+    const context = {
+      paseoHome: fixture.dir,
+      runJjCommand: async (args: string[], options: Parameters<typeof executeJjCommand>[1]) => {
+        const result = await executeJjCommand(args, options);
+        if (args.join(" ") === "git remote list")
+          return { ...result, stdout: "origin https://github.com/acme/native.git\n" };
+        return result;
+      },
+    };
+    expect(
+      await jjCreatePullRequest(
+        fixture.repoDir,
+        { title: "Kept title", body: "Kept body", base: "main", expectedChangeId: selected },
+        service,
+        context,
+      ),
+    ).toEqual({ url: "https://github.com/acme/native/pull/12", number: 12 });
+    expect(requests).toEqual([
+      [
+        "api",
+        "-X",
+        "POST",
+        "repos/acme/native/pulls",
+        "-f",
+        "title=Kept title",
+        "-f",
+        "head=feature",
+        "-f",
+        "base=main",
+        "-f",
+        "body=Kept body",
+      ],
+    ]);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(selected);
   });
 });

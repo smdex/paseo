@@ -4928,3 +4928,58 @@ describe("ForgeService", () => {
     ).rejects.toThrow("Unable to resolve GitHub repository for pull request creation");
   });
 });
+
+it.each(["contributor/fork", "upstream/fork"])(
+  "creates a jj fork PR from %s against the explicit target without cwd discovery",
+  async (sourceRepository) => {
+    const runner = createRunner([
+      JSON.stringify({ url: "https://forge.example/api/pulls/7", number: 7 }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => {
+        throw new Error("must not discover the outer repository");
+      },
+    });
+    const repository: ForgeRepositoryContext = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      sourceRepository,
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "a".repeat(40),
+    };
+    expect(
+      await service.createPullRequest({
+        cwd: "/native",
+        repository,
+        title: "Native feature",
+        body: "Kept body",
+        head: "feature",
+        base: "main",
+      }),
+    ).toEqual({ url: "https://forge.example/api/pulls/7", number: 7 });
+    expect(runner.calls).toEqual([
+      {
+        cwd: "/native",
+        envOverlay: { GH_HOST: "forge.example" },
+        args: [
+          "api",
+          "-X",
+          "POST",
+          "repos/upstream/project/pulls",
+          "-f",
+          "title=Native feature",
+          "-f",
+          `head=${sourceRepository.split("/")[0]}:feature`,
+          "-f",
+          "base=main",
+          "-f",
+          "head_repo=fork",
+          "-f",
+          "body=Kept body",
+        ],
+      },
+    ]);
+  },
+);

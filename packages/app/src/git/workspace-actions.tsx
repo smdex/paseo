@@ -8,7 +8,7 @@ interface WorkspaceActionsProps {
 }
 
 export function WorkspaceActions({ serverId, cwd }: WorkspaceActionsProps) {
-  const { gitActions, newChangeForm } = useGitActions({
+  const { gitActions, actionForms } = useGitActions({
     serverId,
     cwd,
     icons: GIT_ACTION_ICONS,
@@ -17,7 +17,7 @@ export function WorkspaceActions({ serverId, cwd }: WorkspaceActionsProps) {
   return (
     <>
       <GitActionsSplitButton gitActions={gitActions} />
-      {newChangeForm}
+      {actionForms}
     </>
   );
 }

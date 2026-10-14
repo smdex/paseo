@@ -1,3 +1,5 @@
+import { ForgeRepositoryContextError } from "../../../services/forge-service.js";
+import { jjCreatePullRequest } from "../../../utils/checkout-jj.js";
 import type pino from "pino";
 import type { SessionDelivery } from "../owned-subscriptions/index.js";
 import { isAbsolute } from "node:path";
@@ -1114,16 +1116,7 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      // jj is rejected BEFORE text generation, forge resolution, or any git
-      // command: the git implementation would discover a git branch and `git
-      // push -u origin <head>` — in a secondary jj workspace inside another
-      // git repo that pushes the WRONG repository, and colocation bypasses
-      // jj's push checks entirely.
-      if ((await resolveEffectiveBackend(cwd)) === "jj") {
-        throw new NotSupportedOnJjError(
-          "Creating pull requests is not supported on jj repositories yet",
-        );
-      }
+      const isJj = (await resolveEffectiveBackend(cwd)) === "jj";
       let title = msg.title?.trim() ?? "";
       let body = msg.body?.trim() ?? "";
 
@@ -1133,17 +1126,21 @@ export class CheckoutSession {
         if (!body) body = generated.body;
       }
 
-      const { service } = await this.requireForgeService(cwd);
-      const result = await createPullRequest(
-        cwd,
-        {
-          title,
-          body,
-          base: msg.baseRef,
-        },
-        service,
-        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
-      );
+      const { service, repository } = await this.requireForgeService(cwd);
+      const context = { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot };
+      const options = { title, body, base: msg.baseRef };
+      if (isJj && !repository)
+        throw new ForgeRepositoryContextError(
+          "Explicit forge repository context is required for native PR creation.",
+        );
+      const result = isJj
+        ? await jjCreatePullRequest(
+            cwd,
+            { ...options, expectedChangeId: msg.expectedChangeId, repository },
+            service,
+            context,
+          )
+        : await createPullRequest(cwd, options, service, context);
       await this.gitMutation.notifyGitMutation(cwd, "create-pr", { invalidateForge: true });
 
       this.host.emit({

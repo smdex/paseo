@@ -827,6 +827,12 @@ export const es: TranslationResources = {
         },
         viewPr: "VerPR",
         createPr: {
+          form: {
+            title: "Título",
+            body: "Descripción",
+            base: "Marcador base (opcional)",
+            automatic: "Generar automáticamente",
+          },
           label: "CrearPR",
           pending: "CreandoPR...",
           success: "PRcreado",

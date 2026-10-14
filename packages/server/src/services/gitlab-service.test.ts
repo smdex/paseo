@@ -1683,3 +1683,46 @@ describe("createGitLabService", () => {
     );
   });
 });
+
+it("creates a native fork MR with an explicit source project and target host", async () => {
+  const { service, calls } = makeService(() =>
+    ok("https://gitlab.example.com/upstream/project/-/merge_requests/31"),
+  );
+  const repository: ForgeRepositoryContext = {
+    host: "gitlab.example.com",
+    targetRepository: "upstream/project",
+    sourceRepository: "group/subgroup/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "a".repeat(40),
+  };
+  expect(
+    await service.createPullRequest({
+      cwd: "/native",
+      repository,
+      title: "Native",
+      body: "Body",
+      head: "feature",
+      base: "main",
+    }),
+  ).toEqual({ url: "https://gitlab.example.com/upstream/project/-/merge_requests/31", number: 31 });
+  expect(calls).toEqual([
+    [
+      "mr",
+      "create",
+      "--title",
+      "Native",
+      "--description",
+      "Body",
+      "--source-branch",
+      "feature",
+      "--target-branch",
+      "main",
+      "--yes",
+      "--head",
+      "https://gitlab.example.com/group/subgroup/fork",
+      "--repo",
+      "https://gitlab.example.com/upstream/project",
+    ],
+  ]);
+});

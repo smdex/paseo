@@ -1300,6 +1300,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     },
 
     async createPullRequest(input: CreatePullRequestOptions): Promise<PullRequestCreateResult> {
+      const repository = requireForgeRepositoryContext(input);
       const args = [
         "mr",
         "create",
@@ -1313,6 +1314,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         input.base,
         "--yes",
       ];
+      if (repository)
+        args.push("--head", `https://${repository.host}/${repository.sourceRepository}`);
       const stdout = await run(args, input);
       const url = extractMergeRequestUrl(stdout);
       if (!url) {

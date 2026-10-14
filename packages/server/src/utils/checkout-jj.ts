@@ -3,6 +3,8 @@ import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import {
   ForgeRepositoryContextError,
   type ForgeRepositoryContext,
+  type ForgeService,
+  type PullRequestCreateResult,
 } from "../services/forge-service.js";
 import { resolveSshHostname } from "./ssh-hostname.js";
 import { randomUUID } from "node:crypto";
@@ -38,6 +40,7 @@ import type {
   CheckoutCommit,
   CheckoutCommitFile,
   CheckoutCommitsResult,
+  CreatePullRequestOptions,
   CheckoutDiffCompare,
   CheckoutDiffResult,
   CheckoutRefDerivedState,
@@ -2190,7 +2193,54 @@ async function selectJjRemote(cwd: string, context?: JjCheckoutContext): Promise
  * surfaced verbatim as an actionable error. A bookmarkless checkout fails
  * typed: pushing requires a named line of work (plan §7).
  */
-export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<void> {
+interface JjPublicationHead {
+  bookmark: string;
+  commitId: string;
+  remote: JjRemoteInfo;
+}
+
+interface JjPublicationRemoteInput {
+  cwd: string;
+  bookmark: string;
+  checkpoint: JjCheckpoint | null;
+  context: JjCheckoutContext;
+  expectedHead?: JjPublicationHead;
+}
+
+async function resolveJjPublicationRemote(input: JjPublicationRemoteInput): Promise<JjRemoteInfo> {
+  const { cwd, bookmark, checkpoint, context, expectedHead } = input;
+  const mapping = checkpoint?.publication;
+  const remotes = await listJjRemotes(cwd, context);
+  const mappedRemote = mapping
+    ? remotes.find((entry) => entry.name === mapping.remoteName && entry.url === mapping.remoteUrl)
+    : undefined;
+  if (
+    mapping &&
+    (!mappedRemote || mapping.localBookmark !== bookmark || mapping.remoteBookmark !== bookmark)
+  )
+    throw new JjPushTargetError(
+      "The saved publication mapping no longer matches this workspace bookmark and remote. Reconcile it on the host before pushing.",
+    );
+  const capturedRemote = expectedHead
+    ? remotes.find(
+        (entry) => entry.name === expectedHead.remote.name && entry.url === expectedHead.remote.url,
+      )
+    : undefined;
+  if (
+    expectedHead &&
+    (!capturedRemote || (mappedRemote && mappedRemote.name !== capturedRemote.name))
+  )
+    throw new JjPushTargetError(
+      "The publication remote changed since this action was captured. Refresh before pushing.",
+    );
+  return capturedRemote ?? mappedRemote ?? (await selectJjRemote(cwd, context));
+}
+
+export async function jjPush(
+  cwd: string,
+  context?: JjCheckoutContext,
+  expectedHead?: JjPublicationHead,
+): Promise<void> {
   const checkpointRoot = await jjWorkspaceRoot(cwd);
   return withWorkspaceLifecycle(checkpointRoot, async () => {
     // Signal-owned executor calls settle only after actual child close, so a
@@ -2221,12 +2271,180 @@ export async function jjPush(cwd: string, context?: JjCheckoutContext): Promise<
         "No bookmark tracks this line of work yet. Describe the change and create a bookmark before pushing.",
       );
     }
-    const remote = await selectJjRemote(cwd, freshContext);
+    if (expectedHead) {
+      const live = await uniqueChange(
+        cwd,
+        `bookmarks(exact:${JSON.stringify(bookmark)})`,
+        freshContext,
+      );
+      if (bookmark !== expectedHead.bookmark || live.commitId !== expectedHead.commitId)
+        throw new JjPushTargetError(
+          "The publication bookmark changed since this action was captured. Refresh before pushing.",
+        );
+    }
+    const remote = await resolveJjPublicationRemote({
+      cwd,
+      bookmark,
+      checkpoint,
+      context: freshContext,
+      expectedHead,
+    });
     await runJj(
       ["git", "push", "--bookmark", bookmark, "--remote", remote.name],
       { cwd },
       freshContext,
     );
+  });
+}
+
+export interface JjCreatePullRequestOptions extends Pick<
+  CreatePullRequestOptions,
+  "title" | "body" | "base"
+> {
+  expectedChangeId?: string;
+  repository?: ForgeRepositoryContext;
+}
+
+function sameJjPublication(left: ForgeRepositoryContext, right: ForgeRepositoryContext): boolean {
+  return (
+    left.host === right.host &&
+    left.targetRepository === right.targetRepository &&
+    left.sourceRepository === right.sourceRepository &&
+    left.headRef === right.headRef &&
+    left.headSha === right.headSha
+  );
+}
+
+interface JjPullRequestPreparation {
+  cwd: string;
+  facts: Extract<JjSnapshotFacts, { isJj: true }>;
+  checkpoint: JjCheckpoint | null;
+  context: JjCheckoutContext;
+}
+interface JjPullRequestBaseInput extends JjPullRequestPreparation {
+  requestedBase: string | undefined;
+}
+async function resolveJjPullRequestBase(input: JjPullRequestBaseInput): Promise<string> {
+  const { cwd, facts, checkpoint, context } = input;
+  const metadata =
+    checkpoint?.metadata ?? readJjPaseoWorktreeMetadata(facts.identity.workspaceRoot);
+  const storedBase = checkpoint?.comparison.liveBase ?? metadata?.baseRefName;
+  const requestedBase = input.requestedBase?.trim();
+  const storedNamesBookmark = Boolean(
+    storedBase && SAFE_JJ_REF_PATTERN.test(storedBase) && !/^[0-9a-f]{40,64}$/.test(storedBase),
+  );
+  const defaultBase = storedNamesBookmark ? storedBase : await resolveDefaultBookmark(cwd, context);
+  let base = requestedBase || defaultBase;
+  if (base === facts.storedBaseRef && storedNamesBookmark) base = storedBase;
+  if (!base || /^[0-9a-f]{40,64}$/.test(base))
+    throw new JjCheckpointError("Select a named target bookmark before creating a pull request.");
+  assertSafeJjRef(base, "target bookmark");
+  return base;
+}
+interface JjPullRequestCaptureInput extends JjPullRequestPreparation {
+  options: JjCreatePullRequestOptions;
+}
+interface JjPullRequestPublication extends JjPublicationHead {
+  repository: Awaited<ReturnType<typeof getJjForgeRepositoryContext>>;
+}
+async function captureJjPullRequestPublication(
+  input: JjPullRequestCaptureInput,
+): Promise<JjPullRequestPublication> {
+  const { cwd, options, facts, checkpoint, context } = input;
+  const repository = await getJjForgeRepositoryContext(cwd, context);
+  if (options.repository && !sameJjPublication(options.repository, repository))
+    throw new ForgeRepositoryContextError(
+      "The forge publication changed during resolution. Refresh before creating a pull request.",
+    );
+  const bookmark = jjOwnedBookmark(facts);
+  if (!bookmark || !repository.headRef || !repository.headSha)
+    throw new JjPushTargetError(
+      "Create a bookmark for this line of work before creating a pull request.",
+    );
+  if (repository.headRef !== bookmark)
+    throw new JjPushTargetError(
+      "The publication bookmark differs from the local bookmark. Reconcile the publication mapping on the host before creating a pull request.",
+    );
+  const mappedName = checkpoint?.publication?.remoteName;
+  const remote = facts.remotes.find(
+    (entry) => entry.url === repository.remoteUrl && (!mappedName || entry.name === mappedName),
+  );
+  if (!remote) throw new JjPushTargetError("The publication remote is unavailable.");
+  return { bookmark, commitId: repository.headSha, remote, repository };
+}
+
+export async function jjCreatePullRequest(
+  cwd: string,
+  options: JjCreatePullRequestOptions,
+  service: ForgeService,
+  context?: JjCheckoutContext,
+): Promise<PullRequestCreateResult> {
+  const root = await jjWorkspaceRoot(cwd);
+  return withWorkspaceLifecycle(root, async () => {
+    const freshContext = { ...context, facts: null };
+    const facts = await getJjSnapshotFacts(cwd, freshContext);
+    if (!facts.isJj) throw new JjCheckpointError("The jj workspace is unavailable.");
+    if (
+      options.expectedChangeId !== undefined &&
+      options.expectedChangeId !== facts.workingCopy.meta.changeId
+    )
+      throw new JjCheckpointError(
+        "The current change changed since this form opened. Reopen it before creating a pull request.",
+      );
+    const checkpoint = await readJjCheckpoint(root, context?.paseoHome);
+    const publication = await captureJjPullRequestPublication({
+      cwd,
+      options,
+      facts,
+      checkpoint,
+      context: freshContext,
+    });
+    const { repository, bookmark, remote, commitId } = publication;
+    const base = await resolveJjPullRequestBase({
+      cwd,
+      requestedBase: options.base,
+      facts,
+      checkpoint,
+      context: freshContext,
+    });
+    await jjPush(cwd, freshContext, { bookmark, commitId, remote });
+    const published = await getJjForgeRepositoryContext(cwd, freshContext);
+    const after = await getJjChangeMeta(cwd, "@", freshContext);
+    const publicationChanged =
+      !sameJjPublication(repository, published) || published.remoteHeadSha !== commitId;
+    if (publicationChanged || after?.changeId !== facts.workingCopy.meta.changeId)
+      throw new JjCheckpointError(
+        "The jj publication changed during the action. Refresh and review the published bookmark before retrying.",
+      );
+    const retained = await importJjCheckpoint({
+      backingRoot: root,
+      head: facts.workingCopy.meta,
+      paseoHome: context?.paseoHome,
+    });
+    await writeJjCheckpoint(
+      {
+        ...retained,
+        publication: {
+          remoteName: remote.name,
+          remoteUrl: remote.url,
+          localBookmark: bookmark,
+          remoteBookmark: bookmark,
+          sourceRepository: repository.sourceRepository,
+          targetRepository: repository.targetRepository,
+        },
+      },
+      context?.paseoHome,
+    );
+    const result = await service.createPullRequest({
+      cwd,
+      repository: published,
+      title: options.title,
+      body: options.body,
+      head: bookmark,
+      base,
+    });
+    service.invalidate({ cwd, repository: published });
+    return result;
   });
 }
 

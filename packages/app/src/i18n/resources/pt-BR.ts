@@ -823,6 +823,12 @@ export const ptBR: TranslationResources = {
         },
         viewPr: "Ver PR",
         createPr: {
+          form: {
+            title: "Título",
+            body: "Descrição",
+            base: "Marcador base (opcional)",
+            automatic: "Gerar automaticamente",
+          },
           label: "Criar PR",
           pending: "Criando PR...",
           success: "PR criada",

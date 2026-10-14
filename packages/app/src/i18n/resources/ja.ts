@@ -823,6 +823,12 @@ export const ja: TranslationResources = {
         },
         viewPr: "PRを表示",
         createPr: {
+          form: {
+            title: "タイトル",
+            body: "説明",
+            base: "ベースのブックマーク（任意）",
+            automatic: "自動生成",
+          },
           label: "PRを作成",
           pending: "PRを作成中...",
           success: "PRが作成されました",

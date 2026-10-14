@@ -3527,3 +3527,47 @@ describe("detectGiteaFamilySoftware", () => {
     expect(software).toBe("gitea");
   });
 });
+
+it("creates a native fork PR with the exact source owner, target and host login", async () => {
+  const { service, calls } = makeService((args) => {
+    if (args[0] === "login") return ok(JSON.stringify(LOGINS));
+    return ok("https://gitea.com/upstream/project/pulls/22");
+  });
+  const repository: ForgeRepositoryContext = {
+    host: "gitea.com",
+    targetRepository: "upstream/project",
+    sourceRepository: "contributor/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "a".repeat(40),
+  };
+  expect(
+    await service.createPullRequest({
+      cwd: "/native",
+      repository,
+      title: "Native",
+      body: "Body",
+      head: "feature",
+      base: "main",
+    }),
+  ).toEqual({ url: "https://gitea.com/upstream/project/pulls/22", number: 22 });
+  expect(calls).toEqual([
+    ["login", "list", "-o", "json"],
+    [
+      "pr",
+      "create",
+      "--title",
+      "Native",
+      "--description",
+      "Body",
+      "--head",
+      "contributor:feature",
+      "--base",
+      "main",
+      "--login",
+      "gitea.com",
+      "--repo",
+      "upstream/project",
+    ],
+  ]);
+});

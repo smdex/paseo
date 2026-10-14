@@ -1,3 +1,4 @@
+import { ForgeCommandError } from "../services/forge-cli-command.js";
 import type { CheckoutError } from "@getpaseo/protocol/messages";
 import { JjRewriteApprovalRequiredError } from "../utils/jj-checkpoint.js";
 import {
@@ -40,6 +41,11 @@ export function toCheckoutError(error: unknown): CheckoutError {
   }
   if (error instanceof MergeFromBaseConflictError) {
     return { code: "MERGE_CONFLICT", message: error.message };
+  }
+  if (error instanceof ForgeCommandError) {
+    const detail = error.stderr.trim();
+    const message = detail ? `${error.message}\n${detail}` : error.message;
+    return { code: "UNKNOWN", message };
   }
   if (error instanceof Error) {
     return { code: "UNKNOWN", message: error.message };
