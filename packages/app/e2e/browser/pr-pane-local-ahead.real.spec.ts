@@ -256,26 +256,19 @@ test("selected PR creates a native workspace after a visible lookup failure and 
   const repo = path.join(directory, "project");
   await mkdir(repo);
   const jj = (args: string[], cwd = repo) =>
-    execFileSync(
-      "jj",
-      [
-        "--no-pager",
-        "--color=never",
-        "--config",
-        "user.name=Paseo Test",
-        "--config",
-        "user.email=paseo-test@example.invalid",
-        ...args,
-      ],
-      { cwd, encoding: "utf8" },
-    ).trim();
+    execFileSync("jj", ["--no-pager", "--color=never", ...args], { cwd, encoding: "utf8" }).trim();
   const remoteUrl = `https://github.com/${fullName}.git`;
   jj(["git", "init", "--no-colocate"]);
+  // The daemon runs jj without test-only CLI overrides. Persist the same
+  // identity for every process so its first read cannot rewrite the source @.
+  jj(["config", "set", "--repo", "user.name", "Paseo Test"]);
+  jj(["config", "set", "--repo", "user.email", "paseo-test@example.invalid"]);
   jj(["git", "remote", "add", "origin", remoteUrl]);
   jj(["git", "fetch", "--remote", "exact:origin", "--branch", `exact:${pr.baseRefName}`]);
   jj(["new", `${pr.baseRefName}@origin`, "-m", "Keep source workspace"]);
   await writeFile(path.join(repo, "local-current.txt"), "Keep source work\n");
   const sourceHead = jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+  const sourceChangeId = jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]);
   const baseHead = jj(["log", "--no-graph", "-r", `${pr.baseRefName}@origin`, "-T", "commit_id"]);
   expect(
     jj([
@@ -353,6 +346,7 @@ test("selected PR creates a native workspace after a visible lookup failure and 
       jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"], result.workspaceDirectory),
     ).toBe(pr.headRefOid);
     expect(jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])).toBe(sourceHead);
+    expect(jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])).toBe(sourceChangeId);
     expect(await readFile(path.join(repo, "local-current.txt"), "utf8")).toBe("Keep source work\n");
     const metadata = JSON.parse(
       await readFile(path.join(result.workspaceDirectory, ".jj/paseo/worktree.json"), "utf8"),

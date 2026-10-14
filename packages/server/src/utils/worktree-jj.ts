@@ -22,6 +22,7 @@ import {
   getJjSnapshotFacts,
   getJjChangeMeta,
   getJjForgeRepositoryContext,
+  isSafeJjRef,
   type JjRemoteInfo,
 } from "./checkout-jj.js";
 import { validateBranchSlug } from "@getpaseo/protocol/branch-slug";
@@ -443,6 +444,7 @@ async function createJjWorkspaceAtPath(
         workspaceName,
         source,
         options.worktreeSlug,
+        prSource?.publication,
       );
       branchName = createdBookmark.name;
     }
@@ -520,23 +522,41 @@ async function createJjFeatureBookmark(
   workspaceName: string,
   source: Extract<JjWorktreeSource, { kind: "branch-off" | "checkout-change-request" }>,
   slug: string,
+  publication?: Omit<NonNullable<JjCheckpoint["publication"]>, "localBookmark">,
 ): Promise<{ name: string; target: string }> {
   const desired = source.kind === "branch-off" ? source.branchName?.trim() : slug;
   let candidate = desired && desired.length > 0 ? desired : workspaceName;
-  if (source.kind === "checkout-change-request") {
+  const ownsPrHead =
+    source.kind === "checkout-change-request" &&
+    isSafeJjRef(source.headRef) &&
+    !(await hasJjBookmark(sourceRoot, source.headRef));
+  if (ownsPrHead) {
+    candidate = source.headRef;
+  } else if (source.kind === "checkout-change-request") {
     const base = candidate.slice(0, 90);
     for (let suffix = 1; await hasJjBookmark(sourceRoot, candidate); suffix++)
       candidate = `${base}-${suffix}`;
   }
-  const branchValidation = validateBranchSlug(candidate);
-  if (!branchValidation.valid) {
-    throw new Error(`Invalid branch name: ${branchValidation.error}`);
+  if (!ownsPrHead) {
+    const branchValidation = validateBranchSlug(candidate);
+    if (!branchValidation.valid) {
+      throw new Error(`Invalid branch name: ${branchValidation.error}`);
+    }
   }
   if (await hasJjBookmark(sourceRoot, candidate)) {
     throw new Error(`Bookmark already exists: ${candidate}`);
   }
+  // Keep the workspace path slug independent from its bookmark. Owning the
+  // PR's real head name lets normal jj push target that existing remote ref;
+  // collisions keep the unique slug and remain fail-closed at publication.
   // Created from the workspace so it lands on the workspace head (@ there).
   await runJjWorkspaceSafe(["bookmark", "create", candidate], { cwd: worktreePath });
+  if (ownsPrHead && publication) {
+    // jj refuses a same-name remote ref until the local bookmark tracks it.
+    await runJjWorkspaceSafe(["bookmark", "track", `${candidate}@${publication.remoteName}`], {
+      cwd: worktreePath,
+    });
+  }
   const target = await readBookmarkTarget(sourceRoot, candidate);
   if (!target) throw new Error(`Created bookmark ${candidate} has no unique target`);
   return { name: candidate, target };

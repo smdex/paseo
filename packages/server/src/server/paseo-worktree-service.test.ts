@@ -31,6 +31,7 @@ import {
 } from "./paseo-worktree-service.js";
 import { archiveByScope, type ArchiveDependencies } from "./workspace-archive-service.js";
 import { createWorkspaceRecoveryService } from "./session/workspace-recovery/workspace-recovery-service.js";
+import { jjCommit, jjPush } from "../utils/checkout-jj.js";
 import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
 import {
   readPaseoWorktreeMetadata,
@@ -1440,7 +1441,7 @@ test.skipIf(!isJjAvailable())(
 );
 
 test.skipIf(!isJjAvailable())(
-  "opens a native PR through workspace creation with its own bookmark and pinned target base",
+  "opens a native PR with its head bookmark when locally unclaimed",
   async () => {
     const h = jjLifecycleTestFixture(false);
     const remote = path.join(h.fixture.dir, "remote.git");
@@ -1449,12 +1450,25 @@ test.skipIf(!isJjAvailable())(
     expect(h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "main"]).status).toBe(
       0,
     );
-    writeFileSync(path.join(h.fixture.repoDir, "pr.txt"), "the selected PR\n");
-    expect(h.fixture.jj(["commit", "-m", "PR work"]).status).toBe(0);
-    expect(h.fixture.jj(["bookmark", "create", "Feature/PR_7", "-r", "@-"]).status).toBe(0);
+    const publisher = path.join(h.fixture.dir, "publisher");
+    expect(h.fixture.jj(["git", "clone", "--no-colocate", remote, publisher]).status).toBe(0);
+    expect(h.fixture.jj(["new", "main@origin"], publisher).status).toBe(0);
+    writeFileSync(path.join(publisher, "pr.txt"), "the selected PR\n");
+    expect(h.fixture.jj(["commit", "-m", "PR work"], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "create", "Feature/PR_7", "-r", "@-"], publisher).status).toBe(
+      0,
+    );
     expect(
-      h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "Feature/PR_7"]).status,
+      h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "Feature/PR_7"], publisher)
+        .status,
     ).toBe(0);
+    const pullRequestHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "Feature/PR_7", "-T", "commit_id"], publisher)
+      .stdout.trim();
+    expect(h.fixture.jj(["bookmark", "create", "keep-me", "-r", "main"]).status).toBe(0);
+    const keepMeHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "keep-me", "-T", "commit_id"])
+      .stdout.trim();
     const base = h.fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
     const sourceHead = h.fixture
       .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
@@ -1533,7 +1547,7 @@ test.skipIf(!isJjAvailable())(
     );
     expect(result.workspace.cwd).toBe(path.join(h.fixture.dir, "repo-review-seven"));
     expect(result.worktree.comparisonBaseRef).toBe(base);
-    expect(result.worktree.branchName).not.toBe("Feature/PR_7");
+    expect(result.worktree.branchName).toBe("Feature/PR_7");
     expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
       sourceHead,
     );
@@ -1555,6 +1569,58 @@ test.skipIf(!isJjAvailable())(
       sourceRepository: "acme/repo",
       targetRepository: "acme/repo",
     });
+
+    const publishContext = { paseoHome: h.fixture.dir };
+    const remoteHead = () =>
+      execFileSync("git", ["ls-remote", remote, "refs/heads/Feature/PR_7"], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\t")[0];
+    const localHead = () =>
+      h.fixture
+        .jj(["log", "--no-graph", "-r", 'bookmarks(exact:"Feature/PR_7")', "-T", "commit_id"])
+        .stdout.trim();
+    expect(remoteHead()).toBe(pullRequestHead);
+    writeFileSync(path.join(result.workspace.cwd, "pr.txt"), "first pushed update\n");
+    const firstUpdate = await jjCommit(
+      result.workspace.cwd,
+      { message: "First PR update" },
+      publishContext,
+    );
+    await jjPush(result.workspace.cwd, publishContext);
+    expect(remoteHead()).toBe(localHead());
+    expect(localHead()).not.toBe(pullRequestHead);
+
+    writeFileSync(path.join(result.workspace.cwd, "pr.txt"), "second pushed update\n");
+    await jjCommit(result.workspace.cwd, { message: "Second PR update" }, publishContext);
+    await jjPush(result.workspace.cwd, publishContext);
+    expect(remoteHead()).toBe(localHead());
+    expect(localHead()).not.toBe(firstUpdate.commitId);
+    expect(
+      h.fixture.jj(["log", "--no-graph", "-r", "keep-me", "-T", "commit_id"]).stdout.trim(),
+    ).toBe(keepMeHead);
+    expect(h.fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      base,
+    );
+    expect(
+      execFileSync("git", ["ls-remote", remote, "refs/heads/main"], { encoding: "utf8" })
+        .trim()
+        .split("\t")[0],
+    ).toBe(base);
+
+    const publishedHead = localHead();
+    const collision = await createPaseoWorktree({ ...input, worktreeSlug: "review-eight" }, h.deps);
+    expect(collision.worktree.branchName).toBe("review-eight");
+    expect(collision.worktree.branchName).not.toBe("Feature/PR_7");
+    expect(
+      h.fixture
+        .jj(["log", "--no-graph", "-r", 'bookmarks(exact:"Feature/PR_7")', "-T", "commit_id"])
+        .stdout.trim(),
+    ).toBe(publishedHead);
+    await expect(jjPush(collision.workspace.cwd, publishContext)).rejects.toThrow(
+      "saved publication mapping",
+    );
   },
 );
 
