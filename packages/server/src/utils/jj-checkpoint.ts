@@ -44,7 +44,8 @@ export const JjCheckpointSchema = z.object({
   metadata: PaseoWorktreeMetadataSchema.nullable(),
   selection: HeadSchema,
   completedChanges: z.array(HeadSchema),
-  savedWip: z.array(HeadSchema),
+  // Capture ownership; an ancestor bookmark is not the WIP's owning line.
+  savedWip: z.array(HeadSchema.extend({ bookmark: z.string().nullable().optional() })),
   comparison: z.object({ pinnedCommitId: z.string().nullable(), liveBase: z.string().nullable() }),
   publication: z
     .object({

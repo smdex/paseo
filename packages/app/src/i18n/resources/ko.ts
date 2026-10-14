@@ -845,6 +845,7 @@ export const ko: TranslationResources = {
         finishChange: en.workspace.git.actions.finishChange,
         describeChange: en.workspace.git.actions.describeChange,
         editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
         jj: en.workspace.git.actions.jj,
         newChange: {
           label: "새 체인지",
@@ -1619,6 +1620,15 @@ export const ko: TranslationResources = {
     restore: "복원",
     later: "나중에",
     stashRestored: "스태시된 변경 사항이 복원되었습니다",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "워크스페이스 검색 중...",

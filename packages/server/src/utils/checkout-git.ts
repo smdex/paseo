@@ -256,6 +256,8 @@ export interface BranchSuggestion {
   localRef?: string;
   remoteRef?: string;
   remoteName?: string;
+  /** jj: saved WIP change on this bookmark's line (same-ID Resume affordance). */
+  wipChangeId?: string;
 }
 
 async function listGitRefs(cwd: string, refPrefix: string): Promise<GitRef[]> {
@@ -479,6 +481,10 @@ export type BranchCheckoutSource = "local" | "remote";
 
 export interface CheckoutExistingBranchResult {
   source: BranchCheckoutSource;
+  /** jj switch outcome (omitted on git): native mode and resulting change. */
+  mode?: "new-on" | "resume";
+  changeId?: string;
+  commitId?: string;
 }
 
 export interface CheckoutResolvedBranchInput {

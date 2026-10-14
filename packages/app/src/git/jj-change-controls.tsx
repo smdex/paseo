@@ -28,6 +28,10 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   const enabled = useSessionStore(
     (state) => state.sessions[props.serverId]?.serverInfo?.features?.checkoutJjCheckpoint === true,
   );
+  const graphSelectionsEnabled = useSessionStore(
+    (state) =>
+      state.sessions[props.serverId]?.serverInfo?.features?.checkoutJjGraphSelections === true,
+  );
   const error = useCheckoutGitActionsStore(
     (state) => state.errorByCheckout[`${props.serverId}::${props.cwd}`] ?? null,
   );
@@ -47,6 +51,7 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   );
   const openDescribe = useCallback(() => open("describe"), [open]);
   const openEdit = useCallback(() => open("edit"), [open]);
+  const openNewOn = useCallback(() => open("new-on"), [open]);
   const close = useCallback(() => setOpened(null), []);
   if (!enabled) return null;
   return (
@@ -69,6 +74,15 @@ export function JjChangeControls(props: JjChangeControlsProps) {
           testID="jj-edit-open"
         >
           {t("workspace.git.actions.editChange.label")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!props.changeId || !graphSelectionsEnabled}
+          onPress={openNewOn}
+          testID="jj-newon-open"
+        >
+          {t("workspace.git.actions.newChangeOn.label")}
         </Button>
       </View>
       {props.refusedPaths.length ? (
@@ -110,6 +124,12 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
         const result = await client.editChange(input);
         if (!result.success) throw new Error(result.error?.message ?? "Edit did not complete");
       },
+      newOn: async (input) => {
+        if (!client) throw new Error("Host disconnected");
+        const result = await client.newChange(input);
+        if (!result.success)
+          throw new Error(result.error?.message ?? "New change did not complete");
+      },
       refresh: () =>
         invalidateCheckoutGitQueriesForClient(queryClient, {
           serverId: snapshot.serverId,
@@ -122,13 +142,15 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
   const commits = useCheckoutCommitsQuery({
     serverId: snapshot.serverId,
     cwd: snapshot.cwd,
-    enabled: snapshot.mode === "edit",
+    enabled: snapshot.mode !== "describe",
   });
   const size = compact ? "md" : "sm";
   const title = t(
-    snapshot.mode === "describe"
-      ? "workspace.git.actions.describeChange.label"
-      : "workspace.git.actions.editChange.label",
+    {
+      describe: "workspace.git.actions.describeChange.label",
+      "new-on": "workspace.git.actions.newChangeOn.label",
+      edit: "workspace.git.actions.editChange.label",
+    }[snapshot.mode],
   );
   const header = useMemo(() => ({ title }), [title]);
   const submit = useCallback(() => void model.submit(), [model]);
@@ -136,6 +158,12 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
     if (model.getState().status !== "pending") onClose();
   }, [model, onClose]);
   const pending = state.status === "pending";
+  let submitLabel = title;
+  if (pending) submitLabel = t("workspace.git.actions.jj.saving");
+  else if (state.needsRewriteApproval)
+    submitLabel = t("workspace.git.actions.jj.approveRewrite", {
+      defaultValue: "Approve native rewrite",
+    });
   return (
     <AdaptiveModalSheet visible onClose={close} header={header}>
       <View style={styles.form} testID="jj-change-form">
@@ -162,14 +190,25 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
           <View>
             {commits.status === "loaded" ? (
               commits.data.commits
-                .filter((commit) => commit.changeId && commit.changeId !== snapshot.changeId)
+                .filter((commit) =>
+                  snapshot.mode === "new-on"
+                    ? Boolean(commit.changeId)
+                    : Boolean(commit.changeId) && commit.changeId !== snapshot.changeId,
+                )
                 .map((commit) => (
                   <ChangeSelection
                     key={commit.sha}
-                    changeId={commit.changeId!}
+                    changeId={snapshot.mode === "new-on" ? commit.sha : commit.changeId!}
                     label={commit.subject || commit.shortSha}
-                    testID={`jj-edit-select-${commit.shortSha}`}
-                    selected={state.targetChangeId === commit.changeId}
+                    testID={
+                      snapshot.mode === "new-on"
+                        ? `jj-newon-select-${commit.shortSha}`
+                        : `jj-edit-select-${commit.shortSha}`
+                    }
+                    selected={
+                      state.targetChangeId ===
+                      (snapshot.mode === "new-on" ? commit.sha : commit.changeId)
+                    }
                     size={size}
                     disabled={pending}
                     select={model.selectChange}
@@ -203,7 +242,7 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
             onPress={submit}
             testID="jj-change-submit"
           >
-            {pending ? t("workspace.git.actions.jj.saving") : title}
+            {submitLabel}
           </Button>
         </View>
       </View>

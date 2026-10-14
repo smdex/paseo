@@ -915,6 +915,8 @@ export interface NewChangeInput {
   acknowledgeRewrites?: boolean;
   cwd: string;
   message?: string;
+  /** jj: exact revision the new change starts on (captured "new on…"). */
+  targetCommitId?: string;
   requestId?: string;
 }
 export interface DescribeChangeInput {
@@ -4524,13 +4526,40 @@ export class DaemonClient {
     cwd: string,
     branch: string,
     requestId?: string,
+    jjIntent?: {
+      mode?: "new-on" | "resume";
+      wipChangeId?: string;
+      targetCommitId?: string;
+      message?: string;
+      expectedChangeId?: string;
+      acknowledgeRewrites?: boolean;
+    },
   ): Promise<CheckoutSwitchBranchPayload> {
+    // The checkpoint capability predates graph selection intents; require
+    // this slice's capability so older daemons cannot silently drop them.
+    if (
+      jjIntent &&
+      (jjIntent.mode !== undefined ||
+        jjIntent.wipChangeId !== undefined ||
+        jjIntent.targetCommitId !== undefined ||
+        jjIntent.expectedChangeId !== undefined ||
+        jjIntent.message !== undefined ||
+        jjIntent.acknowledgeRewrites !== undefined)
+    ) {
+      this.requireJjGraphSelectionCapability();
+    }
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "checkout_switch_branch_request",
         cwd,
         branch,
+        mode: jjIntent?.mode,
+        wipChangeId: jjIntent?.wipChangeId,
+        targetCommitId: jjIntent?.targetCommitId,
+        message: jjIntent?.message,
+        expectedChangeId: jjIntent?.expectedChangeId,
+        acknowledgeRewrites: jjIntent?.acknowledgeRewrites,
       },
       responseType: "checkout_switch_branch_response",
     });
@@ -4553,8 +4582,14 @@ export class DaemonClient {
       throw new Error("Update the host to use checkpointed jj change actions.");
   }
 
+  private requireJjGraphSelectionCapability(): void {
+    if (this.lastServerInfoMessage?.features?.checkoutJjGraphSelections !== true)
+      throw new Error("Update the host to use captured jj graph selections.");
+  }
+
   async newChange(input: NewChangeInput): Promise<NewChangeResult> {
-    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+    if (input.targetCommitId !== undefined) this.requireJjGraphSelectionCapability();
+    else if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
       this.requireJjCheckpointCapability();
     return this.sendCorrelatedSessionRequest({
       requestId: input.requestId,
@@ -4562,6 +4597,7 @@ export class DaemonClient {
         type: "checkout.new_change.request",
         cwd: input.cwd,
         message: input.message,
+        targetCommitId: input.targetCommitId,
         expectedChangeId: input.expectedChangeId,
         acknowledgeRewrites: input.acknowledgeRewrites,
       },

@@ -28,6 +28,8 @@ import {
   jjDescribe,
   jjCommit,
   jjEdit,
+  jjSwitchBookmark,
+  jjCreateBranchOnBase,
 } from "./checkout-jj.js";
 import { createScratchJjRepo, isJjAvailable, type ScratchJjRepoFixture } from "../test-utils/jj.js";
 import {
@@ -165,6 +167,25 @@ describeIfJj("checkout-jj snapshot facts", () => {
     if (!facts.isJj) return;
     expect(facts.derivedBookmark).toBe("feature");
   });
+
+  it.each([false, true])(
+    "ignores recovery pins before deriving the nearest bookmark (colocate=%s)",
+    async (colocate) => {
+      const fixture = scratch({ colocate, files: { "a.txt": "a\n" } });
+      expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+      expect(fixture.jj(["new", "@-", "-m", "feature base"]).status).toBe(0);
+      expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+      expect(fixture.jj(["bookmark", "create", "paseo/recovery/base"]).status).toBe(0);
+      expect(fixture.jj(["new", "-m", "saved WIP"]).status).toBe(0);
+      expect(fixture.jj(["bookmark", "create", "paseo/recovery/wip"]).status).toBe(0);
+
+      const facts = await getJjSnapshotFacts(fixture.repoDir);
+      expect(facts.isJj).toBe(true);
+      if (!facts.isJj) return;
+      expect(facts.derivedBookmark).toBe("feature");
+      expect(await getJjWorkspaceBookmark(fixture.repoDir)).toBe("feature");
+    },
+  );
 
   it("marks dirty via Untracked paths when jj refuses to snapshot an oversized file", async () => {
     const fixture = scratch({ files: { "a.txt": "a\n" } });
@@ -977,13 +998,19 @@ describeIfJj("checkout-jj remote ops", () => {
     fixture.jj(["new", "@-", "-m", "work"]);
     fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
 
-    const result = await jjRenameBookmark(fixture.repoDir, "renamed-feature");
+    const context = { paseoHome: join(fixture.dir, "home") };
+    writeFileSync(join(fixture.repoDir, "a.txt"), "saved work before rename\n");
+    const saved = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await jjNew(fixture.repoDir, undefined, context);
+    const result = await jjRenameBookmark(fixture.repoDir, "renamed-feature", context);
     expect(result).toEqual({ previousBranch: "feature", currentBranch: "renamed-feature" });
     expect(fixture.jj(["bookmark", "list"]).stdout).toContain("renamed-feature");
+    const suggestions = await listJjBookmarkSuggestions(fixture.repoDir, undefined, context);
+    expect(suggestions.find((s) => s.name === "renamed-feature")?.wipChangeId).toBe(saved.changeId);
 
     // With the workspace bookmark gone there is nothing to rename — typed.
     fixture.jj(["bookmark", "delete", "renamed-feature"]);
-    await expect(jjRenameBookmark(fixture.repoDir, "anything")).rejects.toThrow(
+    await expect(jjRenameBookmark(fixture.repoDir, "anything", context)).rejects.toThrow(
       /nothing to rename/i,
     );
   });
@@ -1153,6 +1180,46 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     expect((await getJjChangeMeta(managed.workspacePath, "@"))!.description.trim()).toBe(
       "explicit no owner",
     );
+  });
+
+  it("branch creation from a managed subproject retains WIP and pinned comparison while replacing only its owner", async () => {
+    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const context = {
+      worktreesRoot: managed.worktreesRoot,
+      paseoHome: join(managed.worktreesRoot, "home"),
+    };
+    const sub = join(managed.workspacePath, "sub");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "work.txt"), "saved old-line work\n");
+    const before = (await getJjChangeMeta(managed.workspacePath, "@"))!;
+    const base = (await getJjChangeMeta(managed.workspacePath, "main"))!;
+    const old = (await getJjChangeMeta(managed.workspacePath, "feat/owned"))!;
+    const metadata = readPaseoWorktreeMetadata(managed.workspacePath)!;
+    await jjCreateBranchOnBase(
+      sub,
+      { baseBranch: "main", newBranchName: "feat/new-owner" },
+      context,
+    );
+    const current = (await getJjChangeMeta(managed.workspacePath, "@"))!;
+    expect(current.parents).toEqual([base.commitId]);
+    expect((await getJjChangeMeta(managed.workspacePath, "main"))!.commitId).toBe(base.commitId);
+    expect((await getJjChangeMeta(managed.workspacePath, "feat/owned"))!.commitId).toBe(
+      old.commitId,
+    );
+    expect(readPaseoWorktreeMetadata(managed.workspacePath)).toMatchObject({
+      version: 2,
+      baseRef: metadata.baseRef,
+      baseRefName: metadata.baseRefName,
+      jjBookmark: "feat/new-owner",
+    });
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const checkpoint = (await readJjCheckpoint(managed.workspacePath, context.paseoHome))!;
+    expect(checkpoint.savedWip).toContainEqual({
+      commitId: before.commitId,
+      changeId: before.changeId,
+      bookmark: "feat/owned",
+    });
+    expect(checkpoint.comparison.pinnedCommitId).toBe(metadata.baseRef);
   });
 
   it("commit from a subdirectory advances the recorded owner, never the base", async () => {
@@ -1452,7 +1519,7 @@ describeIfJj("durable native change checkpoint", () => {
     await jjNew(fixture.repoDir, { expectedChangeId: before.changeId }, context);
     const { readJjCheckpoint } = await import("./jj-checkpoint.js");
     expect((await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.savedWip).toEqual([
-      { commitId: before.commitId, changeId: before.changeId },
+      { commitId: before.commitId, changeId: before.changeId, bookmark: null },
     ]);
     expect((await getJjChangeMeta(fixture.repoDir, "@-"))!.changeId).toBe(before.changeId);
   });
@@ -1508,7 +1575,7 @@ describeIfJj("durable native change checkpoint", () => {
     const { readJjCheckpoint } = await import("./jj-checkpoint.js");
     const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
     expect(checkpoint!.savedWip).toEqual([
-      { commitId: before!.commitId, changeId: before!.changeId },
+      { commitId: before!.commitId, changeId: before!.changeId, bookmark: null },
     ]);
     expect(checkpoint!.operations[0]!.affectedHeads).toContainEqual({
       commitId: before!.commitId,
@@ -1638,5 +1705,351 @@ describeIfJj("durable native change checkpoint", () => {
       jjDescribe(fixture.repoDir, { message: "must not adopt" }, context),
     ).rejects.toThrow("unavailable in this jj store");
     expect((await getJjChangeMeta(fixture.repoDir, "@"))!.description.trim()).toBe("");
+  });
+});
+
+function commitIdOfRevset(fixture: ScratchJjRepoFixture, revset: string): string {
+  const result = fixture.jj(["log", "--no-graph", "-r", revset, "-T", "commit_id"]);
+  expect(result.status).toBe(0);
+  return result.stdout.trim();
+}
+
+describeIfJj("jj bookmark switch (P2)", () => {
+  it("new-on switches onto the captured exact revision and saves the dirty line as durable WIP", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "feature work"]);
+    fixture.jj(["bookmark", "create", "feature"]);
+    // The dirty working copy is a child of the bookmarked change, so the
+    // bookmark's commit never rewrites when the WIP is snapshotted.
+    fixture.jj(["new", "-m", "wip"]);
+    const featureCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"feature")');
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty on feature\n");
+    const leftChange = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const mainCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"main")');
+
+    const result = await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "main",
+        mode: "new-on",
+        targetCommitId: mainCommit,
+        expectedChangeId: leftChange.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+
+    expect(result.mode).toBe("new-on");
+    expect(result.changeId).not.toBe(leftChange.changeId);
+    // The new change sits directly on the captured revision.
+    expect(commitIdOfRevset(fixture, "@-")).toBe(mainCommit);
+    // Neither bookmark moved and the line left keeps its exact position.
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"feature")')).toBe(featureCommit);
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"main")')).toBe(mainCommit);
+    // The dirty working copy became durable saved WIP outside .jj.
+    const { readJjCheckpoint, jjCheckpointPath } = await import("./jj-checkpoint.js");
+    const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
+    expect(checkpoint!.savedWip).toEqual([
+      { commitId: leftChange.commitId, changeId: leftChange.changeId, bookmark: "feature" },
+    ]);
+    expect(jjCheckpointPath(fixture.repoDir, context.paseoHome).startsWith(context.paseoHome)).toBe(
+      true,
+    );
+  });
+
+  it("annotates saved WIP on suggestions and Resume edits the same change ID after an external op", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "feature work"]);
+    fixture.jj(["bookmark", "create", "feature"]);
+    fixture.jj(["new", "-m", "wip"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty on feature\n");
+    const savedChange = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "main",
+        mode: "new-on",
+        expectedChangeId: savedChange.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+
+    // The switcher sees the saved WIP on the feature line.
+    const suggestions = await listJjBookmarkSuggestions(fixture.repoDir, undefined, context);
+    expect(suggestions.find((s) => s.name === "feature")?.wipChangeId).toBe(savedChange.changeId);
+    expect(suggestions.find((s) => s.name === "main")?.wipChangeId).toBeUndefined();
+    fixture.jj(["bookmark", "create", "wrong-line", "-r", "main"]);
+    await expect(
+      jjSwitchBookmark(
+        fixture.repoDir,
+        {
+          branch: "wrong-line",
+          mode: "resume",
+          wipChangeId: savedChange.changeId,
+          acknowledgeRewrites: true,
+        },
+        context,
+      ),
+    ).rejects.toThrow("no captured ownership");
+
+    // An external operation happens between switch and resume (reload).
+    expect(fixture.jj(["new", "-m", "unrelated interlude"]).status).toBe(0);
+    const current = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+
+    const result = await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "feature",
+        mode: "resume",
+        wipChangeId: savedChange.changeId,
+        expectedChangeId: current.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(result.mode).toBe("resume");
+    // Same-ID native edit: the working copy is the saved change again.
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(savedChange.changeId);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.description).toContain("wip");
+    expect(readFileSync(join(fixture.repoDir, "a.txt"), "utf8")).toBe("dirty on feature\n");
+  });
+
+  it.each(["bookmark", "selection"])(
+    "retains actual partial results after a concurrent %s winner and blocks retry/publication",
+    async (winner) => {
+      const fixture = scratch({ colocate: false, files: { "a.txt": "base\n" } });
+      fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+      fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
+      writeFileSync(join(fixture.repoDir, "a.txt"), "dirty retained line\n");
+      const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      const base = (await getJjChangeMeta(fixture.repoDir, "main"))!;
+      const { runJjCommand } = await import("./run-jj-command.js");
+      let changed = false;
+      const context = {
+        paseoHome: join(fixture.dir, "home"),
+        runJjCommand: async (args: string[], options: Parameters<typeof runJjCommand>[1]) => {
+          const result = await runJjCommand(args, options);
+          if (args[0] === "new" && !changed && result.exitCode === 0) {
+            changed = true;
+            const external =
+              winner === "bookmark"
+                ? fixture.jj(["bookmark", "set", "main", "-r", "@"])
+                : fixture.jj(["new", "-m", "external selection winner"]);
+            expect(external.status).toBe(0);
+          }
+          return result;
+        },
+      };
+      const intent = {
+        branch: "main",
+        mode: "new-on" as const,
+        targetCommitId: base.commitId,
+        expectedChangeId: before.changeId,
+      };
+      await expect(jjSwitchBookmark(fixture.repoDir, intent, context)).rejects.toThrow(
+        /reconcil|moved since|unexpected/,
+      );
+      const actual = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+      const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+      const checkpoint = (await readJjCheckpoint(fixture.repoDir, context.paseoHome))!;
+      const operation = checkpoint.operations.at(-1)!;
+      expect(operation.status).toBe("reconciliation_required");
+      expect(operation.before).toEqual({ commitId: before.commitId, changeId: before.changeId });
+      expect(operation.after).toEqual({ commitId: actual.commitId, changeId: actual.changeId });
+      expect(checkpoint.recoveryPins.length).toBeGreaterThanOrEqual(2);
+      await expect(jjPush(fixture.repoDir, context)).rejects.toThrow("Publication is blocked");
+      await expect(
+        jjSwitchBookmark(fixture.repoDir, { branch: "feature" }, context),
+      ).rejects.toThrow("previous jj operation requires reconciliation");
+      expect((await getJjChangeMeta(fixture.repoDir, "@"))!.commitId).toBe(actual.commitId);
+      expect((await getJjChangeMeta(fixture.repoDir, "main"))!.commitId).toBe(
+        winner === "bookmark" ? actual.commitId : base.commitId,
+      );
+    },
+  );
+
+  it("refuses a stale captured revision without moving any head", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "other line"]);
+    fixture.jj(["bookmark", "create", "other"]);
+    const mainCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"main")');
+    const otherCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"other")');
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    // An external winner advances main after it was captured, from a detached
+    // line so the workspace never sits on main.
+    fixture.jj(["new", "-m", "advance", "-r", "main"]);
+    fixture.jj(["bookmark", "set", "main", "-r", "@"]);
+    fixture.jj(["edit", before.changeId]);
+    const movedCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"main")');
+    expect(movedCommit).not.toBe(mainCommit);
+
+    await expect(
+      jjSwitchBookmark(
+        fixture.repoDir,
+        {
+          branch: "main",
+          mode: "new-on",
+          targetCommitId: mainCommit,
+          expectedChangeId: before.changeId,
+          acknowledgeRewrites: true,
+        },
+        context,
+      ),
+    ).rejects.toThrow("moved since it was picked");
+    // Every head retained; the external winner is not overwritten.
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"main")')).toBe(movedCommit);
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"other")')).toBe(otherCommit);
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(before.changeId);
+  });
+
+  it("refuses untracked files that would not survive the switch", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "line"]);
+    fixture.jj(["bookmark", "create", "other"]);
+    expect(fixture.jj(["config", "set", "--repo", "snapshot.max-new-file-size", "1"]).status).toBe(
+      0,
+    );
+    writeFileSync(join(fixture.repoDir, "untracked.txt"), "would be lost\n");
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await expect(jjSwitchBookmark(fixture.repoDir, { branch: "main" }, context)).rejects.toThrow(
+      "Untracked files would not survive",
+    );
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(before.changeId);
+  });
+
+  it("refuses a concurrent working-copy change (expectedChangeId mismatch)", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "line"]);
+    fixture.jj(["bookmark", "create", "other"]);
+    const mainCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"main")');
+    await expect(
+      jjSwitchBookmark(
+        fixture.repoDir,
+        {
+          branch: "main",
+          mode: "new-on",
+          targetCommitId: mainCommit,
+          // A stale captured @: the working copy moved concurrently.
+          expectedChangeId: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+          acknowledgeRewrites: true,
+        },
+        context,
+      ),
+    ).rejects.toThrow();
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).not.toBe(
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    );
+  });
+
+  it("gates a rewrite whose impact reaches a second workspace until acknowledged", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "shared line"]);
+    fixture.jj(["bookmark", "create", "feature"]);
+    expect(fixture.jj(["workspace", "add", "../ws2"]).status).toBe(0);
+    const ws2Dir = join(fixture.dir, "ws2");
+    // The second workspace builds on the exact change this switch would leave.
+    const savedChange = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(
+      fixture.jj(["new", "-r", savedChange.commitId, "-m", "stacked on ws1"], ws2Dir).status,
+    ).toBe(0);
+
+    await expect(
+      jjSwitchBookmark(
+        fixture.repoDir,
+        {
+          branch: "main",
+          mode: "new-on",
+          expectedChangeId: savedChange.changeId,
+        },
+        context,
+      ),
+    ).rejects.toThrow("Confirm the native rewrite warning");
+
+    const acknowledged = await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "main",
+        mode: "new-on",
+        expectedChangeId: savedChange.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(acknowledged.mode).toBe("new-on");
+  });
+
+  it("colocated switch keeps git refs untouched and the saved WIP resumable", async () => {
+    const fixture = scratch({ colocate: true, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "feature work"]);
+    fixture.jj(["bookmark", "create", "feature"]);
+    fixture.jj(["new", "-m", "wip"]);
+    const featureCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"feature")');
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty on feature\n");
+    const savedChange = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "main",
+        mode: "new-on",
+        expectedChangeId: savedChange.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"feature")')).toBe(featureCommit);
+    const resume = await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "feature",
+        mode: "resume",
+        wipChangeId: savedChange.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    expect(resume.mode).toBe("resume");
+    expect((await getJjChangeMeta(fixture.repoDir, "@"))!.changeId).toBe(savedChange.changeId);
+  });
+
+  it("branch creation lands on the captured base revision and keeps the saved WIP", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const mainCommit = commitIdOfRevset(fixture, 'bookmarks(exact:"main")');
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty on main line\n");
+    const savedChange = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+
+    await jjCreateBranchOnBase(
+      fixture.repoDir,
+      { baseBranch: "main", newBranchName: "feat2" },
+      context,
+    );
+
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"main")')).toBe(mainCommit);
+    // The bookmark owns the fresh change; its parent is the exact captured base.
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"feat2")')).toBe(
+      (await getJjChangeMeta(fixture.repoDir, "@"))!.commitId,
+    );
+    expect(commitIdOfRevset(fixture, 'bookmarks(exact:"feat2")')).not.toBe(mainCommit);
+    expect((await getJjChangeMeta(fixture.repoDir, "@-"))!.commitId).toBe(mainCommit);
+    const { readJjCheckpoint } = await import("./jj-checkpoint.js");
+    expect((await readJjCheckpoint(fixture.repoDir, context.paseoHome))!.savedWip).toEqual([
+      { commitId: savedChange.commitId, changeId: savedChange.changeId, bookmark: "main" },
+    ]);
   });
 });

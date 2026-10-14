@@ -1214,8 +1214,11 @@ describeIfJj("jj archive with legacy placement", () => {
 });
 
 describeIfJj("jj shared archive/recovery lifecycle", () => {
-  async function lifecycleHarness() {
-    const fixture = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+  async function lifecycleHarness(subproject = false) {
+    const fixture = createScratchJjRepo({
+      colocate: false,
+      files: { "base.txt": "base\n", ...(subproject ? { "sub/base.txt": "base\n" } : {}) },
+    });
     cleanupPaths.push(fixture.dir);
     fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
     const worktreesRoot = path.join(fixture.dir, "custom-worktrees");
@@ -1301,9 +1304,9 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
   }
 
   test.each([false, true])(
-    "durable checkpoint survives archive, registry reload and native selection restore (subproject=%s)",
+    "dirty switch archive reload Resume preserves the same native ID and checkpoint mapping (subproject=%s)",
     async (subproject) => {
-      const h = await lifecycleHarness();
+      const h = await lifecycleHarness(subproject);
       const root = h.created.worktreePath;
       mkdirSync(path.join(root, "sub"), { recursive: true });
       writeFileSync(path.join(root, "sub", "work.txt"), "saved native work\n");
@@ -1312,7 +1315,8 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
           ...record,
           cwd: path.join(root, "sub"),
         }));
-      const { getJjChangeMeta, jjDescribe, jjCommit } = await import("../utils/checkout-jj.js");
+      const { getJjChangeMeta, jjDescribe, jjCommit, jjSwitchBookmark } =
+        await import("../utils/checkout-jj.js");
       const { importJjCheckpoint, readJjCheckpoint, writeJjCheckpoint } =
         await import("../utils/jj-checkpoint.js");
       const context = { paseoHome: h.fixture.dir, worktreesRoot: h.recoveryDeps.worktreesRoot };
@@ -1332,8 +1336,27 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
         sourceRepository: "fork/project",
         targetRepository: "upstream/project",
       };
-      const wip = checkpoint.completedChanges[0]!;
-      await writeJjCheckpoint({ ...checkpoint, publication, savedWip: [wip] }, h.fixture.dir);
+      await writeJjCheckpoint({ ...checkpoint, publication }, h.fixture.dir);
+      writeFileSync(path.join(root, "sub", "work.txt"), "dirty resumable native work\n");
+      await jjDescribe(
+        root,
+        { message: "Resumable WIP", expectedChangeId: head.changeId },
+        context,
+      );
+      const wip = (await getJjChangeMeta(root, "@"))!;
+      const main = (await getJjChangeMeta(root, "main"))!;
+      await jjSwitchBookmark(
+        subproject ? path.join(root, "sub") : root,
+        {
+          branch: "main",
+          mode: "new-on",
+          targetCommitId: main.commitId,
+          expectedChangeId: wip.changeId,
+        },
+        context,
+      );
+      const archivedSelection = (await getJjChangeMeta(root, "@"))!;
+      await h.registry.update("lifecycle-a", (record) => ({ ...record, branch: "main" }));
       await h.archive(createWorkspaceArchiveAuthorityPorts(h.registry));
       expect(existsSync(root)).toBe(false);
       const reloaded = new FileBackedWorkspaceRegistry(
@@ -1365,12 +1388,34 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       ).toHaveLength(1);
 
       expect(restored.publication).toEqual(publication);
-      expect(restored.savedWip).toEqual([wip]);
+      expect(restored.savedWip).toEqual([{ commitId: wip.commitId, changeId: wip.changeId }]);
       expect(restored.completedChanges).toEqual(checkpoint.completedChanges);
       expect(restored.comparison).toEqual(checkpoint.comparison);
       expect(readPaseoWorktreeMetadata(root)).toEqual(restored.metadata);
-      expect((await getJjChangeMeta(root, "@"))!.changeId).toBe(head.changeId);
-      expect(readFileSync(path.join(root, "sub", "work.txt"), "utf8")).toBe("saved native work\n");
+      expect((await getJjChangeMeta(root, "@"))!.changeId).toBe(archivedSelection.changeId);
+      await jjSwitchBookmark(
+        subproject ? path.join(root, "sub") : root,
+        {
+          branch: "lifecycle-feature",
+          mode: "resume",
+          wipChangeId: wip.changeId,
+          targetCommitId: (await getJjChangeMeta(root, "lifecycle-feature"))!.commitId,
+          expectedChangeId: archivedSelection.changeId,
+          acknowledgeRewrites: true,
+        },
+        context,
+      );
+      expect((await getJjChangeMeta(root, "@"))!.changeId).toBe(wip.changeId);
+      expect((await getJjChangeMeta(root, "@"))!.description.trim()).toBe("Resumable WIP");
+      expect(readFileSync(path.join(root, "sub", "work.txt"), "utf8")).toBe(
+        "dirty resumable native work\n",
+      );
+      const resumed = (await readJjCheckpoint(root, h.fixture.dir))!;
+      expect(resumed.publication).toEqual(publication);
+      expect(resumed.comparison).toEqual(checkpoint.comparison);
+      expect(resumed.metadata?.version === 2 && resumed.metadata.jjBookmark).toBe(
+        "lifecycle-feature",
+      );
       expect((await reloaded.get("lifecycle-a"))!.archivedAt).toBeNull();
       expect(await jjRevisionResolves(h.fixture.repoDir, archived.recoveryBookmark!)).toBe(true);
     },

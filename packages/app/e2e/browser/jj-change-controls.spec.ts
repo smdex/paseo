@@ -78,9 +78,21 @@ test.describe("native jj changes", () => {
     expect(jj(["log", "--no-graph", "-r", "@-", "-T", "description"])).toBe(
       "Native completed message",
     );
+    await panel.getByTestId("changes-refresh").click();
+    await expect(panel.getByTestId("changes-refresh")).toBeEnabled();
+    const describedCommit = jj(["log", "--no-graph", "-r", describedId, "-T", "commit_id"]);
     await panel.getByTestId("jj-edit-open").click();
-    await page.getByRole("button", { name: new RegExp(describedId.slice(0, 12)) }).click();
+    await expect(page.getByTestId("jj-change-form")).toContainText(currentId());
+    await page
+      .getByTestId(`jj-edit-select-${describedCommit.slice(0, 12)}`)
+      .click({ timeout: 20_000 });
     await page.getByTestId("jj-change-submit").click();
+    await expect(page.getByTestId("jj-form-error")).toContainText(
+      "Native rewrite approval required:",
+    );
+    await expect(page.getByTestId("jj-form-error")).toContainText(describedId);
+    await page.screenshot({ path: testInfo.outputPath("native-edit-approval-wide.png") });
+    await page.getByRole("button", { name: "Approve native rewrite", exact: true }).click();
     await expect.poll(currentId).toBe(describedId);
     await expect(page.getByTestId("jj-form-success")).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -90,6 +102,50 @@ test.describe("native jj changes", () => {
     await confirmedNew;
     await expect.poll(currentId).not.toBe(describedId);
     expect(jj(["log", "--no-graph", "-r", "@-", "-T", "change_id"])).toBe(describedId);
+
+    const capturedBase = jj(["log", "--no-graph", "-r", describedId, "-T", "commit_id"]);
+    await panel.getByTestId("jj-newon-open").click();
+    await page.getByTestId(`jj-newon-select-${capturedBase.slice(0, 12)}`).click();
+    await page.getByTestId("jj-change-submit").click();
+    await expect(page.getByTestId("jj-form-success")).toBeVisible();
+    expect(jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"])).toBe(capturedBase);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+
+    const branchSwitcher = page.getByTestId("changes-branch-switcher").filter({ visible: true });
+    jj(["new", "main", "--no-edit", "-m", "Feature base"]);
+    jj(["bookmark", "create", "feature", "-r", 'description(substring:"Feature base")']);
+    const beforeFeature = currentId();
+    const oldBookmark = jj(["log", "--no-graph", "-r", "feature", "-T", "commit_id"]);
+    await panel.getByTestId("changes-refresh").click();
+    await branchSwitcher.click();
+    const confirmedFeature = page.waitForEvent("dialog").then((dialog) => dialog.accept());
+    await page.getByRole("button", { name: "feature", exact: true }).click();
+    await confirmedFeature;
+    await expect.poll(currentId).not.toBe(beforeFeature);
+    await expect(branchSwitcher).toContainText("feature");
+    expect(jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"])).toBe(oldBookmark);
+    await writeFile(path.join(repo.path, "native.txt"), "dirty switch and same-ID Resume\n");
+    const savedId = currentId();
+    const main = jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
+    await panel.getByTestId("changes-refresh").click();
+    await branchSwitcher.click();
+    const confirmedSwitch = page.waitForEvent("dialog").then((dialog) => dialog.accept());
+    await page.getByRole("button", { name: "main", exact: true }).click();
+    await confirmedSwitch;
+    await expect.poll(currentId).not.toBe(savedId);
+    expect(jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"])).toBe(main);
+    expect(jj(["log", "--no-graph", "-r", "feature", "-T", "commit_id"])).toBe(oldBookmark);
+    await expect(branchSwitcher).toContainText("main");
+    await branchSwitcher.click();
+    const confirmedResume = page.waitForEvent("dialog").then((dialog) => {
+      expect(dialog.message()).toContain("same change ID");
+      return dialog.accept();
+    });
+    await page.getByRole("button", { name: "feature", exact: true }).click();
+    await confirmedResume;
+    await expect.poll(currentId).toBe(savedId);
+    await expect(branchSwitcher).toContainText("feature");
+    await page.screenshot({ path: testInfo.outputPath("native-switch-resume-wide.png") });
   });
   test("Describe opens at narrow width with visible draft, warning and keyboard focus", async ({
     page,
