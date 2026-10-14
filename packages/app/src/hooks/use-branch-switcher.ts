@@ -27,6 +27,9 @@ interface UseBranchSwitcherInput {
 interface UseBranchSwitcherResult {
   branchOptions: ComboboxOption[];
   branchLoadMessage: string | null;
+  resumeLookupError: string | null;
+  isRetryingResumeLookup: boolean;
+  retryResumeLookup: () => void;
   isOpen: boolean;
   isSwitching: boolean;
   setIsOpen: (open: boolean) => void;
@@ -78,6 +81,7 @@ export function useBranchSwitcher({
     retry: false,
     staleTime: vcs === "jj" ? 0 : 15_000,
   });
+  const refetchBranchSuggestions = branchSuggestionsQuery.refetch;
 
   const queryLoadMessage = branchSuggestionsQuery.isFetching
     ? t("common.loading")
@@ -97,6 +101,16 @@ export function useBranchSwitcher({
     const details = branchSuggestionsQuery.data?.branchDetails ?? [];
     return new Map(details.map((detail) => [detail.name, detail]));
   }, [branchSuggestionsQuery.data]);
+  const resumeLookupError =
+    vcs === "jj"
+      ? (branchSuggestionsQuery.data?.branchDetails?.find((detail) => detail.resumeLookupError)
+          ?.resumeLookupError ??
+        branchSuggestionsQuery.error?.message ??
+        null)
+      : null;
+  const retryResumeLookup = useCallback(() => {
+    void refetchBranchSuggestions();
+  }, [refetchBranchSuggestions]);
 
   const stashListQueryKey = useMemo(
     () => ["stashList", normalizedServerId, normalizedWorkspaceId] as const,
@@ -315,6 +329,9 @@ export function useBranchSwitcher({
   return {
     branchOptions,
     branchLoadMessage,
+    resumeLookupError,
+    isRetryingResumeLookup: branchSuggestionsQuery.isFetching,
+    retryResumeLookup,
     isOpen,
     isSwitching,
     setIsOpen,

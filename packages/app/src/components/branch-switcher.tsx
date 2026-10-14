@@ -5,6 +5,7 @@ import { GitBranch } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import type { Theme } from "@/styles/theme";
+import { Button } from "@/components/ui/button";
 import { Combobox, ComboboxItem, type ComboboxProps } from "@/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
@@ -47,20 +48,29 @@ export function BranchSwitcher({
   const toast = useToast();
   const queryClient = useQueryClient();
 
-  const { branchOptions, branchLoadMessage, isOpen, isSwitching, setIsOpen, handleBranchSelect } =
-    useBranchSwitcher({
-      client,
-      normalizedServerId: serverId,
-      normalizedWorkspaceId: workspaceId,
-      workspaceDirectory,
-      currentBranchName,
-      isGitCheckout,
-      vcs,
-      currentChangeId,
-      isConnected,
-      toast,
-      queryClient,
-    });
+  const {
+    branchOptions,
+    branchLoadMessage,
+    resumeLookupError,
+    isRetryingResumeLookup,
+    retryResumeLookup,
+    isOpen,
+    isSwitching,
+    setIsOpen,
+    handleBranchSelect,
+  } = useBranchSwitcher({
+    client,
+    normalizedServerId: serverId,
+    normalizedWorkspaceId: workspaceId,
+    workspaceDirectory,
+    currentBranchName,
+    isGitCheckout,
+    vcs,
+    currentChangeId,
+    isConnected,
+    toast,
+    queryClient,
+  });
 
   const handleOpen = useCallback(() => setIsOpen(true), [setIsOpen]);
 
@@ -82,10 +92,27 @@ export function BranchSwitcher({
     [branchLeadingSlot],
   );
 
+  const label = currentBranchName ?? t("branchSwitcher.title");
+  const resumeErrorFooter = useMemo(
+    () =>
+      resumeLookupError ? (
+        <View style={styles.resumeError} testID="jj-resume-lookup-error">
+          <Text style={styles.resumeErrorText}>{resumeLookupError}</Text>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isSwitching || isRetryingResumeLookup}
+            onPress={retryResumeLookup}
+          >
+            {t(isRetryingResumeLookup ? "common.loading" : "common.actions.retry")}
+          </Button>
+        </View>
+      ) : null,
+    [isRetryingResumeLookup, isSwitching, resumeLookupError, retryResumeLookup, t],
+  );
   if (!currentBranchName && vcs !== "jj") {
     return null;
   }
-  const label = currentBranchName ?? t("branchSwitcher.title");
 
   return (
     <View ref={anchorRef} collapsable={false} style={styles.anchor}>
@@ -123,6 +150,7 @@ export function BranchSwitcher({
         desktopPreventInitialFlash
         desktopMinWidth={280}
         renderOption={renderBranchOption}
+        footer={resumeErrorFooter}
       />
     </View>
   );
@@ -135,6 +163,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   tooltipText: {
     color: theme.colors.popoverForeground,
+    fontSize: theme.fontSize.sm,
+  },
+  resumeError: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border,
+    gap: 4,
+  },
+  resumeErrorText: {
+    color: theme.colors.destructive,
     fontSize: theme.fontSize.sm,
   },
 }));

@@ -1384,29 +1384,68 @@ async function annotateSavedWipSuggestions(
   try {
     const checkpoint = await readJjCheckpoint(await jjWorkspaceRoot(cwd), context?.paseoHome);
     savedWip = checkpoint?.savedWip ?? [];
-  } catch {
-    return; // Unreadable checkpoint state stays a mutation-time concern, not a read blocker.
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setResumeLookupError(local, null, `Saved jj Resume lookup failed: ${message}`);
+    return;
   }
   if (!savedWip.length) return;
   const perBookmark = new Map<string, string>();
-  for (const wip of savedWip) {
-    if (!wip.bookmark || !/^[k-z]{32}$/.test(wip.changeId)) continue;
-    try {
-      const change = await uniqueChange(cwd, wip.changeId, context);
-      const empty = await runJj(
-        ["log", "--no-graph", "-r", change.commitId, "-T", "empty"],
-        { cwd },
-        context,
-      );
-      if (!empty.truncated && empty.stdout.trim() === "false")
-        perBookmark.set(wip.bookmark, wip.changeId);
-    } catch {
-      // A stale saved WIP (garbage-collected change) must not break listing.
-    }
-  }
+  for (const wip of savedWip) await annotateSavedWip(wip, local, perBookmark, cwd, context);
   if (!perBookmark.size) return;
   for (const suggestion of local)
     if (perBookmark.has(suggestion.name)) suggestion.wipChangeId = perBookmark.get(suggestion.name);
+}
+
+async function annotateSavedWip(
+  wip: JjCheckpoint["savedWip"][number],
+  local: BranchSuggestion[],
+  perBookmark: Map<string, string>,
+  cwd: string,
+  context?: JjCheckoutContext,
+): Promise<void> {
+  if (!wip.bookmark || !/^[k-z]{32}$/.test(wip.changeId)) {
+    const message = wip.bookmark
+      ? `Saved jj Resume state for ${wip.bookmark} has an invalid change identity.`
+      : "Saved jj Resume state has no bookmark identity.";
+    setResumeLookupError(local, wip.bookmark, message);
+    return;
+  }
+  try {
+    const change = await uniqueChange(cwd, wip.changeId, context);
+    const empty = await runJj(
+      ["log", "--no-graph", "-r", change.commitId, "-T", "empty"],
+      { cwd },
+      context,
+    );
+    if (!empty.truncated && empty.stdout.trim() === "false") {
+      perBookmark.set(wip.bookmark, wip.changeId);
+      return;
+    }
+    setResumeLookupError(
+      local,
+      wip.bookmark,
+      "The saved jj Resume change no longer contains saved work.",
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setResumeLookupError(
+      local,
+      wip.bookmark,
+      `Saved jj Resume change for ${wip.bookmark} could not be resolved: ${message}`,
+    );
+  }
+}
+
+function setResumeLookupError(
+  suggestions: BranchSuggestion[],
+  bookmark: string | null | undefined,
+  message: string,
+): void {
+  const matching = bookmark ? suggestions.filter((suggestion) => suggestion.name === bookmark) : [];
+  for (const suggestion of matching.length ? matching : suggestions) {
+    suggestion.resumeLookupError = message;
+  }
 }
 
 /** Bookmark-backed branch checkout resolution for validation flows. */

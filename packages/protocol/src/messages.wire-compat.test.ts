@@ -651,13 +651,14 @@ test("exact workspace refs and default bases remain optional across checkout wir
           localRef: "a".repeat(40),
           remoteRef: "b".repeat(40),
           remoteName: "upstream",
+          resumeLookupError: "Saved jj Resume lookup failed.",
         },
       ],
     },
   };
   const legacyDetail = BranchSuggestionsResponseSchema.shape.payload.shape.branchDetails
     .unwrap()
-    .element.omit({ localRef: true, remoteRef: true, remoteName: true });
+    .element.omit({ localRef: true, remoteRef: true, remoteName: true, resumeLookupError: true });
   const legacyBranches = BranchSuggestionsResponseSchema.extend({
     payload: BranchSuggestionsResponseSchema.shape.payload.extend({
       branchDetails: z.array(legacyDetail).optional(),

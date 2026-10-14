@@ -270,6 +270,8 @@ export interface BranchSuggestion {
   remoteName?: string;
   /** jj: saved WIP change on this bookmark's line (same-ID Resume affordance). */
   wipChangeId?: string;
+  /** jj: lookup failed while checking whether this bookmark can Resume saved work. */
+  resumeLookupError?: string;
 }
 
 async function listGitRefs(cwd: string, refPrefix: string): Promise<GitRef[]> {
