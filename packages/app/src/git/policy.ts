@@ -36,6 +36,7 @@ export interface GitAction {
   /** When true, a menu separator should be rendered before this item. */
   startsGroup: boolean;
   handler: () => void;
+  closeOnSelect?: boolean;
 }
 
 export interface GitActions {
@@ -306,6 +307,7 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
 
   allActions.set("new-change", {
     id: "new-change",
+    closeOnSelect: true,
     label: i18n.t("workspace.git.actions.newChange.label"),
     pendingLabel: i18n.t("workspace.git.actions.newChange.pending"),
     successLabel: i18n.t("workspace.git.actions.newChange.success"),
@@ -470,6 +472,7 @@ function buildPrAction(input: BuildGitActionsInput): GitAction {
   if (input.hasPullRequest && input.pullRequestUrl) {
     return {
       id: "pr",
+      closeOnSelect: true,
       label: i18n.t("workspace.git.actions.viewPr"),
       pendingLabel: i18n.t("workspace.git.actions.viewPr"),
       successLabel: i18n.t("workspace.git.actions.viewPr"),
@@ -490,6 +493,7 @@ function buildPrAction(input: BuildGitActionsInput): GitAction {
 
   return {
     id: "pr",
+    closeOnSelect: input.isJj,
     label: i18n.t("workspace.git.actions.createPr.label"),
     pendingLabel: i18n.t("workspace.git.actions.createPr.pending"),
     successLabel: i18n.t("workspace.git.actions.createPr.success"),
