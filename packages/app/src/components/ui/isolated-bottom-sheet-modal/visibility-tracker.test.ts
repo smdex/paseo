@@ -279,3 +279,19 @@ it("does not cancel the owner's editor when the compact sheet leaves the tree on
   expect(context.closeCount()).toBe(0);
   expect(context.backPress.press()).toBe(false);
 });
+
+it("presents a replacement controller after compact presentation is disabled and enabled again", () => {
+  const context = setup();
+  openSheet(context);
+  context.tracker.syncDesired({ visible: true, isEnabled: false });
+  expect(context.backPress.press()).toBe(false);
+  context.tracker.handleSheetDismiss();
+  context.tracker.attachController(null);
+  context.tracker.handleSheetDismiss();
+  const replacement = new FakeBottomSheet();
+  context.tracker.attachController(replacement);
+  context.tracker.syncDesired({ visible: true, isEnabled: true });
+  context.tracker.syncDesired({ visible: true, isEnabled: true });
+  expect(replacement.events).toEqual([{ type: "present" }]);
+  expect(context.closeCount()).toBe(0);
+});

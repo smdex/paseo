@@ -103,7 +103,12 @@ export function createBottomSheetVisibilityTracker(opts: {
     syncDesired(next) {
       visible = next.visible;
       isEnabled = next.isEnabled;
-      if (isEnabled === false) return;
+      if (isEnabled === false) {
+        // Desktop replaces compact presentation without dismissing the opened form.
+        setPhase("closed");
+        hasNotifiedClose = false;
+        return;
+      }
       if (visible) {
         present();
         return;
@@ -129,7 +134,7 @@ export function createBottomSheetVisibilityTracker(opts: {
     handleSheetDismiss() {
       // Portal cleanup reports dismissal after the sheet leaves the tree. It is
       // presentation teardown, so the owner keeps its desired state.
-      if (!controller) return;
+      if (!controller || isEnabled === false) return;
       if (visible) {
         setPhase("dismissing");
         notifyClose();
