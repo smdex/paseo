@@ -269,6 +269,12 @@ test("selected PR creates a native workspace after a visible lookup failure and 
   await writeFile(path.join(repo, "local-current.txt"), "Keep source work\n");
   const sourceHead = jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
   const sourceChangeId = jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+  const sourceBefore = {
+    metadata: jj(["log", "--no-graph", "-r", "@", "-T", "json(self)"]),
+    show: jj(["show", "@"]),
+    status: jj(["status"]),
+    operations: jj(["op", "log", "-n", "12"]),
+  };
   const baseHead = jj(["log", "--no-graph", "-r", `${pr.baseRefName}@origin`, "-T", "commit_id"]);
   expect(
     jj([
@@ -345,8 +351,32 @@ test("selected PR creates a native workspace after a visible lookup failure and 
     expect(
       jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"], result.workspaceDirectory),
     ).toBe(pr.headRefOid);
-    expect(jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])).toBe(sourceHead);
-    expect(jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])).toBe(sourceChangeId);
+    const sourceHeadAfter = jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+    const sourceChangeIdAfter = jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+    if (sourceHeadAfter !== sourceHead || sourceChangeIdAfter !== sourceChangeId) {
+      await testInfo.attach("native-source-workspace-change.json", {
+        contentType: "application/json",
+        body: Buffer.from(
+          JSON.stringify(
+            {
+              expected: { commitId: sourceHead, changeId: sourceChangeId },
+              actual: { commitId: sourceHeadAfter, changeId: sourceChangeIdAfter },
+              before: sourceBefore,
+              after: {
+                metadata: jj(["log", "--no-graph", "-r", "@", "-T", "json(self)"]),
+                show: jj(["show", "@"]),
+                status: jj(["status"]),
+                operations: jj(["op", "log", "-n", "12"]),
+              },
+            },
+            null,
+            2,
+          ),
+        ),
+      });
+    }
+    expect(sourceHeadAfter).toBe(sourceHead);
+    expect(sourceChangeIdAfter).toBe(sourceChangeId);
     expect(await readFile(path.join(repo, "local-current.txt"), "utf8")).toBe("Keep source work\n");
     const metadata = JSON.parse(
       await readFile(path.join(result.workspaceDirectory, ".jj/paseo/worktree.json"), "utf8"),
