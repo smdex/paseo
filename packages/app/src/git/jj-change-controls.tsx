@@ -157,6 +157,11 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
   );
   const header = useMemo(() => ({ title }), [title]);
   const submit = useCallback(() => void model.submit(), [model]);
+  const selectChange = useCallback(
+    (selection: { changeId: string; label: string; commitId?: string }) =>
+      model.selectChange(selection),
+    [model],
+  );
   const close = useCallback(() => {
     if (model.getState().status !== "pending") onClose();
   }, [model, onClose]);
@@ -191,6 +196,16 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
           </Field>
         ) : (
           <View>
+            {state.targetChangeId && state.targetChangeLabel ? (
+              <View testID="jj-selected-change">
+                <Text style={styles.identity}>
+                  {state.targetChangeId.slice(0, 12)} {state.targetChangeLabel}
+                </Text>
+                {state.targetCommitId ? (
+                  <Text style={styles.identity}>{state.targetCommitId.slice(0, 12)}</Text>
+                ) : null}
+              </View>
+            ) : null}
             {commits.status === "loaded" ? (
               commits.data.commits
                 .filter((commit) =>
@@ -201,20 +216,22 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
                 .map((commit) => (
                   <ChangeSelection
                     key={commit.sha}
-                    changeId={snapshot.mode === "new-on" ? commit.sha : commit.changeId!}
+                    changeId={commit.changeId!}
+                    commitId={snapshot.mode === "new-on" ? commit.sha : null}
                     label={commit.subject || commit.shortSha}
                     testID={
                       snapshot.mode === "new-on"
-                        ? `jj-newon-select-${commit.shortSha}`
-                        : `jj-edit-select-${commit.shortSha}`
+                        ? `jj-newon-select-${commit.sha}`
+                        : `jj-edit-select-${commit.changeId}`
                     }
                     selected={
-                      state.targetChangeId ===
-                      (snapshot.mode === "new-on" ? commit.sha : commit.changeId)
+                      snapshot.mode === "new-on"
+                        ? state.targetCommitId === commit.sha
+                        : state.targetChangeId === commit.changeId
                     }
                     size={size}
                     disabled={pending}
-                    select={model.selectChange}
+                    select={selectChange}
                   />
                 ))
             ) : (
@@ -255,6 +272,7 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
 
 function ChangeSelection({
   changeId,
+  commitId,
   label,
   testID,
   selected,
@@ -263,14 +281,18 @@ function ChangeSelection({
   select,
 }: {
   changeId: string;
+  commitId: string | null;
   label: string;
   testID: string;
   selected: boolean;
   size: "sm" | "md";
   disabled: boolean;
-  select(changeId: string): void;
+  select(selection: { changeId: string; label: string; commitId?: string }): void;
 }) {
-  const onPress = useCallback(() => select(changeId), [changeId, select]);
+  const onPress = useCallback(
+    () => select({ changeId, label, ...(commitId ? { commitId } : {}) }),
+    [changeId, commitId, label, select],
+  );
   return (
     <Button
       variant={selected ? "secondary" : "ghost"}
