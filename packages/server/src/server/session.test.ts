@@ -4522,7 +4522,13 @@ describe("session branch suggestions handling", () => {
   test("lists branch suggestions through the workspace git service", async () => {
     const messages: unknown[] = [];
     const branchDetails = [
-      { name: "feature/service", committerDate: 10, hasLocal: true, hasRemote: false },
+      {
+        name: "feature/service",
+        committerDate: 10,
+        hasLocal: true,
+        hasRemote: false,
+        resumeLookupError: "Saved jj Resume change could not be resolved",
+      },
     ];
     const workspaceGitService = {
       getSnapshot: vi.fn(),
