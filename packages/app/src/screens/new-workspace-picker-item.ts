@@ -75,6 +75,7 @@ function branchPickerRef(detail: BranchPickerDetail, kind: "local" | "remote"): 
 interface RefPickerSearchInput {
   status: CheckoutStatusResponse["payload"] | null | undefined;
   enabled: boolean;
+  supportsJjPrWorkspace?: boolean;
 }
 
 export function refPickerBackend({ status, enabled }: RefPickerSearchInput) {
@@ -84,15 +85,21 @@ export function refPickerBackend({ status, enabled }: RefPickerSearchInput) {
 export function canSearchRefPickerChangeRequests({
   status,
   enabled,
+  supportsJjPrWorkspace,
 }: RefPickerSearchInput): boolean {
-  return enabled && status?.isGit === true && status.vcs !== "jj";
+  return (
+    enabled && status?.isGit === true && (status.vcs !== "jj" || supportsJjPrWorkspace === true)
+  );
 }
 
 export function refPickerChangeRequests(
   status: CheckoutStatusResponse["payload"] | null | undefined,
   items: ForgeSearchItem[] | undefined,
+  supportsJjPrWorkspace?: boolean,
 ): ForgeSearchItem[] {
-  return canSearchRefPickerChangeRequests({ status, enabled: true }) ? (items ?? []) : [];
+  return canSearchRefPickerChangeRequests({ status, enabled: true, supportsJjPrWorkspace })
+    ? (items ?? [])
+    : [];
 }
 
 function hasExactJjBookmarkRefs(detail: BranchPickerDetail): boolean {

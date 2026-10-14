@@ -146,6 +146,21 @@ describe("wire schema compatibility", () => {
     });
   });
 
+  test("native PR workspace capability is optional and old feature parsers ignore it", () => {
+    const older = { status: "server_info", serverId: "host", features: { checkoutJj: true } };
+    expect(
+      ServerInfoStatusPayloadSchema.parse(older).features?.checkoutJjPrWorkspace,
+    ).toBeUndefined();
+    const current = { ...older, features: { ...older.features, checkoutJjPrWorkspace: true } };
+    expect(ServerInfoStatusPayloadSchema.parse(current).features?.checkoutJjPrWorkspace).toBe(true);
+    const previous = z.object({
+      status: z.literal("server_info"),
+      serverId: z.string(),
+      features: z.object({ checkoutJj: z.boolean().optional() }).optional(),
+    });
+    expect(previous.parse(current).features).toEqual({ checkoutJj: true });
+  });
+
   test("assistant timeline message ids are optional on the wire", () => {
     expect(
       AgentTimelineItemPayloadSchema.parse({

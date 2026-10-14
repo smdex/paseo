@@ -145,6 +145,32 @@ test("a failed agent startup retries only that stage with the reserved IDs", asy
   expect(attempts).toBe(2);
 });
 
+test("a verified PR source failure retries the same workspace identity and replays its success", async () => {
+  const f = await fixture();
+  f.input.hasAgent = false;
+  f.input.hasPrompt = false;
+  let attempts = 0;
+  f.input.provision = async (id) => {
+    expect(id).toBe(workspace.id);
+    attempts++;
+    if (attempts === 1)
+      throw Object.assign(new Error("PR lookup unavailable; retry"), {
+        code: "workspace_source_unavailable",
+      });
+    return { workspace };
+  };
+  expect(await f.service.create(f.input)).toMatchObject({
+    phase: "failed",
+    failedStage: "workspace",
+    outcomeUnknown: false,
+    errorCode: "workspace_source_unavailable",
+  });
+  const completed = await new CreationService(f.directory, silentLogger).create(f.input);
+  expect(completed).toMatchObject({ phase: "completed", workspace });
+  expect(await f.service.create(f.input)).toEqual(completed);
+  expect(attempts).toBe(2);
+});
+
 test("an uncertain prompt outcome never resends or removes its workspace and agent", async () => {
   const f = await fixture();
   let prompts = 0;

@@ -674,10 +674,12 @@ export async function getJjForgeRepositoryContext(
   const checkpoint = await readJjCheckpoint(facts.identity.workspaceRoot, context?.paseoHome);
   if (checkpoint) validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
   const mapping = checkpoint?.publication;
+  const remoteSelection = mapping ?? checkpoint?.forgeRemote;
   let remote = facts.remotes.length === 1 ? facts.remotes[0] : undefined;
-  if (mapping) {
+  if (remoteSelection) {
     remote = facts.remotes.find(
-      (entry) => entry.name === mapping.remoteName && entry.url === mapping.remoteUrl,
+      (entry) =>
+        entry.name === remoteSelection.remoteName && entry.url === remoteSelection.remoteUrl,
     );
   }
   const location = remote ? parseGitRemoteLocation(remote.url) : null;
@@ -2340,10 +2342,17 @@ interface JjPublicationRemoteInput {
 async function resolveJjPublicationRemote(input: JjPublicationRemoteInput): Promise<JjRemoteInfo> {
   const { cwd, bookmark, checkpoint, context, expectedHead } = input;
   const mapping = checkpoint?.publication;
+  const selection = mapping ?? checkpoint?.forgeRemote;
   const remotes = await listJjRemotes(cwd, context);
-  const mappedRemote = mapping
-    ? remotes.find((entry) => entry.name === mapping.remoteName && entry.url === mapping.remoteUrl)
+  const mappedRemote = selection
+    ? remotes.find(
+        (entry) => entry.name === selection.remoteName && entry.url === selection.remoteUrl,
+      )
     : undefined;
+  if (selection && !mappedRemote)
+    throw new JjPushTargetError(
+      "The saved forge remote changed or disappeared. Reconcile it on the host before pushing.",
+    );
   if (
     mapping &&
     (!mappedRemote || mapping.localBookmark !== bookmark || mapping.remoteBookmark !== bookmark)
@@ -2495,7 +2504,7 @@ async function captureJjPullRequestPublication(
     throw new JjPushTargetError(
       "The publication bookmark differs from the local bookmark. Reconcile the publication mapping on the host before creating a pull request.",
     );
-  const mappedName = checkpoint?.publication?.remoteName;
+  const mappedName = checkpoint?.publication?.remoteName ?? checkpoint?.forgeRemote?.remoteName;
   const remote = facts.remotes.find(
     (entry) => entry.url === repository.remoteUrl && (!mappedName || entry.name === mappedName),
   );

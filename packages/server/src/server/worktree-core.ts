@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { createNameId } from "mnemonic-id";
 
-import type { ForgeService } from "../services/forge-service.js";
+import type { ForgeService, ForgeRepositoryContext } from "../services/forge-service.js";
 import {
   createWorktree,
   slugify,
@@ -10,8 +10,8 @@ import {
 } from "../utils/worktree.js";
 import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
 import { getJjStatus } from "../utils/checkout-jj.js";
-import { createJjWorktree } from "../utils/worktree-jj.js";
-import { NotSupportedOnJjError, resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { createJjWorktree, JjWorkspaceSourceError } from "../utils/worktree-jj.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import {
   resolveWorktreeCreationIntent,
   type ResolveWorktreeCreationIntentInput,
@@ -98,15 +98,13 @@ async function createWorktreeCoreWithPriority(
     };
   }
 
-  const forge =
-    backend === "jj"
-      ? { forge: "github", service: deps.github }
-      : await resolveForge(repoRoot, deps, intentInput);
-  const intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
-    forge: forge.forge,
-    forgeService: forge.service,
-    resolveDefaultBranch: (root) => resolveDefaultBranch(input, deps, root),
-  });
+  const { intent, forgeRepository } = await resolveCreationSource(
+    input,
+    deps,
+    intentInput,
+    repoRoot,
+    backend,
+  );
   let normalizedSlug: string;
 
   switch (intent.kind) {
@@ -132,6 +130,7 @@ async function createWorktreeCoreWithPriority(
       cwd: backend === "jj" ? input.cwd : repoRoot,
       worktreeSlug: normalizedSlug,
       source: intent,
+      forgeRepository,
       runSetup: input.runSetup ?? true,
       paseoHome: input.paseoHome,
       worktreesRoot: input.worktreesRoot,
@@ -146,15 +145,50 @@ async function createWorktreeCoreWithPriority(
   };
 }
 
+async function resolveCreationSource(
+  input: CreateWorktreeCoreInput,
+  deps: CreateWorktreeCoreDeps,
+  intentInput: ResolveWorktreeCreationIntentInput,
+  repoRoot: string,
+  backend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
+): Promise<{ intent: WorktreeCreationIntent; forgeRepository?: ForgeRepositoryContext }> {
+  const nativePr =
+    backend === "jj" && (input.checkoutSource !== undefined || input.githubPrNumber !== undefined);
+  let forge: { forge: string; service: ForgeService; repository?: ForgeRepositoryContext };
+  let intent: WorktreeCreationIntent;
+  try {
+    forge =
+      backend === "jj" && !nativePr
+        ? { forge: "github", service: deps.github }
+        : await resolveForge(backend === "jj" ? input.cwd : repoRoot, deps, intentInput);
+    if (nativePr && !forge.repository)
+      throw new Error("Select an unambiguous jj forge repository before opening a pull request");
+    intent = await resolveWorktreeCreationIntent(
+      nativePr ? { ...intentInput, refName: undefined } : intentInput,
+      repoRoot,
+      {
+        forge: forge.forge,
+        forgeService: forge.service,
+        repository: forge.repository,
+        resolveDefaultBranch: (root) => resolveDefaultBranch(input, deps, root),
+      },
+    );
+  } catch (error) {
+    if (nativePr) throw new JjWorkspaceSourceError(error);
+    throw error;
+  }
+  return { intent, forgeRepository: forge.repository };
+}
+
 /**
  * Backend routing for worktree creation: jj repositories get jj workspaces
- * (checkout-change-request / checkout-github-pr intents are deferred on jj and
- * fail typed); git repositories keep the existing worktree path unchanged.
+ * with the same creation intent and registry lifecycle as Git worktrees.
  */
 async function createWorktreeForBackend(input: {
   cwd: string;
   worktreeSlug: string;
   source: Parameters<typeof createWorktree>[0]["source"];
+  forgeRepository?: ForgeRepositoryContext;
   runSetup: boolean;
   onCreated?: (worktree: CreatedWorktree) => Promise<void>;
   logger?: Pick<Logger, "warn">;
@@ -162,13 +196,6 @@ async function createWorktreeForBackend(input: {
   worktreesRoot?: string;
 }): Promise<CreatedWorktree> {
   if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
-    // Change-request / PR checkout intents are deferred on jj (plan §7): fail
-    // typed BEFORE any process spawns.
-    if (input.source.kind !== "branch-off" && input.source.kind !== "checkout-branch") {
-      throw new NotSupportedOnJjError(
-        `Worktree source "${input.source.kind}" is not supported on jj repositories yet`,
-      );
-    }
     const identity = resolveJjRepoIdentity(input.cwd);
     if (!identity) throw new Error("Unable to resolve jj repository identity");
     return createJjWorktree({ ...input, cwd: identity.workspaceRoot });
@@ -180,7 +207,7 @@ async function resolveForge(
   repoRoot: string,
   deps: CreateWorktreeCoreDeps,
   intentInput: ResolveWorktreeCreationIntentInput,
-): Promise<{ forge: string; service: ForgeService }> {
+): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext }> {
   const resolution = await deps.workspaceGitService?.resolveForge(repoRoot);
   if (!resolution) {
     if (intentInput.checkoutSource?.forge && intentInput.checkoutSource.forge !== "github") {
@@ -189,7 +216,11 @@ async function resolveForge(
     // No recognized remote: fall back to GitHub, the wire-default forge.
     return { forge: "github", service: deps.github };
   }
-  return { forge: resolution.forge, service: resolution.service };
+  return {
+    forge: resolution.forge,
+    service: resolution.service,
+    repository: resolution.repository,
+  };
 }
 
 async function resolveDefaultBranch(
@@ -223,9 +254,6 @@ export async function resolveWorktreeRepoRoot(
   }
 
   if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
-    if (input.checkoutSource !== undefined || input.githubPrNumber !== undefined) {
-      throw new NotSupportedOnJjError("Change-request checkout");
-    }
     const identity = resolveJjRepoIdentity(input.cwd);
     if (!identity) throw new Error("Unable to resolve jj repository identity");
     return identity.primaryRoot;

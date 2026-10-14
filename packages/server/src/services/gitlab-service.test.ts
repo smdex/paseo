@@ -607,6 +607,71 @@ describe("createGitLabService", () => {
     });
   });
 
+  it("resolves the exact native fork clone URLs on the selected host without Git discovery", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitlab.example.com",
+      sourceRepository: "target/group/repo",
+      targetRepository: "target/group/repo",
+      headRef: "main",
+      headSha: null,
+      remoteHeadSha: null,
+    };
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "mr")
+          return ok(JSON.stringify({ ...OPEN_MR, source_project_id: 202, target_project_id: 101 }));
+        if (args[0] === "api" && args[1] === "projects/202")
+          return ok(
+            JSON.stringify({
+              id: 202,
+              path_with_namespace: "fork/group/repo",
+              ssh_url_to_repo: "git@gitlab.example.com:fork/group/repo.git",
+              http_url_to_repo: "https://gitlab.example.com/fork/group/repo.git",
+            }),
+          );
+        throw new Error(`Unexpected forge request ${args.join(" ")}`);
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("Git discovery forbidden");
+        },
+      },
+    );
+    expect(
+      await service.getPullRequestCheckoutTarget({
+        cwd: "/native-secondary",
+        number: 14,
+        repository,
+      }),
+    ).toMatchObject({
+      isCrossRepository: true,
+      headOwnerLogin: "fork/group",
+      headRepositorySshUrl: "git@gitlab.example.com:fork/group/repo.git",
+      headRepositoryUrl: "https://gitlab.example.com/fork/group/repo.git",
+    });
+    expect(calls.at(-1)).toEqual(["api", "projects/202", "--hostname", repository.host]);
+  });
+
+  it("refuses a native MR checkout when source project identity is unavailable", async () => {
+    const { service } = makeService(() =>
+      ok(JSON.stringify({ ...OPEN_MR, source_project_id: null })),
+    );
+    await expect(
+      service.getPullRequestCheckoutTarget({
+        cwd: "/native",
+        number: 14,
+        repository: {
+          host: "gitlab.example.com",
+          targetRepository: "group/repo",
+          sourceRepository: "group/repo",
+          headRef: "main",
+          headSha: null,
+          remoteHeadSha: null,
+        },
+      }),
+    ).rejects.toThrow("source and target projects");
+  });
+
   it("creates a merge request and parses the URL and iid from glab output", async () => {
     const { service, calls } = makeService(() =>
       ok(
