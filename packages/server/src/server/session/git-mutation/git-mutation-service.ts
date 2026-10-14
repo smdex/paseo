@@ -7,9 +7,10 @@ import type {
 import {
   dispatchExecuteBranchCheckout,
   dispatchExecuteCreateBranchFromBase,
-  NotSupportedOnJjError,
   resolveEffectiveBackend,
+  type JjSwitchIntent,
 } from "../../../utils/checkout-dispatch.js";
+import type { CheckoutContext } from "../../../utils/checkout-git.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-session.js";
 
@@ -25,7 +26,11 @@ import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-ses
  * session as loose callbacks.
  */
 export interface GitMutationService {
-  checkoutExistingBranch(cwd: string, branch: string): Promise<CheckoutExistingBranchResult>;
+  checkoutExistingBranch(
+    cwd: string,
+    branch: string,
+    switchOptions?: { intent?: JjSwitchIntent; context?: CheckoutContext },
+  ): Promise<CheckoutExistingBranchResult>;
   createBranchFromBase(params: {
     cwd: string;
     baseBranch: string;
@@ -95,23 +100,24 @@ export function createGitMutationService(deps: {
   }
 
   return {
-    async checkoutExistingBranch(cwd, branch) {
-      // jj is checked BEFORE validation and the clean-tree gate: switching is
-      // deferred on jj (typed error), and jj's dirty-workspace model must
-      // never surface the git-shaped "commit or stash" message that the app
-      // answers with a stash offer jj rejects.
-      if ((await resolveEffectiveBackend(cwd)) === "jj") {
-        throw new NotSupportedOnJjError(
-          "Switching bookmarks is not supported on jj repositories yet; use jj new in a terminal",
-        );
-      }
+    async checkoutExistingBranch(cwd, branch, switchOptions) {
       assertSafeGitRef(branch, "branch");
       const resolution = await workspaceGitService.validateBranchRef(cwd, branch);
       if (resolution.kind === "not-found") {
         throw new Error(`Branch not found: ${branch}`);
       }
-      await ensureCleanWorkingTree(cwd);
-      const result = await dispatchExecuteBranchCheckout(cwd, resolution);
+      // jj snapshots the working copy into the change being left — the git
+      // clean-tree gate and its "commit or stash" message never apply
+      // (jjSwitchBookmark refuses only untracked files that would not survive).
+      if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+        await ensureCleanWorkingTree(cwd);
+      }
+      const result = await dispatchExecuteBranchCheckout(
+        cwd,
+        resolution,
+        switchOptions?.intent,
+        switchOptions?.context,
+      );
       await notifyGitMutation(cwd, "switch-branch", { invalidateForge: true });
       return result;
     },

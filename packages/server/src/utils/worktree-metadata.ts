@@ -337,10 +337,10 @@ export function writePaseoWorktreeRuntimeMetadata(
  */
 export function updatePaseoWorktreeJjBookmark(
   worktreeRoot: string,
-  rename: { from: string; to: string },
+  rename: { from: string | null; to: string },
 ): void {
   const current = readPaseoWorktreeMetadata(worktreeRoot);
-  if (!current || current.version !== 2 || current.jjBookmark !== rename.from) {
+  if (!current || current.version !== 2 || (current.jjBookmark ?? null) !== rename.from) {
     return;
   }
   writePaseoWorktreeMetadataFile(worktreeRoot, { ...current, jjBookmark: rename.to });

@@ -7677,6 +7677,74 @@ test("checkpointed jj actions refuse unsupported hosts before sending intent", a
   expect(mock.sent).toEqual([]);
 });
 
+test("jj P2 captured intents refuse a checkpoint-only daemon", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-p2-compat",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true } });
+  await connecting;
+  await expect(
+    client.checkoutSwitchBranch("/native", "main", "switch", {
+      mode: "new-on",
+      targetCommitId: "captured-commit",
+      expectedChangeId: "captured-change",
+    }),
+  ).rejects.toThrow("Update the host");
+  await expect(
+    client.newChange({ cwd: "/native", targetCommitId: "captured-commit" }),
+  ).rejects.toThrow("Update the host");
+  expect(mock.sent).toEqual([]);
+});
+
+test("jj P2 bookmark intent preserves the legacy requestId position and exact capture", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-p2-wire",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjGraphSelections: true } });
+  await connecting;
+  const result = client.checkoutSwitchBranch("/native/sub", "main", "captured-switch", {
+    mode: "new-on",
+    targetCommitId: "exact-commit",
+    expectedChangeId: "old-change",
+    acknowledgeRewrites: true,
+  });
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout_switch_branch_request",
+    cwd: "/native/sub",
+    branch: "main",
+    requestId: "captured-switch",
+    mode: "new-on",
+    targetCommitId: "exact-commit",
+    expectedChangeId: "old-change",
+    acknowledgeRewrites: true,
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "checkout_switch_branch_response",
+      payload: {
+        cwd: "/native/sub",
+        branch: "main",
+        success: true,
+        error: null,
+        requestId: "captured-switch",
+      },
+    }),
+  );
+  expect((await result).success).toBe(true);
+});
+
 test("checkpointed jj Edit sends captured stable IDs and handles a visible refusal", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({

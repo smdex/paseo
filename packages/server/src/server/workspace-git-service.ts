@@ -970,18 +970,25 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     );
   }
 
-  suggestBranchesForCwd(
+  async suggestBranchesForCwd(
     cwd: string,
     options?: WorkspaceGitBranchSuggestionsOptions,
     readOptions?: WorkspaceGitReadOptions,
   ): Promise<WorkspaceGitBranchSuggestion[]> {
     this.assertNotDisposed();
     const normalizedCwd = resolve(cwd);
+    // Captured jj targets and saved-WIP offers must follow the latest selection.
+    if ((await resolveEffectiveBackend(normalizedCwd)) === "jj") {
+      readOptions = { force: true, reason: "jj-branch-selection" };
+    }
     const query = options?.query ?? "";
     const limit = options?.limit;
     const key = JSON.stringify(["branch-suggestions", normalizedCwd, query, limit ?? null]);
     return this.readAuxiliaryCache(this.branchSuggestionsCache, key, readOptions, () =>
-      this.deps.listBranchSuggestions(normalizedCwd, options),
+      this.deps.listBranchSuggestions(normalizedCwd, options, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      }),
     );
   }
 

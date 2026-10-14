@@ -325,20 +325,27 @@ describeIfJj("jj branch creation from base", () => {
   });
 });
 
-describeIfJj("jj branch switching deferral", () => {
-  it("rejects branch checkout with the typed deferral error before any jj edit", async () => {
+describeIfJj("jj branch switching", () => {
+  beforeEach(() => enableJjDispatch());
+
+  it("defaults to New on the captured bookmark without editing its revision", async () => {
     const fixture = createScratchJjRepo({ files: { "a.txt": "a\n" } });
     disposables.push(fixture.dispose);
     fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["bookmark", "create", "feature", "-r", "@"]);
 
     const { dispatchExecuteBranchCheckout } = await import("./checkout-dispatch.js");
     const before = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
-    await expect(
-      dispatchExecuteBranchCheckout(fixture.repoDir, { kind: "local", name: "main" }),
-    ).rejects.toBeInstanceOf(NotSupportedOnJjError);
-    // The working copy still points where it did — no jj edit ran.
+    const base = fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    await dispatchExecuteBranchCheckout(fixture.repoDir, { kind: "local", name: "main" });
     const after = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
-    expect(after).toBe(before);
+    expect(after).not.toBe(before);
+    expect(fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim()).toBe(
+      base,
+    );
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      base,
+    );
   });
 
   it("keeps the git path unchanged for git repositories", async () => {
@@ -350,8 +357,7 @@ describeIfJj("jj branch switching deferral", () => {
     }
 
     const { dispatchExecuteBranchCheckout } = await import("./checkout-dispatch.js");
-    // A git repo resolves through the git implementation (not-found branch
-    // yields the git error shape, never the jj deferral).
+    // A git repo resolves through the git implementation, never a jj mutation.
     await expect(
       dispatchExecuteBranchCheckout(dir, { kind: "local", name: "ghost" }),
     ).rejects.not.toBeInstanceOf(NotSupportedOnJjError);
@@ -373,7 +379,11 @@ describeIfJj("jj dispatch uses daemon placement for ownership", () => {
       source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
     });
     fixture.jj(["bookmark", "delete", "feature"]);
-    writePaseoWorktreeMetadata(created.worktreePath, { baseRefName: "main" });
+    writePaseoWorktreeMetadata(created.worktreePath, {
+      baseRefName: "main",
+      baseRef: readPaseoWorktreeMetadata(created.worktreePath)?.baseRef,
+      jjBookmark: null,
+    });
     const cwd = join(created.worktreePath, "subproject");
     mkdirSync(cwd);
     const context = { worktreesRoot };

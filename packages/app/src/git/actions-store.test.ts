@@ -326,6 +326,9 @@ describe("native change form", () => {
       edit: async () => {
         throw new Error("Unexpected Edit");
       },
+      newOn: async () => {
+        throw new Error("Unexpected New change");
+      },
       refresh: async () => {
         refreshed++;
       },
@@ -339,7 +342,7 @@ describe("native change form", () => {
         cwd: "/native/sub",
         message: "My draft",
         expectedChangeId: "captured",
-        acknowledgeRewrites: true,
+        acknowledgeRewrites: false,
       },
     ]);
     pending.reject(new Error("Current change moved; reopen"));
@@ -351,8 +354,9 @@ describe("native change form", () => {
       status: "error",
       error: "Current change moved; reopen",
       canSubmit: true,
+      needsRewriteApproval: false,
     });
-    expect(refreshed).toBe(0);
+    expect(refreshed).toBe(1);
     model.close();
   });
 
@@ -367,6 +371,9 @@ describe("native change form", () => {
         edit: async (request) => {
           calls.push(request);
         },
+        newOn: async () => {
+          throw new Error("Unexpected New change");
+        },
         refresh: async () => {},
       },
     );
@@ -378,11 +385,81 @@ describe("native change form", () => {
         cwd: "/native",
         changeId: "stable selected change",
         expectedChangeId: "current",
-        acknowledgeRewrites: true,
+        acknowledgeRewrites: false,
       },
     ]);
     expect(model.getState().status).toBe("success");
     expect(model.getState().canSubmit).toBe(false);
+    model.close();
+  });
+
+  it("requires visible known-scope approval and binds it to the captured selection", async () => {
+    const calls: Parameters<JjChangeFormPorts["edit"]>[0][] = [];
+    const warning =
+      "Native rewrite approval required: selected; 1 descendant; shared workspaces: true; published history: true.";
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "edit" },
+      {
+        describe: async () => {
+          throw new Error("Unexpected Describe");
+        },
+        newOn: async () => {
+          throw new Error("Unexpected New-on");
+        },
+        edit: async (input) => {
+          calls.push(input);
+          if (!input.acknowledgeRewrites) throw new Error(warning);
+        },
+        refresh: async () => {},
+      },
+    );
+    model.selectChange("selected");
+    await model.submit();
+    expect(model.getState().error).toBe(warning);
+    expect(model.getState().needsRewriteApproval).toBe(true);
+    model.selectChange("another selection");
+    expect(model.getState().needsRewriteApproval).toBe(false);
+    await model.submit();
+    await model.submit();
+    expect(calls.map((call) => [call.changeId, call.acknowledgeRewrites])).toEqual([
+      ["selected", false],
+      ["another selection", false],
+      ["another selection", true],
+    ]);
+    expect(model.getState().status).toBe("success");
+    model.close();
+  });
+
+  it("new-on submits the captured history commit with the working-copy pin", async () => {
+    const calls: Parameters<JjChangeFormPorts["newOn"]>[0][] = [];
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "new-on" },
+      {
+        describe: async () => {
+          throw new Error("Unexpected Describe");
+        },
+        edit: async () => {
+          throw new Error("Unexpected Edit");
+        },
+        newOn: async (request) => {
+          calls.push(request);
+        },
+        refresh: async () => {},
+      },
+    );
+    expect(model.getState().canSubmit).toBe(false);
+    model.selectChange("captured commit sha");
+    expect(model.getState().canSubmit).toBe(true);
+    await model.submit();
+    expect(calls).toEqual([
+      {
+        cwd: "/native",
+        targetCommitId: "captured commit sha",
+        expectedChangeId: "current",
+        acknowledgeRewrites: false,
+      },
+    ]);
+    expect(model.getState().status).toBe("success");
     model.close();
   });
 });
