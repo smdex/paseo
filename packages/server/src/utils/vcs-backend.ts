@@ -85,14 +85,11 @@ export function resetJjRuntimeCache(): void {
 }
 
 /**
- * Opt-in activation switch. Detected jj repositories refuse VCS operations
- * when disabled; they never fall back to Git discovery.
+ * Default-on activation switch. Detected jj repositories refuse VCS operations
+ * when explicitly disabled; they never fall back to Git discovery.
  */
 export function isJjDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  // Opt-in until the Phase F activation flips the default: every jj path
-  // (dispatch, observation, advertisement) stays dormant unless explicitly
-  // enabled, so incomplete surfaces are never exposed to ordinary users.
-  return env.PASEO_JJ_DISPATCH === "1";
+  return env.PASEO_JJ_DISPATCH !== "0";
 }
 
 /**

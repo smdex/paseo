@@ -108,7 +108,7 @@ export class JjUnavailableError extends Error {
   ) {
     super(
       `This project uses Jujutsu (jj), but jj is unavailable: ${reason}. ` +
-        "Install jj >= 0.45.0 on the daemon's PATH or unset PASEO_DISABLE_JJ.",
+        "Install jj >= 0.45.0 on the daemon's PATH, or remove PASEO_DISABLE_JJ=1 / PASEO_JJ_DISPATCH=0 to re-enable it.",
     );
     this.name = "JjUnavailableError";
   }
@@ -135,7 +135,7 @@ export async function resolveEffectiveBackend(cwd: string): Promise<VcsBackend |
     return "git-default";
   }
   if (!isJjDispatchEnabled()) {
-    throw new JjUnavailableError(null, "jj dispatch is disabled; set PASEO_JJ_DISPATCH=1");
+    throw new JjUnavailableError(null, "jj support is disabled by PASEO_JJ_DISPATCH=0");
   }
   const runtime = await resolveJjRuntime();
   if (!runtime.ok) {
