@@ -620,20 +620,29 @@ describe("ForgeService", () => {
           ...input,
           repository: { ...repository, remoteHeadSha: null },
         }),
-      ).toBeNull();
+      ).toMatchObject({ number: 42, state: "open" });
       expect(
         await service.getCurrentPullRequestStatus({
           ...input,
-          repository: { ...repository, headSha, remoteHeadSha: null },
-          headSha,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
+          force: true,
+          reason: "terminal-head-proof",
+        }),
+      ).toMatchObject({ number: 42, state: "open" });
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
         }),
       ).toMatchObject({ headRefName: repository.headRef });
       state = "MERGED";
       expect(
         await service.getCurrentPullRequestStatus({
           ...input,
-          repository: { ...repository, headSha, remoteHeadSha: null },
-          headSha,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
           force: true,
           reason: "terminal-head-proof",
         }),
@@ -642,7 +651,7 @@ describe("ForgeService", () => {
         (
           await service.getCurrentPullRequestStatus({
             ...input,
-            repository: { ...repository, headSha, remoteHeadSha: headSha },
+            repository: { ...repository, headSha, remoteHeadSha: null },
             headSha,
           })
         )?.state,

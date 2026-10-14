@@ -1036,19 +1036,16 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         (mr) =>
           mr.source_project_id === source.id &&
           mr.target_project_id === target.id &&
-          mr.sha === repository.headSha &&
-          (mapMergeRequestState(mr.state) === "open" ||
-            repository.remoteHeadSha === repository.headSha),
+          mr.source_branch === repository.headRef &&
+          (mapMergeRequestState(mr.state) === "open" || mr.sha === repository.headSha),
       );
       if (mergeRequests.length >= 100 || candidates.length !== 1) return null;
       const match = candidates[0];
       const view = await viewMergeRequest(cwd, String(match.iid), repository);
-      return view.sha === repository.headSha &&
-        view.source_branch === repository.headRef &&
+      return view.source_branch === repository.headRef &&
         view.source_project_id === match.source_project_id &&
         view.target_project_id === match.target_project_id &&
-        (mapMergeRequestState(view.state) === "open" ||
-          repository.remoteHeadSha === repository.headSha)
+        (mapMergeRequestState(view.state) === "open" || view.sha === repository.headSha)
         ? view
         : null;
     }
