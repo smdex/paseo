@@ -480,6 +480,8 @@ interface ChangesRepositoryToolbarModel {
   pullRequest: ChangesPullRequestLinkModel | null;
   serverId: string;
   vcs?: "git" | "jj" | null;
+  /** jj: change ID of the working-copy change (switch intent CAS pin). */
+  changeId?: string | null;
   workspaceId?: string | null;
 }
 
@@ -516,6 +518,8 @@ interface BuildChangesHeaderModelInput {
   selectedDiffStat: { additions: number; deletions: number } | null;
   serverId: string;
   vcs?: "git" | "jj" | null;
+  /** jj: change ID of the working-copy change (switch intent CAS pin). */
+  changeId?: string | null;
   workspaceId?: string | null;
 }
 
@@ -533,6 +537,7 @@ function buildChangesHeaderModel(input: BuildChangesHeaderModelInput): {
         : null,
       serverId: input.serverId,
       vcs: input.vcs,
+      changeId: input.changeId,
       workspaceId: input.workspaceId,
     },
     comparison: {
@@ -660,6 +665,7 @@ function ChangesRepositoryToolbar({
           workspaceDirectory={model.cwd}
           isGitCheckout
           vcs={model.vcs}
+          currentChangeId={model.changeId}
           testID="changes-branch-switcher"
         />
       </ChangesToolbarLeading>
@@ -1949,6 +1955,7 @@ export function ChangesSurface({
         selectedDiffStat,
         serverId,
         vcs,
+        changeId: status?.changeId ?? null,
         workspaceId,
       }),
     [
@@ -1966,6 +1973,7 @@ export function ChangesSurface({
       pullRequestStatus,
       selectedDiffStat,
       serverId,
+      status,
       vcs,
       toolbarMode,
       workspaceId,

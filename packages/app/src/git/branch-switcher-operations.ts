@@ -9,7 +9,10 @@ export function createBranchSwitcherOperations(client: DaemonClient, cwd: string
     listPaseoStashes: () => client.stashList(cwd, { paseoOnly: true }),
     saveStash: (branch: string | undefined) => client.stashSave(cwd, { branch }),
     popStash: (stashIndex: number) => client.stashPop(cwd, stashIndex),
-    switchBranch: (branch: string) => client.checkoutSwitchBranch(cwd, branch),
+    switchBranch: (
+      branch: string,
+      jjIntent?: Parameters<DaemonClient["checkoutSwitchBranch"]>[3],
+    ) => client.checkoutSwitchBranch(cwd, branch, undefined, jjIntent),
   };
 }
 

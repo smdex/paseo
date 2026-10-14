@@ -20,6 +20,8 @@ interface BranchSwitcherProps {
   isGitCheckout: boolean;
   /** Backend of the checkout; stash affordances are skipped on jj. */
   vcs?: "git" | "jj" | null;
+  /** jj: change ID of the current working-copy change (switch precondition, not a cross-process lock). */
+  currentChangeId?: string | null;
   testID?: string;
 }
 
@@ -35,6 +37,7 @@ export function BranchSwitcher({
   workspaceDirectory,
   isGitCheckout,
   vcs = null,
+  currentChangeId,
   testID = "workspace-header-branch-switcher",
 }: BranchSwitcherProps) {
   const { t } = useTranslation();
@@ -44,18 +47,20 @@ export function BranchSwitcher({
   const toast = useToast();
   const queryClient = useQueryClient();
 
-  const { branchOptions, isOpen, setIsOpen, handleBranchSelect } = useBranchSwitcher({
-    client,
-    normalizedServerId: serverId,
-    normalizedWorkspaceId: workspaceId,
-    workspaceDirectory,
-    currentBranchName,
-    isGitCheckout,
-    vcs,
-    isConnected,
-    toast,
-    queryClient,
-  });
+  const { branchOptions, branchLoadMessage, isOpen, isSwitching, setIsOpen, handleBranchSelect } =
+    useBranchSwitcher({
+      client,
+      normalizedServerId: serverId,
+      normalizedWorkspaceId: workspaceId,
+      workspaceDirectory,
+      currentBranchName,
+      isGitCheckout,
+      vcs,
+      currentChangeId,
+      isConnected,
+      toast,
+      queryClient,
+    });
 
   const handleOpen = useCallback(() => setIsOpen(true), [setIsOpen]);
 
@@ -77,9 +82,10 @@ export function BranchSwitcher({
     [branchLeadingSlot],
   );
 
-  if (!currentBranchName) {
+  if (!currentBranchName && vcs !== "jj") {
     return null;
   }
+  const label = currentBranchName ?? t("branchSwitcher.title");
 
   return (
     <View ref={anchorRef} collapsable={false} style={styles.anchor}>
@@ -87,12 +93,13 @@ export function BranchSwitcher({
         <TooltipTrigger asChild>
           <ToolbarLabelSelectTrigger
             testID={testID}
-            label={currentBranchName}
+            label={isSwitching ? t("workspace.git.actions.jj.saving") : label}
+            disabled={isSwitching}
             open={isOpen}
             onPress={handleOpen}
             accessibilityRole="button"
             accessibilityLabel={t("branchSwitcher.currentBranch", {
-              branchName: currentBranchName,
+              branchName: label,
             })}
           />
         </TooltipTrigger>
@@ -102,12 +109,12 @@ export function BranchSwitcher({
       </Tooltip>
       <Combobox
         options={branchOptions}
-        value={currentBranchName}
+        value={currentBranchName ?? ""}
         onSelect={handleBranchSelect}
         searchable
         placeholder={t("branchSwitcher.placeholder")}
         searchPlaceholder={t("branchSwitcher.searchPlaceholder")}
-        emptyText={t("branchSwitcher.empty")}
+        emptyText={branchLoadMessage ?? t("branchSwitcher.empty")}
         title={t("branchSwitcher.title")}
         open={isOpen}
         onOpenChange={setIsOpen}

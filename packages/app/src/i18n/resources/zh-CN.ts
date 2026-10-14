@@ -847,6 +847,7 @@ export const zhCN: TranslationResources = {
         finishChange: en.workspace.git.actions.finishChange,
         describeChange: en.workspace.git.actions.describeChange,
         editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
         jj: en.workspace.git.actions.jj,
         newChange: {
           label: "新变更",
@@ -1607,6 +1608,15 @@ export const zhCN: TranslationResources = {
     restore: "恢复",
     later: "稍后",
     stashRestored: "Stashed 变更已恢复",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "正在搜索 workspace...",

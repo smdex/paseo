@@ -3,7 +3,7 @@ export interface JjChangeFormSnapshot {
   cwd: string;
   changeId: string;
   description: string;
-  mode: "describe" | "edit";
+  mode: "describe" | "edit" | "new-on";
 }
 export interface JjChangeFormState extends JjChangeFormSnapshot {
   draft: string;
@@ -11,6 +11,7 @@ export interface JjChangeFormState extends JjChangeFormSnapshot {
   status: "idle" | "pending" | "success" | "error";
   error: string | null;
   canSubmit: boolean;
+  needsRewriteApproval: boolean;
 }
 export interface JjChangeFormPorts {
   describe(input: {
@@ -25,6 +26,13 @@ export interface JjChangeFormPorts {
     expectedChangeId: string;
     acknowledgeRewrites: boolean;
   }): Promise<void>;
+  newOn(input: {
+    cwd: string;
+    /** Exact commit the new change starts on (captured from history). */
+    targetCommitId: string;
+    expectedChangeId: string;
+    acknowledgeRewrites: boolean;
+  }): Promise<void>;
   refresh(): Promise<void>;
 }
 export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChangeFormPorts) {
@@ -36,13 +44,20 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
     status: "idle",
     error: null,
     canSubmit: false,
+    needsRewriteApproval: false,
   };
   const listeners = new Set<() => void>();
   function publish(next: JjChangeFormState) {
     if (closed) return;
+    // `targetChangeId` holds the selected history change for edit and the
+    // selected commit sha for new-on; both modes submit a target.
     const valid =
       next.mode === "describe" ? next.draft.trim().length > 0 : next.targetChangeId !== null;
-    state = { ...next, canSubmit: valid && next.status !== "pending" && next.status !== "success" };
+    state = {
+      ...next,
+      canSubmit: valid && next.status !== "pending" && next.status !== "success",
+      needsRewriteApproval: next.error?.startsWith("Native rewrite approval required:") ?? false,
+    };
     for (const listener of listeners) listener();
   }
   publish(state);
@@ -62,6 +77,8 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
     async submit() {
       if (!state.canSubmit) return;
       const submitted = state;
+      // Approval applies only to the visible known scope and this captured intent.
+      const acknowledgeRewrites = submitted.needsRewriteApproval;
       publish({ ...state, status: "pending", error: null });
       try {
         if (submitted.mode === "describe") {
@@ -69,19 +86,28 @@ export function openJjChangeForm(snapshot: JjChangeFormSnapshot, ports: JjChange
             cwd: submitted.cwd,
             message: submitted.draft,
             expectedChangeId: submitted.changeId,
-            acknowledgeRewrites: true,
+            acknowledgeRewrites,
+          });
+        } else if (submitted.mode === "new-on" && submitted.targetChangeId) {
+          await ports.newOn({
+            cwd: submitted.cwd,
+            targetCommitId: submitted.targetChangeId,
+            expectedChangeId: submitted.changeId,
+            acknowledgeRewrites,
           });
         } else if (submitted.targetChangeId) {
           await ports.edit({
             cwd: submitted.cwd,
             changeId: submitted.targetChangeId,
             expectedChangeId: submitted.changeId,
-            acknowledgeRewrites: true,
+            acknowledgeRewrites,
           });
         }
         await ports.refresh();
         publish({ ...state, status: "success" });
       } catch (error) {
+        // A refusal may include native partial results; refresh without hiding the captured draft/error.
+        await ports.refresh().catch(() => undefined);
         publish({
           ...state,
           status: "error",

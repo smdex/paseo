@@ -10,8 +10,6 @@ import type {
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
 import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
-import { NotSupportedOnJjError } from "../../../utils/checkout-dispatch.js";
-import { toCheckoutError } from "../../checkout-git-utils.js";
 import { createGitMutationService } from "./git-mutation-service.js";
 
 // The production module reads only WorkspaceGitService.{validateBranchRef,getSnapshot,
@@ -287,19 +285,29 @@ describe("notifyGitMutation", () => {
 });
 
 test.skipIf(!isJjAvailable())(
-  "jj switching is deferred before dirty-tree validation and never offers stash",
+  "jj switching preserves dirty WIP without the Git clean-tree or stash gate",
   async () => {
     const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
     tempRepos.push(fixture.dir);
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "feature"]).status).toBe(0);
+    const revision = (ref: string, template: string) =>
+      fixture.jj(["log", "--no-graph", "-r", ref, "-T", template]).stdout.trim();
+    const oldChangeId = revision("@", "change_id");
+    const targetCommitId = revision('bookmarks(exact:"main")', "commit_id");
     writeFileSync(join(fixture.repoDir, "dirty.txt"), "dirty\n");
-    const { service, snapshotCalls } = buildService({ isDirty: true });
-    const error = await service
-      .checkoutExistingBranch(fixture.repoDir, "main")
-      .catch((caughtError: unknown) => caughtError);
-    expect(error).toBeInstanceOf(NotSupportedOnJjError);
-    expect(snapshotCalls).toEqual([]);
-    expect(toCheckoutError(error)).toMatchObject({ code: "NOT_ALLOWED" });
-    expect(toCheckoutError(error).message.toLowerCase()).not.toContain("uncommitted");
-    expect(toCheckoutError(error).message.toLowerCase()).not.toContain("stash");
+    const { service, snapshotCalls, invalidateCalls } = buildService({ isDirty: true });
+    await service.checkoutExistingBranch(fixture.repoDir, "main", {
+      intent: { mode: "new-on", expectedChangeId: oldChangeId, targetCommitId },
+      context: { paseoHome: join(fixture.dir, "paseo-home") },
+    });
+    expect(revision("@", "change_id")).not.toBe(oldChangeId);
+    expect(revision("@-", "commit_id")).toBe(targetCommitId);
+    expect(revision('bookmarks(exact:"main")', "commit_id")).toBe(targetCommitId);
+    const savedFile = fixture.jj(["file", "show", "-r", oldChangeId, "dirty.txt"]);
+    expect(savedFile.status).toBe(0);
+    expect(savedFile.stdout).toBe("dirty\n");
+    expect(snapshotCalls).toEqual([{ cwd: fixture.repoDir, force: true, reason: "switch-branch" }]);
+    expect(invalidateCalls).toEqual([{ cwd: fixture.repoDir }]);
   },
 );

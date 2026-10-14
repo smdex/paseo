@@ -851,6 +851,7 @@ export const en = {
         },
         describeChange: { label: "Describe change" },
         editChange: { label: "Edit change" },
+        newChangeOn: { label: "New change on…" },
         jj: {
           rewriteWarning:
             "Native jj rewrites keep the change ID. Describe/Edit and later snapshots can rebase descendants, including shared or published work and changes added externally. Captured heads and operation history are retained; this is not a cross-process lock. Continue?",
@@ -1661,6 +1662,17 @@ export const en = {
     restore: "Restore",
     later: "Later",
     stashRestored: "Stashed changes restored",
+    jjSwitchTitle: "Switch to {{branchName}}",
+    jjSwitchMessage:
+      "A new change starts on this bookmark's captured revision. Your open changes are snapshotted onto the previous change. Later commits on that line can automatically rewrite its descendants.",
+    jjSwitchConfirm: "Switch",
+    jjResumeTitle: "Saved work on {{branchName}}",
+    jjResumeMessage:
+      "This bookmark's line has saved work. Resume it (edit the same change ID; later edits can automatically rewrite descendants, including published or shared commits) or start a new change on the bookmark's captured revision?",
+    jjResumeConfirm: "Resume saved work",
+    jjResumeNewChange: "New change",
+    jjSwitchedResume: "Switched to {{branchName}} — resumed saved work",
+    jjSwitchedNewOn: "Switched to {{branchName}} — new change",
   },
   agentAutocomplete: {
     searchingWorkspace: "Searching workspace...",

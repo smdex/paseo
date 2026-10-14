@@ -2457,6 +2457,22 @@ export const CheckoutSwitchBranchRequestSchema = z.object({
   type: z.literal("checkout_switch_branch_request"),
   cwd: z.string(),
   branch: z.string(),
+  /**
+   * jj bookmark-switch intent, captured when the switcher was opened; every
+   * field is optional and ignored by git-only daemons (old-daemon safe).
+   * `new-on` (default): new change on the captured revision. `resume`:
+   * same-ID edit of the saved WIP.
+   */
+  mode: z.enum(["new-on", "resume"]).optional(),
+  /** Change ID of the saved WIP on the target line (resume). */
+  wipChangeId: z.string().optional(),
+  /** Bookmark revision captured when the switcher opened (new-on CAS). */
+  targetCommitId: z.string().optional(),
+  /** Working-copy change ID captured when the switcher opened. */
+  expectedChangeId: z.string().optional(),
+  /** Optional description for the new working-copy change (new-on). */
+  message: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -2472,6 +2488,12 @@ export const CheckoutNewChangeRequestSchema = z.object({
   cwd: z.string(),
   /** Optional description for the new working-copy change. */
   message: z.string().optional(),
+  /**
+   * Optional exact revision the new change starts on (jj). Captured by the
+   * caller (e.g. "New change on…" from history); omitted means the current
+   * working copy. Ignored by git-only daemons (old-daemon safe).
+   */
+  targetCommitId: z.string().optional(),
   expectedChangeId: z.string().optional(),
   acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
@@ -3799,6 +3821,8 @@ export const ServerInfoStatusPayloadSchema = z
         // gate once the client floor ships jj-aware UI.
         checkoutJj: z.boolean().optional(),
         checkoutJjCheckpoint: z.boolean().optional(),
+        // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.
+        checkoutJjGraphSelections: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
         workspaceMultiplicity: z.boolean().optional(),
         // COMPAT(projectRemove): added in v0.1.97, drop the gate when floor >= v0.1.97.
@@ -6009,6 +6033,10 @@ export const CheckoutSwitchBranchResponseSchema = z.object({
     success: z.boolean(),
     branch: z.string(),
     source: z.enum(["local", "remote"]).optional(),
+    /** jj switch outcome: which native mode ran and the resulting working-copy change. */
+    mode: z.enum(["new-on", "resume"]).optional(),
+    changeId: z.string().nullable().optional(),
+    commitId: z.string().nullable().optional(),
     error: CheckoutErrorSchema.nullable(),
     requestId: z.string(),
   }),
@@ -6128,6 +6156,12 @@ export const BranchSuggestionsResponseSchema = z.object({
           localRef: z.string().optional(),
           remoteRef: z.string().optional(),
           remoteName: z.string().optional(),
+          /**
+           * jj: change ID of the checkpoint-saved WIP on this bookmark's
+           * line, offered as a same-ID Resume. Absent on git and when the
+           * line holds no saved WIP.
+           */
+          wipChangeId: z.string().optional(),
         }),
       )
       .optional(),

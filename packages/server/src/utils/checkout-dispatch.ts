@@ -41,9 +41,8 @@ import {
 } from "./checkout-git.js";
 import { parseGitRevParsePath } from "./git-rev-parse-path.js";
 import { runGitCommand, type RunGitCommand } from "./run-git-command.js";
-import { runJjCommand } from "./run-jj-command.js";
 import { listPaseoWorktrees, type PaseoWorktreeInfo } from "./worktree.js";
-import { jjRevisionResolves, listJjPaseoWorktrees } from "./worktree-jj.js";
+import { listJjPaseoWorktrees } from "./worktree-jj.js";
 import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import {
   getJjCommitFileDiff,
@@ -57,7 +56,7 @@ import {
   getJjWorktreeState,
   hasJjBookmark,
   jjCommit,
-  jjCreateBookmark,
+  jjCreateBranchOnBase,
   jjDescribe,
   jjEdit,
   type JjChangeIntent,
@@ -67,7 +66,9 @@ import {
   jjPull,
   jjPush,
   jjRenameBookmark,
+  jjSwitchBookmark,
   type JjMutationResult,
+  type JjSwitchBookmarkOptions,
   listJjBookmarkSuggestions,
   listJjCommits,
   resolveJjBranchCheckout,
@@ -231,11 +232,14 @@ export async function dispatchResolveRepositoryDefaultBranch(
 export async function dispatchListBranchSuggestions(
   cwd: string,
   options?: { query?: string; limit?: number },
+  context?: CheckoutContext,
 ): Promise<BranchSuggestion[]> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return listBranchSuggestions(cwd, options);
   }
-  return listJjBookmarkSuggestions(cwd, options);
+  // Context pins the checkpoint store to this daemon's paseo home so the
+  // saved-WIP annotation reads the authoritative registry.
+  return listJjBookmarkSuggestions(cwd, options, toJjContext(context));
 }
 
 export async function dispatchResolveBranchCheckout(
@@ -282,7 +286,7 @@ export async function dispatchDiscardChanges(
  */
 export async function dispatchNewChange(
   cwd: string,
-  options?: { message?: string } & JjChangeIntent,
+  options?: { message?: string; targetCommitId?: string } & JjChangeIntent,
   context?: CheckoutContext,
 ): Promise<JjMutationResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
@@ -315,28 +319,46 @@ export async function dispatchEditChange(
   return jjEdit(cwd, options, toJjContext(context));
 }
 
+/** Bookmark-switch intent carried from the client capture (see JjSwitchBookmarkOptions). */
+export type JjSwitchIntent = Omit<JjSwitchBookmarkOptions, "branch">;
+
 /**
- * Execute a validated branch checkout. DEFERRED on jj: `jj edit` would make
- * the working copy rewrite the selected mutable change and leave managed
- * ownership stale, so the surface fails typed until a `jj new`-based flow
- * with an ownership transition lands (tracked in the jj plan).
+ * Execute a validated branch checkout. On jj this switches the workspace
+ * onto the bookmark's captured exact revision: `new-on` by default, or a
+ * same-ID Resume of a checkpoint-saved WIP change. No bookmark advances and
+ * the line left behind keeps its exact position (see jjSwitchBookmark).
  */
 export async function dispatchExecuteBranchCheckout(
   cwd: string,
   resolution: BranchCheckoutResolution,
+  options?: JjSwitchIntent,
+  context?: CheckoutContext,
 ): Promise<CheckoutExistingBranchResult> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return checkoutResolvedBranch({ cwd, resolution });
   }
-  throw new NotSupportedOnJjError(
-    "Switching bookmarks is not supported on jj repositories yet; use jj new in a terminal",
+  if (resolution.kind !== "local")
+    throw new NotSupportedOnJjError(
+      `Switching to a ${resolution.kind} ref is not supported on jj repositories yet`,
+    );
+  const result = await jjSwitchBookmark(
+    cwd,
+    { ...options, branch: resolution.name },
+    toJjContext(context),
   );
+  return {
+    source: result.source,
+    mode: result.mode,
+    changeId: result.changeId,
+    commitId: result.commitId,
+  };
 }
 
 /** Execute branch creation from a base on the current working copy. Gates stay upstream. */
 export async function dispatchExecuteCreateBranchFromBase(
   cwd: string,
   params: { baseBranch: string; newBranchName: string },
+  context?: CheckoutContext,
 ): Promise<void> {
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     await runGitCommand(["checkout", "-b", params.newBranchName, "--no-track", params.baseBranch], {
@@ -345,19 +367,11 @@ export async function dispatchExecuteCreateBranchFromBase(
     });
     return;
   }
-  // New working-copy change ON THE VALIDATED BASE (review fix 12: `jj new`
-  // on the current @ would stack the line on an unrelated change), then the
-  // feature bookmark at that change. Advancement is pinned EMPTY for the
-  // `jj new` so user config cannot move any existing bookmark; the new
-  // bookmark becomes the line of work afterwards. The base is never moved.
-  if (!(await jjRevisionResolves(cwd, params.baseBranch))) {
-    throw new Error(`Base branch not found: ${params.baseBranch}`);
-  }
-  await runJjCommand(
-    ["new", params.baseBranch, "--config", "experimental-advance-branches.enabled-branches=[]"],
-    { cwd },
-  );
-  await jjCreateBookmark(cwd, params.newBranchName);
+  // New working-copy change ON THE VALIDATED BASE, then the feature bookmark
+  // at that change: never stacked on an unrelated @, never moving the base or
+  // the previously owned bookmark. The dirty working copy is snapshotted into
+  // the change being left (saved WIP keeps its same-ID Resume on the old line).
+  await jjCreateBranchOnBase(cwd, params, toJjContext(context));
 }
 
 export async function dispatchHasLocalBranch(

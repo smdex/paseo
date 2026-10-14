@@ -369,9 +369,8 @@ async function getJjWorkingCopyState(
 }
 
 /**
- * The unique nearest ancestor bookmark of @: `heads(ancestors(@) & bookmarks())`
- * keeps only bookmarked commits that are not ancestors of another bookmarked
- * commit. Exactly one resulting commit carrying exactly one bookmark names the
+ * The unique nearest ancestor user bookmark of @ excludes recovery pins by
+ * name before taking heads, so a pin-only descendant cannot hide the real line. Exactly one resulting commit carrying exactly one bookmark names the
  * workspace context; anything else (no bookmarks, multiple heads, multiple
  * bookmarks on one head) is ambiguous → null.
  */
@@ -384,7 +383,7 @@ async function deriveNearestAncestorBookmark(
       "log",
       "--no-graph",
       "-r",
-      "heads(ancestors(@) & bookmarks())",
+      'heads(ancestors(@) & bookmarks(~glob:"paseo/recovery/*"))',
       "-T",
       'bookmarks.map(|b| b.name()).join("\\t") ++ "\\n"',
     ],
@@ -395,9 +394,7 @@ async function deriveNearestAncestorBookmark(
   if (lines.length !== 1) {
     return null;
   }
-  // Recovery pins can share a commit with real bookmarks (and ride ancestors
-  // after restores), so they are excluded BY NAME here — a revset-level
-  // complement would drop the shared commit entirely (verified on 0.45.1).
+  // A real bookmark can share its commit with recovery pins; filter names too.
   const names = (lines[0] ?? "")
     .split("\t")
     .filter((name) => name.length > 0 && !name.startsWith("paseo/recovery/"));
@@ -1378,7 +1375,53 @@ export async function listJjBookmarkSuggestions(
     });
   }
   suggestions.sort((a, b) => b.committerDate - a.committerDate || a.name.localeCompare(b.name));
-  return options?.limit === undefined ? suggestions : suggestions.slice(0, options.limit);
+  const capped = options?.limit === undefined ? suggestions : suggestions.slice(0, options.limit);
+  await annotateSavedWipSuggestions(cwd, capped, context);
+  return capped;
+}
+
+/**
+ * Annotate each local bookmark whose line still holds a checkpoint-saved WIP
+ * change (left there by a previous switch or branch creation), so the
+ * switcher can offer the same-ID Resume. The checkpoint store is the only
+ * authority — nothing is inferred from ancestry alone. Approximation: a
+ * stacked line under several bookmarks annotates each ancestor bookmark; the
+ * resume postcondition re-verifies the line at execution time.
+ */
+async function annotateSavedWipSuggestions(
+  cwd: string,
+  suggestions: BranchSuggestion[],
+  context?: JjCheckoutContext,
+): Promise<void> {
+  const local = suggestions.filter((s) => s.hasLocal);
+  if (!local.length) return;
+  let savedWip: JjCheckpoint["savedWip"] = [];
+  try {
+    const checkpoint = await readJjCheckpoint(await jjWorkspaceRoot(cwd), context?.paseoHome);
+    savedWip = checkpoint?.savedWip ?? [];
+  } catch {
+    return; // Unreadable checkpoint state stays a mutation-time concern, not a read blocker.
+  }
+  if (!savedWip.length) return;
+  const perBookmark = new Map<string, string>();
+  for (const wip of savedWip) {
+    if (!wip.bookmark || !/^[k-z]{32}$/.test(wip.changeId)) continue;
+    try {
+      const change = await uniqueChange(cwd, wip.changeId, context);
+      const empty = await runJj(
+        ["log", "--no-graph", "-r", change.commitId, "-T", "empty"],
+        { cwd },
+        context,
+      );
+      if (!empty.truncated && empty.stdout.trim() === "false")
+        perBookmark.set(wip.bookmark, wip.changeId);
+    } catch {
+      // A stale saved WIP (garbage-collected change) must not break listing.
+    }
+  }
+  if (!perBookmark.size) return;
+  for (const suggestion of local)
+    if (perBookmark.has(suggestion.name)) suggestion.wipChangeId = perBookmark.get(suggestion.name);
 }
 
 /** Bookmark-backed branch checkout resolution for validation flows. */
@@ -1503,10 +1546,22 @@ export async function jjCommit(
 
 export async function jjNew(
   cwd: string,
-  options?: { message?: string } & JjChangeIntent,
+  options?: {
+    message?: string;
+    targetCommitId?: string;
+    pinAdvanceEmpty?: boolean;
+  } & JjChangeIntent,
   context?: JjCheckoutContext,
 ): Promise<JjMutationResult> {
-  return mutateJjChange(cwd, { ...options, kind: "new" }, context);
+  return mutateJjChange(
+    cwd,
+    {
+      ...options,
+      pinAdvanceEmpty: options?.pinAdvanceEmpty ?? options?.targetCommitId !== undefined,
+      kind: "new",
+    },
+    context,
+  );
 }
 
 export async function jjDescribe(
@@ -1529,6 +1584,26 @@ interface ChangeMutationIntent extends JjChangeIntent {
   kind: "describe" | "finish" | "new" | "edit";
   message?: string;
   changeId?: string;
+  /**
+   * Exact revision a "new" change starts on. Defaults to the current working
+   * copy. Used by bookmark switching and branch creation so the new change
+   * lands on the CAPTURED target line, never stacked on an unrelated @.
+   */
+  targetCommitId?: string;
+  /**
+   * Pin the advance-branches allow-list EMPTY for this mutation: switching and
+   * branch creation must never advance any bookmark (the line left behind and
+   * the base keep their exact positions).
+   */
+  pinAdvanceEmpty?: boolean;
+  bookmarkTransition?: {
+    name: string;
+    create: boolean;
+    head: JjChangeMeta;
+    headBookmark: string;
+    oldBookmark: string | null;
+    oldHead: JjChangeMeta | null;
+  };
 }
 
 export async function getJjOperationId(cwd: string, context?: JjCheckoutContext): Promise<string> {
@@ -1607,13 +1682,25 @@ async function prepareJjChange(
     );
   if (intent.changeId !== undefined && !/^[k-z]{32}$/.test(intent.changeId))
     throw new JjCheckpointError("Select a full, stable change ID.");
-  const target = intent.changeId ? await uniqueChange(cwd, intent.changeId, freshContext) : before;
+  let target = before;
+  if (intent.changeId !== undefined) {
+    target = await uniqueChange(cwd, intent.changeId, freshContext);
+  } else if (intent.targetCommitId !== undefined) {
+    if (!/^[0-9a-f]{40,64}$/.test(intent.targetCommitId))
+      throw new JjCheckpointError("Select a full, exact commit ID.");
+    target = await uniqueChange(cwd, intent.targetCommitId, freshContext);
+  }
+  // `jj new` never rewrites the revision it starts on — the change being
+  // rewritten is the working copy being snapshotted (before), so the known
+  // affected/published/shared scope follows `before`, not the target. Every
+  // other kind rewrites its target directly.
+  const impactSubject = intent.kind === "new" ? before : target;
   const affected = await runJj(
     [
       "log",
       "--no-graph",
       "-r",
-      `descendants(${target.commitId}) ~ ${target.commitId}`,
+      `descendants(${impactSubject.commitId}) ~ ${impactSubject.commitId}`,
       "-T",
       'change_id ++ "\\t" ++ commit_id ++ "\\n"',
     ],
@@ -1634,15 +1721,22 @@ async function prepareJjChange(
         throw new JjCheckpointError("Cannot read the affected native descendants.");
       return { changeId, commitId };
     });
-  const shared = await sharedJjSelection(cwd, target, before, freshContext);
+  const shared = await sharedJjSelection(cwd, impactSubject, before, freshContext);
   const published = await countRevset(
     cwd,
-    `${target.commitId} & ::remote_bookmarks()`,
+    `${impactSubject.commitId} & ::remote_bookmarks()`,
     freshContext,
   );
   if ((affectedHeads.length || published || shared) && intent.acknowledgeRewrites !== true)
     throw new JjCheckpointError(
-      "This native change has shared workspaces, descendants or published history. Describe/Edit and later snapshots can rebase descendants, including work added externally. Confirm the native rewrite warning before continuing.",
+      `Native rewrite approval required: ${impactSubject.changeId}; ${affectedHeads.length} known descendant(s)${
+        affectedHeads.length
+          ? ` (${affectedHeads
+              .slice(0, 16)
+              .map((head) => head.changeId)
+              .join(", ")}${affectedHeads.length > 16 ? ", …" : ""})`
+          : ""
+      }; shared workspaces: ${shared}; published history: ${published > 0}. Native edits and later snapshots may also rewrite descendants added externally. Confirm the native rewrite warning before continuing.`,
     );
   return {
     facts,
@@ -1698,8 +1792,13 @@ function jjSelectionMatches(
   rewritten: JjChangeMeta,
 ): boolean {
   if (kind === "describe") return after.changeId === before.changeId;
-  if (kind === "edit") return after.changeId === target.changeId;
-  return after.parents.includes(rewritten.commitId) && after.changeId !== before.changeId;
+  if (kind === "edit")
+    return after.changeId === target.changeId && after.commitId === rewritten.commitId;
+  return (
+    after.parents.length === 1 &&
+    after.parents[0] === (kind === "new" ? target.commitId : rewritten.commitId) &&
+    after.changeId !== before.changeId
+  );
 }
 
 async function reconcileJjMutationFailure(
@@ -1725,8 +1824,11 @@ async function reconcileJjMutationFailure(
 }
 
 function jjMutationMessage(intent: ChangeMutationIntent, target: JjChangeMeta): string {
-  if (intent.kind === "describe") return intent.message ?? "";
-  return intent.message?.trim() ? intent.message : target.description;
+  let message = intent.message?.trim() ? intent.message : target.description;
+  if (intent.kind === "describe") message = intent.message ?? "";
+  if ((intent.kind === "describe" || intent.kind === "finish") && !message.trim())
+    throw new JjCheckpointError("Description is required.");
+  return message;
 }
 
 function completedJjCheckpoint(
@@ -1736,6 +1838,7 @@ function completedJjCheckpoint(
   after: JjChangeMeta,
   rewritten: JjChangeMeta,
   operation: JjCheckpointOperation,
+  ownedBookmark: string | null,
 ): JjCheckpoint {
   return {
     ...checkpoint,
@@ -1743,9 +1846,117 @@ function completedJjCheckpoint(
     completedChanges:
       kind === "finish" ? [...checkpoint.completedChanges, rewritten] : checkpoint.completedChanges,
     savedWip:
-      kind === "edit" || kind === "new" ? [...checkpoint.savedWip, before] : checkpoint.savedWip,
+      kind === "edit" || kind === "new"
+        ? [...checkpoint.savedWip, { ...before, bookmark: ownedBookmark }]
+        : checkpoint.savedWip,
     operations: [...checkpoint.operations.slice(0, -1), operation],
   };
+}
+
+async function assertCapturedBookmark(
+  cwd: string,
+  name: string,
+  head: JjChangeMeta,
+  context: JjCheckoutContext,
+): Promise<void> {
+  const live = await uniqueChange(cwd, `bookmarks(exact:"${name}")`, context);
+  if (live.commitId !== head.commitId)
+    throw new JjCheckpointError(
+      `Bookmark ${name} changed during the action. Retained heads require reconciliation; no ref was overwritten.`,
+    );
+}
+
+async function materializeJjTransition(
+  cwd: string,
+  root: string,
+  transition: ChangeMutationIntent["bookmarkTransition"],
+  after: JjChangeMeta,
+  facts: Extract<JjSnapshotFacts, { isJj: true }>,
+  checkpoint: JjCheckpoint,
+  context: JjCheckoutContext,
+): Promise<JjCheckpoint> {
+  if (transition) {
+    await assertCapturedBookmark(cwd, transition.headBookmark, transition.head, context);
+    if (transition.oldHead && transition.oldBookmark)
+      await assertCapturedBookmark(cwd, transition.oldBookmark, transition.oldHead, context);
+    if (transition.create) {
+      await runJj(["bookmark", "create", transition.name, "-r", after.commitId], { cwd }, context);
+      await assertCapturedBookmark(cwd, transition.name, after, context);
+    }
+  }
+  if (await countRevset(cwd, `${after.commitId} & conflicts()`, context))
+    throw new JjCheckpointError(
+      "The native action left conflicts. Inspect the actual working copy and retained heads before continuing.",
+    );
+  const selected = await uniqueChange(cwd, "@", context);
+  if (selected.commitId !== after.commitId)
+    throw new JjCheckpointError(
+      "The live selection changed during validation. Retained heads require reconciliation.",
+    );
+  validateJjCheckpoint(checkpoint, root);
+  if (transition && facts.paseoOwnedWorktree) {
+    if (checkpoint.metadata?.version !== 2)
+      throw new JjCheckpointError(
+        "The managed bookmark authority is missing. Retained heads require reconciliation.",
+      );
+    // Keep the old line's publication mapping and comparison unchanged.
+    checkpoint = await writeJjCheckpoint(
+      { ...checkpoint, metadata: { ...checkpoint.metadata, jjBookmark: transition.name } },
+      context.paseoHome,
+    );
+  }
+  return checkpoint;
+}
+
+async function retainJjMutationHeads(
+  cwd: string,
+  heads: JjCheckpointHead[],
+  id: string,
+  context: JjCheckoutContext,
+): Promise<string[]> {
+  const pins: string[] = [];
+  for (const head of heads) {
+    const pin = `paseo/recovery/change-${id}-${pins.length}`;
+    await runJj(["bookmark", "create", pin, "-r", head.commitId], { cwd }, context);
+    const pinned = await uniqueChange(cwd, `bookmarks(exact:"${pin}")`, context);
+    if (pinned.commitId !== head.commitId)
+      throw new JjCheckpointError(
+        "A recovery pin did not retain the captured head; no change mutation was started.",
+      );
+    pins.push(pin);
+  }
+  return pins;
+}
+
+async function verifyJjMutationResult(
+  cwd: string,
+  root: string,
+  intent: ChangeMutationIntent,
+  after: JjChangeMeta,
+  checkpoint: JjCheckpoint,
+  context: JjCheckoutContext,
+): Promise<void> {
+  if (
+    intent.kind === "new" &&
+    intent.message !== undefined &&
+    after.description.trim() !== intent.message.trim()
+  )
+    throw new JjCheckpointError(
+      "The new change description differs from the captured message. Reconcile the retained result.",
+    );
+  const transition = intent.bookmarkTransition;
+  if (transition) {
+    await assertCapturedBookmark(cwd, transition.headBookmark, transition.head, context);
+    if (transition.oldBookmark && transition.oldBookmark !== transition.name && transition.oldHead)
+      await assertCapturedBookmark(cwd, transition.oldBookmark, transition.oldHead, context);
+    if (transition.create) await assertCapturedBookmark(cwd, transition.name, after, context);
+  }
+  validateJjCheckpoint(checkpoint, root);
+  const current = await uniqueChange(cwd, "@", context);
+  if (current.commitId !== after.commitId || current.changeId !== after.changeId)
+    throw new JjCheckpointError(
+      "The live selection changed while saving the result. Reconcile the retained heads before retrying or publication.",
+    );
 }
 
 async function mutateJjChange(
@@ -1754,8 +1965,14 @@ async function mutateJjChange(
   context?: JjCheckoutContext,
 ): Promise<JjMutationResult> {
   const root = await jjWorkspaceRoot(cwd);
+  // A native selection may remove the caller's subdirectory; revisions are workspace-scoped.
+  cwd = root;
   return withWorkspaceLifecycle(root, async () => {
-    const freshContext = { ...context, facts: null };
+    const freshContext = {
+      ...context,
+      facts: null,
+      signal: context?.signal ?? new AbortController().signal,
+    };
     const { facts, before, target, affectedHeads, impact } = await prepareJjChange(
       cwd,
       intent,
@@ -1776,21 +1993,15 @@ async function mutateJjChange(
         "A previous jj operation requires reconciliation. Inspect the retained checkpoint and recovery pins on the host before another mutation or publication.",
       );
     const message = jjMutationMessage(intent, target);
-    if ((intent.kind === "describe" || intent.kind === "finish") && !message.trim())
-      throw new JjCheckpointError("Description is required.");
     const id = randomUUID();
-    const heads = [target, before, ...affectedHeads];
-    const pins: string[] = [];
-    for (const head of heads) {
-      const pin = `paseo/recovery/change-${id}-${pins.length}`;
-      await runJj(["bookmark", "create", pin, "-r", head.commitId], { cwd }, freshContext);
-      const pinned = await uniqueChange(cwd, `bookmarks(exact:"${pin}")`, freshContext);
-      if (pinned.commitId !== head.commitId)
-        throw new JjCheckpointError(
-          "A recovery pin did not retain the captured head; no change mutation was started.",
-        );
-      pins.push(pin);
-    }
+    const transition = intent.bookmarkTransition;
+    const heads = [
+      target,
+      before,
+      ...affectedHeads,
+      ...(transition ? [transition.head, ...(transition.oldHead ? [transition.oldHead] : [])] : []),
+    ];
+    const pins = await retainJjMutationHeads(cwd, heads, id, freshContext);
     const operation: JjCheckpointOperation = {
       id,
       kind: intent.kind,
@@ -1814,8 +2025,15 @@ async function mutateJjChange(
       },
       context?.paseoHome,
     );
-    const bookmark = jjOwnedBookmark(facts);
+    const bookmark = intent.pinAdvanceEmpty ? null : jjOwnedBookmark(facts);
     try {
+      const current = await uniqueChange(cwd, "@", freshContext);
+      if (current.commitId !== before.commitId)
+        throw new JjCheckpointError(
+          "The working-copy head changed during capture. Reconcile the retained heads before retrying.",
+        );
+      if (transition)
+        await assertCapturedBookmark(cwd, transition.headBookmark, transition.head, freshContext);
       await applyJjChange(cwd, intent, target, message, bookmark, freshContext);
       const after = await uniqueChange(cwd, "@", freshContext);
       const rewritten = await uniqueChange(cwd, target.changeId, freshContext);
@@ -1827,14 +2045,35 @@ async function mutateJjChange(
         throw new JjCheckpointError(
           "jj returned without the requested live selection/description. Retained heads require reconciliation; no global undo was attempted.",
         );
-      validateJjCheckpoint(checkpoint, root);
+      checkpoint = await materializeJjTransition(
+        cwd,
+        root,
+        transition,
+        after,
+        facts,
+        checkpoint,
+        freshContext,
+      );
+      if (transition && facts.paseoOwnedWorktree) {
+        updatePaseoWorktreeJjBookmark(root, { from: transition.oldBookmark, to: transition.name });
+        validateJjCheckpoint(checkpoint, root);
+      }
       operation.status = "completed";
       operation.after = after;
       operation.afterOperation = await getJjOperationId(cwd, freshContext);
       checkpoint = await writeJjCheckpoint(
-        completedJjCheckpoint(checkpoint, intent.kind, before, after, rewritten, operation),
+        completedJjCheckpoint(
+          checkpoint,
+          intent.kind,
+          before,
+          after,
+          rewritten,
+          operation,
+          jjOwnedBookmark(facts),
+        ),
         context?.paseoHome,
       );
+      await verifyJjMutationResult(cwd, root, intent, after, checkpoint, freshContext);
       return { changeId: after.changeId, commitId: after.commitId, bookmark };
     } catch (error) {
       await reconcileJjMutationFailure(cwd, operation, before, error, freshContext);
@@ -2105,7 +2344,14 @@ export async function jjRenameBookmark(
       // Save authority before materializing the sidecar. Failure leaves a
       // pending operation, never adopts another owner or retries a ref move.
       checkpoint = await writeJjCheckpoint(
-        { ...checkpoint, metadata: nextMetadata, publication },
+        {
+          ...checkpoint,
+          metadata: nextMetadata,
+          publication,
+          savedWip: checkpoint.savedWip.map((head) =>
+            head.bookmark === bookmark ? { ...head, bookmark: newName } : head,
+          ),
+        },
         context?.paseoHome,
       );
       if (facts.paseoOwnedWorktree)
@@ -2127,5 +2373,207 @@ export async function jjRenameBookmark(
       );
       throw error;
     }
+  });
+}
+
+export interface JjSwitchBookmarkOptions {
+  /** Target bookmark (already resolved to a unique local bookmark). */
+  branch: string;
+  /**
+   * `new-on` (default): new working-copy change on the bookmark's captured
+   * exact revision. `resume`: same-ID native edit of the saved WIP change.
+   */
+  mode?: "new-on" | "resume";
+  /** Change ID of the saved WIP on the target line (required for resume). */
+  wipChangeId?: string;
+  /** Bookmark revision as captured when the switcher was opened (new-on). */
+  targetCommitId?: string;
+  /** Working-copy change ID as captured when the switcher was opened. */
+  message?: string;
+  expectedChangeId?: string;
+  acknowledgeRewrites?: boolean;
+}
+
+export interface JjSwitchBookmarkResult {
+  source: "local";
+  mode: "new-on" | "resume";
+  changeId: string;
+  commitId: string;
+  bookmark: string;
+}
+
+/** Precondition checks + captures for jjSwitchBookmark, split out for clarity. */
+async function resolveSwitchPreconditions(
+  cwd: string,
+  options: JjSwitchBookmarkOptions,
+  freshContext: JjCheckoutContext,
+): Promise<{
+  facts: Extract<JjSnapshotFacts, { isJj: true }>;
+  owned: string | null;
+  mode: "new-on" | "resume";
+  target: JjChangeMeta;
+  oldLine: JjChangeMeta | null;
+}> {
+  const facts = await getJjSnapshotFacts(cwd, freshContext);
+  if (!facts.isJj) throw new JjCheckpointError("The jj workspace is unavailable.");
+  if (facts.workingCopy.untrackedPaths.length)
+    throw new JjCheckpointError(
+      `Untracked files would not survive the switch: ${facts.workingCopy.untrackedPaths.join(", ")}`,
+    );
+  const owned = jjOwnedBookmark(facts);
+  if (owned === options.branch)
+    throw new JjCheckpointError(`This workspace is already on bookmark ${options.branch}.`);
+  const mode = options.mode ?? "new-on";
+  const target = await uniqueChange(cwd, `bookmarks(exact:"${options.branch}")`, freshContext);
+  if (mode === "new-on") {
+    if (options.targetCommitId !== undefined && target.commitId !== options.targetCommitId)
+      throw new JjCheckpointError(
+        `Bookmark ${options.branch} moved since it was picked. Reopen the switcher; nothing was changed.`,
+      );
+  } else {
+    if (!options.wipChangeId || !/^[k-z]{32}$/.test(options.wipChangeId))
+      throw new JjCheckpointError("Select the saved work-in-progress change to resume.");
+    const checkpoint = await readJjCheckpoint(await jjWorkspaceRoot(cwd), freshContext.paseoHome);
+    if (
+      !checkpoint?.savedWip.some(
+        (head) => head.changeId === options.wipChangeId && head.bookmark === options.branch,
+      )
+    )
+      throw new JjCheckpointError(
+        `The saved WIP has no captured ownership for ${options.branch}. Inspect the retained change and use explicit Edit instead.`,
+      );
+    // Resume must be saved by this workspace and still on the selected line.
+    const onLine = await countRevset(
+      cwd,
+      `bookmarks(exact:"${options.branch}") & ::${options.wipChangeId}`,
+      freshContext,
+    );
+    if (onLine < 1)
+      throw new JjCheckpointError(
+        `The saved work-in-progress no longer sits on ${options.branch}. Reopen the switcher; nothing was changed.`,
+      );
+  }
+  const oldLine =
+    owned && owned !== options.branch
+      ? await uniqueChange(cwd, `bookmarks(exact:"${owned}")`, freshContext)
+      : null;
+  return { facts, owned, mode, target, oldLine };
+}
+
+/**
+ * Switch the workspace onto another bookmark's line, preserving the native jj
+ * model: the dirty working copy is snapshotted into the change being left
+ * (recorded as saved WIP for a later same-ID Resume), no bookmark advances,
+ * and the line left behind keeps its exact position.
+ *
+ * - `new-on` (default): a new working-copy change on the bookmark's CAPTURED
+ *   exact revision. A captured `targetCommitId` that no longer matches the
+ *   live bookmark refuses — an external winner is never silently followed
+ *   and never overwritten by a retry.
+ * - `resume`: same-ID native `jj edit` of the saved WIP change, re-verified
+ *   to still sit on the target line at execution time.
+ */
+export async function jjSwitchBookmark(
+  cwd: string,
+  options: JjSwitchBookmarkOptions,
+  context?: JjCheckoutContext,
+): Promise<JjSwitchBookmarkResult> {
+  assertSafeJjRef(options.branch, "bookmark");
+  const root = await jjWorkspaceRoot(cwd);
+  cwd = root;
+  return withWorkspaceLifecycle(root, async () => {
+    const freshContext = {
+      ...context,
+      facts: null,
+      signal: context?.signal ?? new AbortController().signal,
+    };
+    const { owned, mode, target, oldLine } = await resolveSwitchPreconditions(
+      cwd,
+      options,
+      freshContext,
+    );
+    const mutation = await mutateJjChange(
+      cwd,
+      {
+        kind: mode === "new-on" ? "new" : "edit",
+        message: options.message,
+        targetCommitId: mode === "new-on" ? target.commitId : undefined,
+        changeId: mode === "resume" ? options.wipChangeId : undefined,
+        pinAdvanceEmpty: true,
+        expectedChangeId: options.expectedChangeId,
+        acknowledgeRewrites: options.acknowledgeRewrites,
+        bookmarkTransition: {
+          name: options.branch,
+          create: false,
+          head: target,
+          headBookmark: options.branch,
+          oldBookmark: owned,
+          oldHead: oldLine,
+        },
+      },
+      freshContext,
+    );
+    return {
+      source: "local",
+      mode,
+      changeId: mutation.changeId,
+      commitId: mutation.commitId,
+      bookmark: options.branch,
+    };
+  });
+}
+
+/**
+ * Create a new bookmark on the base bookmark's captured exact revision and
+ * move the workspace onto it (system flow: agent session setup). The dirty
+ * working copy is snapshotted into the change being left — saved WIP stays
+ * available for a later same-ID Resume on the old line. Neither the base nor
+ * the previously owned bookmark moves.
+ */
+export async function jjCreateBranchOnBase(
+  cwd: string,
+  options: { baseBranch: string; newBranchName: string },
+  context?: JjCheckoutContext,
+): Promise<void> {
+  assertSafeJjRef(options.baseBranch, "base branch");
+  assertSafeJjRef(options.newBranchName, "bookmark");
+  const root = await jjWorkspaceRoot(cwd);
+  cwd = root;
+  return withWorkspaceLifecycle(root, async () => {
+    const freshContext = { ...context, facts: null };
+    const facts = await getJjSnapshotFacts(cwd, freshContext);
+    if (!facts.isJj) throw new JjCheckpointError("The jj workspace is unavailable.");
+    if (facts.workingCopy.untrackedPaths.length)
+      throw new JjCheckpointError(
+        `Untracked files would not survive the switch: ${facts.workingCopy.untrackedPaths.join(", ")}`,
+      );
+    if (await hasJjBookmark(cwd, options.newBranchName, freshContext))
+      throw new JjCheckpointError(`Bookmark already exists: ${options.newBranchName}`);
+    if (!(await hasJjBookmark(cwd, options.baseBranch, freshContext)))
+      throw new JjCheckpointError(`Base branch not found: ${options.baseBranch}`);
+    const base = await uniqueChange(cwd, `bookmarks(exact:"${options.baseBranch}")`, freshContext);
+    const owned = jjOwnedBookmark(facts);
+    const oldHead = owned
+      ? await uniqueChange(cwd, `bookmarks(exact:"${owned}")`, freshContext)
+      : null;
+    // No interactive approval surface exists here: refuse known rewrite impact.
+    await mutateJjChange(
+      cwd,
+      {
+        kind: "new",
+        targetCommitId: base.commitId,
+        pinAdvanceEmpty: true,
+        expectedChangeId: facts.workingCopy.meta.changeId,
+        bookmarkTransition: {
+          name: options.newBranchName,
+          create: true,
+          head: base,
+          headBookmark: options.baseBranch,
+          oldBookmark: owned,
+          oldHead,
+        },
+      },
+      freshContext,
+    );
   });
 }

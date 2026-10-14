@@ -1561,6 +1561,27 @@ describe("WorkspaceGitServiceImpl", () => {
   });
 });
 
+test.skipIf(!isJjAvailable())("jj bookmark selections bypass the auxiliary read TTL", async () => {
+  const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+  vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+  const service = new WorkspaceGitServiceImpl({ logger: createTestLogger(), paseoHome: repo.dir });
+  try {
+    expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    const before = await service.suggestBranchesForCwd(repo.repoDir);
+    expect(repo.jj(["bookmark", "set", "main", "-r", "@"]).status).toBe(0);
+    const after = await service.suggestBranchesForCwd(repo.repoDir);
+    const actual = repo.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    expect(after.find((branch) => branch.name === "main")?.localRef).toBe(actual);
+    expect(after.find((branch) => branch.name === "main")?.localRef).not.toBe(
+      before.find((branch) => branch.name === "main")?.localRef,
+    );
+  } finally {
+    await service.dispose();
+    vi.unstubAllEnvs();
+    repo.dispose();
+  }
+});
+
 test.skipIf(!isJjAvailable())(
   "native jj forge refresh and retained polls use explicit context and dispose on head replacement",
   async () => {

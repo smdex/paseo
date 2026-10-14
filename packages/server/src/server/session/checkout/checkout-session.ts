@@ -577,7 +577,20 @@ export class CheckoutSession {
     const { cwd, branch, requestId } = msg;
 
     try {
-      const checkoutResult = await this.gitMutation.checkoutExistingBranch(cwd, branch);
+      // jj intent fields are captured when the switcher opens (exact target
+      // revision, saved-WIP change ID, working-copy CAS) and verified again
+      // at execution; git ignores them entirely.
+      const checkoutResult = await this.gitMutation.checkoutExistingBranch(cwd, branch, {
+        intent: {
+          mode: msg.mode,
+          wipChangeId: msg.wipChangeId,
+          targetCommitId: msg.targetCommitId,
+          message: msg.message,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        context: { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      });
       this.scheduleDiffRefresh(cwd);
 
       // Push a workspace_update immediately so the sidebar/header reflect
@@ -591,6 +604,9 @@ export class CheckoutSession {
           success: true,
           branch,
           source: checkoutResult.source,
+          mode: checkoutResult.mode,
+          changeId: checkoutResult.changeId,
+          commitId: checkoutResult.commitId,
           error: null,
           requestId,
         },
@@ -816,6 +832,7 @@ export class CheckoutSession {
         cwd,
         {
           message: msg.message,
+          targetCommitId: msg.targetCommitId,
           expectedChangeId: msg.expectedChangeId,
           acknowledgeRewrites: msg.acknowledgeRewrites,
         },

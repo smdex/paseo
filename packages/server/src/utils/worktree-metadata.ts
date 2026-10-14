@@ -301,11 +301,11 @@ export async function writePaseoWorktreeMetadata(
 
 export async function updatePaseoWorktreeJjBookmark(
   worktreeRoot: string,
-  rename: { from: string; to: string },
+  rename: { from: string | null; to: string },
 ): Promise<void> {
   return mutateMetadata(worktreeRoot, async (root) => {
     const current = await readMetadataFile(root);
-    if (!current || current.version !== 2 || current.jjBookmark !== rename.from) return;
+    if (!current || current.version !== 2 || (current.jjBookmark ?? null) !== rename.from) return;
     await writePaseoWorktreeMetadataFile(root, { ...current, jjBookmark: rename.to });
   });
 }
