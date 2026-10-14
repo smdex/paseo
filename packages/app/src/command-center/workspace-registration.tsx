@@ -1,3 +1,4 @@
+import { CheckoutActionFormsHost } from "@/git/action-forms";
 import { useCallback, useMemo, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -161,7 +162,7 @@ function useWorkspaceLabelCatalog(
   return { labelCatalog, toggleLabel };
 }
 
-export function useWorkspaceCommandCenterActions(): ReactElement | null {
+export function useWorkspaceCommandCenterActions(): void {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const { t } = useTranslation();
   const selection = useActiveWorkspaceSelection();
@@ -202,7 +203,7 @@ export function useWorkspaceCommandCenterActions(): ReactElement | null {
     supportsSetupObservation,
   );
   const { overrides } = useKeyboardShortcutOverrides();
-  const { gitActions, isGit, actionForms } = useGitActions({
+  const { gitActions, isGit } = useGitActions({
     serverId: serverId ?? "",
     cwd: cwd ?? "",
     icons: GIT_ACTION_ICONS,
@@ -331,9 +332,9 @@ export function useWorkspaceCommandCenterActions(): ReactElement | null {
     enabled: Boolean(serverId && cwd),
     actions,
   });
-  return actionForms;
 }
 
 export function CommandCenterWorkspaceActions(): ReactElement | null {
-  return useWorkspaceCommandCenterActions();
+  useWorkspaceCommandCenterActions();
+  return <CheckoutActionFormsHost />;
 }
