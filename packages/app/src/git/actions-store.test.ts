@@ -354,6 +354,8 @@ describe("native change form", () => {
       ...input,
       draft: "My draft",
       targetChangeId: null,
+      targetChangeLabel: null,
+      targetCommitId: null,
       status: "error",
       error: message,
       canSubmit: true,
@@ -381,7 +383,7 @@ describe("native change form", () => {
       },
     );
     expect(model.getState().canSubmit).toBe(false);
-    model.selectChange("stable selected change");
+    model.selectChange({ changeId: "stable selected change", label: "Stable selected label" });
     await model.submit();
     expect(calls).toEqual([
       {
@@ -393,6 +395,39 @@ describe("native change form", () => {
     ]);
     expect(model.getState().status).toBe("success");
     expect(model.getState().canSubmit).toBe(false);
+    model.close();
+  });
+
+  it("keeps the selected change identity and label visible when an action fails", async () => {
+    const calls: Parameters<JjChangeFormPorts["edit"]>[0][] = [];
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "edit" },
+      {
+        describe: async () => {},
+        edit: async (input) => {
+          calls.push(input);
+          throw new Error("Change is no longer editable");
+        },
+        newOn: async () => {},
+        refresh: async () => {},
+      },
+    );
+    model.selectChange({ changeId: "selected-change-id", label: "Captured human label" });
+    await model.submit();
+    expect(calls).toEqual([
+      {
+        cwd: "/native",
+        changeId: "selected-change-id",
+        expectedChangeId: "current",
+        acknowledgeRewrites: false,
+      },
+    ]);
+    expect(model.getState()).toMatchObject({
+      targetChangeId: "selected-change-id",
+      targetChangeLabel: "Captured human label",
+      status: "error",
+      error: "Change is no longer editable",
+    });
     model.close();
   });
 
@@ -421,11 +456,11 @@ describe("native change form", () => {
         refresh: async () => {},
       },
     );
-    model.selectChange("selected");
+    model.selectChange({ changeId: "selected", label: "Selected" });
     await model.submit();
     expect(model.getState().error).toBe(warning);
     expect(model.getState().needsRewriteApproval).toBe(true);
-    model.selectChange("another selection");
+    model.selectChange({ changeId: "another selection", label: "Another selection" });
     expect(model.getState().needsRewriteApproval).toBe(false);
     await model.submit();
     await model.submit();
@@ -456,7 +491,11 @@ describe("native change form", () => {
       },
     );
     expect(model.getState().canSubmit).toBe(false);
-    model.selectChange("captured commit sha");
+    model.selectChange({
+      changeId: "native change id",
+      label: "Captured commit",
+      commitId: "captured commit sha",
+    });
     expect(model.getState().canSubmit).toBe(true);
     await model.submit();
     expect(calls).toEqual([
