@@ -1152,7 +1152,7 @@ describeIfJj("jj archive with legacy placement", () => {
     expect(readFileSync(path.join(created.worktreePath, "file.txt"), "utf8")).toBe("keep live\n");
     expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name).sort()).toEqual([
       "default",
-      "unknown",
+      "repo-unknown",
     ]);
   });
   test("routes a live native jj backing path safely when mainRepoRoot is absent", async () => {
@@ -1388,7 +1388,9 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       ).toHaveLength(1);
 
       expect(restored.publication).toEqual(publication);
-      expect(restored.savedWip).toEqual([{ commitId: wip.commitId, changeId: wip.changeId }]);
+      expect(restored.savedWip).toEqual([
+        { commitId: wip.commitId, changeId: wip.changeId, bookmark: "lifecycle-feature" },
+      ]);
       expect(restored.completedChanges).toEqual(checkpoint.completedChanges);
       expect(restored.comparison).toEqual(checkpoint.comparison);
       expect(readPaseoWorktreeMetadata(root)).toEqual(restored.metadata);
@@ -1537,7 +1539,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       await restoreJjWorkspace({
         cwd: h.fixture.repoDir,
         worktreePath: root,
-        workspaceName: "lifecycle",
+        workspaceName: "repo-lifecycle",
         revision: pin,
       });
       if (stage !== "registered") writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
@@ -1694,7 +1696,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     );
     expect((await listJjWorkspaces(h.fixture.repoDir)).map((entry) => entry.name).sort()).toEqual([
       "default",
-      "lifecycle",
+      "repo-lifecycle",
     ]);
     const quarantineLog = h.logs.find((entry) => typeof entry.quarantinePath === "string");
     expect(quarantineLog).toMatchObject({
@@ -1934,7 +1936,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       });
       const root = created.worktreePath;
       const pin = "paseo/recovery/old-path";
-      fixture.jj(["bookmark", "create", pin, "-r", "reused@"]);
+      fixture.jj(["bookmark", "create", pin, "-r", "repo-reused@"]);
       const registry = new FileBackedWorkspaceRegistry(
         path.join(fixture.dir, "records.json"),
         pino({ level: "silent" }),
@@ -1956,7 +1958,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
         updatedAt: "earlier",
       });
       await registry.upsert(saved);
-      fixture.jj(["workspace", "forget", "reused"]);
+      fixture.jj(["workspace", "forget", "repo-reused"]);
       renameSync(root, `${root}.original`);
       rmSync(path.join(fixture.repoDir, ".jj"), { recursive: true });
       execFileSync("git", ["worktree", "add", "--detach", root, "main"], {
