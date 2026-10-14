@@ -1813,7 +1813,7 @@ export function ChangesSurface({
     () => computeBaseRefLabel(baseRef, t("workspace.git.diff.base")),
     [baseRef, t],
   );
-  const { gitActions, branchLabel } = useGitActions({
+  const { gitActions, branchLabel, newChangeForm } = useGitActions({
     serverId,
     cwd,
     icons: GIT_ACTION_ICONS,
@@ -1997,6 +1997,7 @@ export function ChangesSurface({
       ) : null}
 
       <NativeCheckoutControls serverId={serverId} cwd={cwd} status={status} />
+      {newChangeForm}
 
       {forgeSetupMessage ? (
         <View style={styles.forgeSetupCallout} testID="forge-setup-callout">

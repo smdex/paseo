@@ -109,7 +109,13 @@ export function JjChangeControls(props: JjChangeControlsProps) {
   );
 }
 
-function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; onClose(): void }) {
+export function JjChangeForm({
+  snapshot,
+  onClose,
+}: {
+  snapshot: JjChangeFormSnapshot;
+  onClose(): void;
+}) {
   const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
   const client = useHostRuntimeClient(snapshot.serverId);
@@ -126,6 +132,12 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
         const result = await client.editChange(input);
         if (result.error) throw new CheckoutOperationError(result.error);
         if (!result.success) throw new Error("Edit did not complete");
+      },
+      newChange: async (input) => {
+        if (!client) throw new Error("Host disconnected");
+        const result = await client.newChange(input);
+        if (result.error) throw new CheckoutOperationError(result.error);
+        if (!result.success) throw new Error("New change did not complete");
       },
       newOn: async (input) => {
         if (!client) throw new Error("Host disconnected");
@@ -145,7 +157,7 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
   const commits = useCheckoutCommitsQuery({
     serverId: snapshot.serverId,
     cwd: snapshot.cwd,
-    enabled: snapshot.mode !== "describe",
+    enabled: snapshot.mode !== "describe" && snapshot.mode !== "new",
   });
   const size = compact ? "md" : "sm";
   const title = t(
@@ -153,6 +165,7 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
       describe: "workspace.git.actions.describeChange.label",
       "new-on": "workspace.git.actions.newChangeOn.label",
       edit: "workspace.git.actions.editChange.label",
+      new: "workspace.git.actions.newChange.label",
     }[snapshot.mode],
   );
   const header = useMemo(() => ({ title }), [title]);
@@ -167,7 +180,12 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
   }, [model, onClose]);
   const pending = state.status === "pending";
   let submitLabel = title;
-  if (pending) submitLabel = t("workspace.git.actions.jj.saving");
+  if (pending)
+    submitLabel = t(
+      snapshot.mode === "new"
+        ? "workspace.git.actions.newChange.pending"
+        : "workspace.git.actions.jj.saving",
+    );
   else if (state.needsRewriteApproval)
     submitLabel = t("workspace.git.actions.jj.approveRewrite", {
       defaultValue: "Approve native rewrite",
@@ -182,7 +200,7 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
           description={t("workspace.git.actions.jj.rewriteWarning")}
           testID="jj-rewrite-warning"
         />
-        {snapshot.mode === "describe" ? (
+        {snapshot.mode === "describe" || snapshot.mode === "new" ? (
           <Field label={t("workspace.git.actions.jj.description")}>
             <FormTextInput
               initialValue={snapshot.description}
@@ -248,7 +266,11 @@ function JjChangeForm({ snapshot, onClose }: { snapshot: JjChangeFormSnapshot; o
         {state.status === "success" ? (
           <Alert
             variant="success"
-            description={t("workspace.git.actions.jj.saved")}
+            description={
+              snapshot.mode === "new"
+                ? t("workspace.git.actions.newChange.success")
+                : t("workspace.git.actions.jj.saved")
+            }
             testID="jj-form-success"
           />
         ) : null}

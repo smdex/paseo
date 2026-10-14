@@ -161,7 +161,7 @@ function useWorkspaceLabelCatalog(
   return { labelCatalog, toggleLabel };
 }
 
-export function useWorkspaceCommandCenterActions(): void {
+export function useWorkspaceCommandCenterActions(): ReactElement | null {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const { t } = useTranslation();
   const selection = useActiveWorkspaceSelection();
@@ -202,7 +202,7 @@ export function useWorkspaceCommandCenterActions(): void {
     supportsSetupObservation,
   );
   const { overrides } = useKeyboardShortcutOverrides();
-  const { gitActions, isGit } = useGitActions({
+  const { gitActions, isGit, newChangeForm } = useGitActions({
     serverId: serverId ?? "",
     cwd: cwd ?? "",
     icons: GIT_ACTION_ICONS,
@@ -331,9 +331,9 @@ export function useWorkspaceCommandCenterActions(): void {
     enabled: Boolean(serverId && cwd),
     actions,
   });
+  return newChangeForm;
 }
 
-export function CommandCenterWorkspaceActions() {
-  useWorkspaceCommandCenterActions();
-  return null;
+export function CommandCenterWorkspaceActions(): ReactElement | null {
+  return useWorkspaceCommandCenterActions();
 }

@@ -1528,6 +1528,31 @@ describeIfJj("durable native change checkpoint", () => {
     expect((await getJjChangeMeta(fixture.repoDir, "@-"))!.changeId).toBe(before.changeId);
   });
 
+  it("starts a described new change without changing the previous change", async () => {
+    const fixture = scratch({ colocate: false, files: { "file.txt": "base\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    expect(fixture.jj(["describe", "-m", "Existing description"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "file.txt"), "preserved working copy contents\n");
+    const before = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    const message = "New title: 'quoted' & exact\nsecond line";
+
+    const result = await jjNew(
+      fixture.repoDir,
+      { message, expectedChangeId: before.changeId },
+      context,
+    );
+
+    const previous = (await getJjChangeMeta(fixture.repoDir, "@-"))!;
+    const current = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    expect(result.changeId).toBe(current.changeId);
+    expect(current.changeId).not.toBe(before.changeId);
+    expect(current.description).toBe(`${message}\n`);
+    expect(previous).toMatchObject({ changeId: before.changeId, description: before.description });
+    expect(fixture.jj(["file", "show", "-r", "@-", "file.txt"]).stdout).toBe(
+      "preserved working copy contents\n",
+    );
+  });
+
   it("refuses a changed draft and an excluded file without losing disk bytes", async () => {
     const fixture = scratch({ colocate: false });
     const context = { paseoHome: join(fixture.dir, "home") };

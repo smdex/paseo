@@ -329,6 +329,9 @@ describe("native change form", () => {
       edit: async () => {
         throw new Error("Unexpected Edit");
       },
+      newChange: async () => {
+        throw new Error("Unexpected New change");
+      },
       newOn: async () => {
         throw new Error("Unexpected New change");
       },
@@ -376,6 +379,9 @@ describe("native change form", () => {
         edit: async (request) => {
           calls.push(request);
         },
+        newChange: async () => {
+          throw new Error("Unexpected New change");
+        },
         newOn: async () => {
           throw new Error("Unexpected New change");
         },
@@ -407,6 +413,9 @@ describe("native change form", () => {
         edit: async (input) => {
           calls.push(input);
           throw new Error("Change is no longer editable");
+        },
+        newChange: async () => {
+          throw new Error("Unexpected New change");
         },
         newOn: async () => {},
         refresh: async () => {},
@@ -453,6 +462,9 @@ describe("native change form", () => {
               message: warning,
             });
         },
+        newChange: async () => {
+          throw new Error("Unexpected New change");
+        },
         refresh: async () => {},
       },
     );
@@ -484,6 +496,9 @@ describe("native change form", () => {
         edit: async () => {
           throw new Error("Unexpected Edit");
         },
+        newChange: async () => {
+          throw new Error("Unexpected New change");
+        },
         newOn: async (request) => {
           calls.push(request);
         },
@@ -507,6 +522,85 @@ describe("native change form", () => {
       },
     ]);
     expect(model.getState().status).toBe("success");
+    model.close();
+  });
+
+  it("starts a described new change once and keeps the draft through success", async () => {
+    const calls: Parameters<JjChangeFormPorts["newChange"]>[0][] = [];
+    const pending = createDeferred<void>();
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "new" },
+      {
+        describe: async () => {},
+        edit: async () => {},
+        newChange: async (input) => {
+          calls.push(input);
+          await pending.promise;
+        },
+        newOn: async () => {},
+        refresh: async () => {},
+      },
+    );
+    expect(model.getState().canSubmit).toBe(false);
+    model.setDraft(" \n\t ");
+    expect(model.getState().canSubmit).toBe(false);
+    model.setDraft("  A new change description  \nsecond line");
+    const submitting = model.submit();
+    await model.submit();
+    expect(model.getState().status).toBe("pending");
+    expect(calls).toEqual([
+      {
+        cwd: "/native",
+        message: "  A new change description  \nsecond line",
+        expectedChangeId: "current",
+        acknowledgeRewrites: false,
+      },
+    ]);
+    pending.resolve();
+    await submitting;
+    expect(model.getState()).toMatchObject({
+      draft: "  A new change description  \nsecond line",
+      status: "success",
+      canSubmit: false,
+    });
+    model.close();
+  });
+
+  it("keeps a described new-change draft after a failure for retry", async () => {
+    const calls: Parameters<JjChangeFormPorts["newChange"]>[0][] = [];
+    let shouldFail = true;
+    const model = openJjChangeForm(
+      { serverId: "host", cwd: "/native", changeId: "current", description: "", mode: "new" },
+      {
+        describe: async () => {},
+        edit: async () => {},
+        newChange: async (input) => {
+          calls.push(input);
+          if (shouldFail) throw new Error("Host disconnected");
+        },
+        newOn: async () => {},
+        refresh: async () => {},
+      },
+    );
+    model.setDraft("Keep this description for retry");
+    await model.submit();
+    expect(model.getState()).toMatchObject({
+      draft: "Keep this description for retry",
+      status: "error",
+      error: "Host disconnected",
+      canSubmit: true,
+    });
+    shouldFail = false;
+    await model.submit();
+    expect(calls.map((call) => call.message)).toEqual([
+      "Keep this description for retry",
+      "Keep this description for retry",
+    ]);
+    expect(model.getState()).toMatchObject({
+      draft: "Keep this description for retry",
+      status: "success",
+      canSubmit: false,
+    });
     model.close();
   });
 });
