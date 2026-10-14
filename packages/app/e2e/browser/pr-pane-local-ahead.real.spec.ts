@@ -29,7 +29,11 @@ import {
   waitForWorkspaceInSidebar,
 } from "../support/helpers/workspace-ui";
 
-test.use({ e2eDaemonEnvironment: { PASEO_JJ_DISPATCH: "1" } });
+test.use({
+  e2eDaemonEnvironment: { PASEO_JJ_DISPATCH: "1" },
+  // Pi catalog discovery loads user extensions, which can write into these temp checkouts.
+  e2eDaemonConfig: { version: 1, agents: { providers: { pi: { enabled: false } } } },
+});
 
 test.describe("PR pane for a jj workspace with unpublished work", () => {
   test.describe.configure({ retries: 0, timeout: 180_000 });
