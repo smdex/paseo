@@ -1424,6 +1424,9 @@ async function annotateSavedWip(
       { cwd },
       context,
     );
+    // Switches retain empty heads too. They have no work to resume, but their
+    // successful lookup must not leave an error after another head is repaired.
+    if (!empty.truncated && empty.stdout.trim() === "true") return;
     if (!empty.truncated && empty.stdout.trim() === "false") {
       perBookmark.set(wip.bookmark, wip.changeId);
       return;

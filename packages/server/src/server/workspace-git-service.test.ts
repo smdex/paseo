@@ -1,6 +1,7 @@
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import { getJjChangeMeta } from "../utils/checkout-jj.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import os from "node:os";
 import path, { join } from "node:path";
@@ -1581,6 +1582,59 @@ test.skipIf(!isJjAvailable())("jj bookmark selections bypass the auxiliary read 
     repo.dispose();
   }
 });
+
+test.skipIf(!isJjAvailable())(
+  "jj Resume retry reloads repaired checkpoint state and ignores valid empty retained heads",
+  async () => {
+    const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+    const service = new WorkspaceGitServiceImpl({
+      logger: createTestLogger(),
+      paseoHome: repo.dir,
+    });
+    try {
+      expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+      expect(repo.jj(["describe", "-m", "saved empty main"]).status).toBe(0);
+      const emptyMain = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      expect(repo.jj(["new", "main", "-m", "feature base"]).status).toBe(0);
+      expect(repo.jj(["bookmark", "create", "feature"]).status).toBe(0);
+      expect(repo.jj(["new", "-m", "saved feature work"]).status).toBe(0);
+      writeFileSync(join(repo.repoDir, "a.txt"), "saved feature work\n");
+      const feature = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      expect(repo.jj(["new", "main", "-m", "selected main"]).status).toBe(0);
+      const selected = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      const checkpoint = await importJjCheckpoint({
+        backingRoot: repo.repoDir,
+        head: selected,
+        paseoHome: repo.dir,
+      });
+      const savedWip = [
+        { ...emptyMain, bookmark: "main" },
+        { ...feature, bookmark: "feature" },
+      ];
+      await writeJjCheckpoint(
+        { ...checkpoint, savedWip: [savedWip[0]!, { ...savedWip[1]!, changeId: "k".repeat(32) }] },
+        repo.dir,
+      );
+      const failed = await service.suggestBranchesForCwd(repo.repoDir);
+      expect(failed.find((branch) => branch.name === "feature")).toMatchObject({
+        resumeLookupError: expect.stringContaining("could not be resolved"),
+      });
+      await writeJjCheckpoint({ ...checkpoint, savedWip }, repo.dir);
+      const retried = await service.suggestBranchesForCwd(repo.repoDir);
+      expect(retried.find((branch) => branch.name === "feature")?.wipChangeId).toBe(
+        feature.changeId,
+      );
+      expect(retried.find((branch) => branch.name === "main")?.wipChangeId).toBeUndefined();
+      expect(retried.every((branch) => branch.resumeLookupError === undefined)).toBe(true);
+      expect(await getJjChangeMeta(repo.repoDir, "@")).toEqual(selected);
+    } finally {
+      service.dispose();
+      vi.unstubAllEnvs();
+      repo.dispose();
+    }
+  },
+);
 
 test.skipIf(!isJjAvailable())(
   "native jj forge refresh and retained polls use explicit context and dispose on head replacement",
