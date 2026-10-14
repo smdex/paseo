@@ -6044,6 +6044,8 @@ export const BranchSuggestionsResponseSchema = z.object({
            * line holds no saved WIP.
            */
           wipChangeId: z.string().optional(),
+          // COMPAT(jjResumeLookupErrors): added in v0.11.2-smdex, remove after 2027-04-14 once the daemon floor advertises this detail to every jj client.
+          resumeLookupError: z.string().optional(),
         }),
       )
       .optional(),

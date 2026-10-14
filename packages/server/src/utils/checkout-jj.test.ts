@@ -733,6 +733,7 @@ describeIfJj("checkout-jj dispatch helpers", () => {
       expect(suggestion.hasLocal).toBe(true);
       expect(suggestion.hasRemote).toBe(false);
       expect(Number.isFinite(suggestion.committerDate)).toBe(true);
+      expect(suggestion.resumeLookupError).toBeUndefined();
     }
 
     const filtered = await listJjBookmarkSuggestions(fixture.repoDir, { query: "feature" });
@@ -1796,6 +1797,52 @@ describeIfJj("jj bookmark switch (P2)", () => {
     expect(jjCheckpointPath(fixture.repoDir, context.paseoHome).startsWith(context.paseoHome)).toBe(
       true,
     );
+  });
+
+  it("surfaces unreadable saved Resume state in suggestions without hiding jj status", async () => {
+    const fixture = scratch({ colocate: false, files: { "a.txt": "a\n" } });
+    const context = { paseoHome: join(fixture.dir, "home") };
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    fixture.jj(["new", "-m", "feature work"]);
+    fixture.jj(["bookmark", "create", "feature"]);
+    fixture.jj(["new", "-m", "wip"]);
+    writeFileSync(join(fixture.repoDir, "a.txt"), "dirty on feature\n");
+    const saved = (await getJjChangeMeta(fixture.repoDir, "@"))!;
+    await jjSwitchBookmark(
+      fixture.repoDir,
+      {
+        branch: "main",
+        mode: "new-on",
+        expectedChangeId: saved.changeId,
+        acknowledgeRewrites: true,
+      },
+      context,
+    );
+    const { jjCheckpointPath, readJjCheckpoint } = await import("./jj-checkpoint.js");
+    const checkpointPath = jjCheckpointPath(fixture.repoDir, context.paseoHome);
+    const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
+    const checkpointBytes = readFileSync(checkpointPath);
+    writeFileSync(checkpointPath, "{");
+
+    const suggestions = await listJjBookmarkSuggestions(fixture.repoDir, undefined, context);
+    expect(suggestions.find((suggestion) => suggestion.name === "feature")).toMatchObject({
+      resumeLookupError: expect.stringContaining("checkpoint cannot be read"),
+    });
+    writeFileSync(
+      checkpointPath,
+      JSON.stringify({
+        ...checkpoint!,
+        savedWip: [{ ...checkpoint!.savedWip[0], changeId: "k".repeat(32) }],
+      }),
+    );
+    const staleSuggestions = await listJjBookmarkSuggestions(fixture.repoDir, undefined, context);
+    expect(staleSuggestions.find((suggestion) => suggestion.name === "feature")).toMatchObject({
+      resumeLookupError: expect.stringContaining("could not be resolved"),
+    });
+    const status = await getJjStatus(fixture.repoDir, context);
+    expect(status.isGit).toBe(true);
+    expect(status.defaultWorkspaceBase).toBeDefined();
+    writeFileSync(checkpointPath, checkpointBytes);
   });
 
   it("annotates saved WIP on suggestions and Resume edits the same change ID after an external op", async () => {
