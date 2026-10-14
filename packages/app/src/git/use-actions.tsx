@@ -32,6 +32,8 @@ import { type WorktreeArchiveWarningLabels } from "@/git/worktree-archive-warnin
 import { useWorkspaceArchive } from "@/workspace/use-workspace-archive";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { readValidatedString } from "@/storage/validated-storage";
+import { JjChangeForm } from "@/git/jj-change-controls";
+import type { JjChangeFormSnapshot } from "@/git/jj-change-form-model";
 
 export type { GitActionId, GitAction, GitActions } from "@/git/policy";
 
@@ -207,6 +209,7 @@ interface UseGitActionsResult {
   gitActions: GitActions;
   branchLabel: string;
   isGit: boolean;
+  newChangeForm: ReactElement;
 }
 
 interface UseWorkspaceScreenArchiveControllerInput {
@@ -324,6 +327,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const activeWorkspaceSelection = useActiveWorkspaceSelection();
   const [postShipArchiveSuggested, setPostShipArchiveSuggested] = useState(false);
   const [shipDefault, setShipDefault] = useState<"merge" | "pr">("pr");
+  const [newChangeSnapshot, setNewChangeSnapshot] = useState<JjChangeFormSnapshot | null>(null);
 
   const { status, isLoading: isStatusLoading } = useCheckoutStatusQuery({ serverId, cwd });
   const gitStatus = status && status.isGit ? status : null;
@@ -464,7 +468,6 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const runDisablePrAutoMerge = useCheckoutGitActionsStore((s) => s.disablePrAutoMerge);
   const runMergeBranch = useCheckoutGitActionsStore((s) => s.mergeBranch);
   const runMergeFromBase = useCheckoutGitActionsStore((s) => s.mergeFromBase);
-  const runNewChange = useCheckoutGitActionsStore((s) => s.newChange);
   const githubAutoMergeActionsEnabled = useSessionStore(
     (s) =>
       s.sessions[serverId]?.serverInfo?.features?.checkoutForgeSetAutoMerge === true ||
@@ -525,24 +528,15 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
 
   const handleNewChange = useCallback(() => {
     const expectedChangeId = gitStatus?.changeId ?? undefined;
-    void confirmDialog({
-      title: t("workspace.git.actions.newChange.label"),
-      message: t("workspace.git.actions.jj.rewriteWarning"),
-    })
-      .then(async (approved) => {
-        if (!approved) return false;
-        await runNewChange({ serverId, cwd, expectedChangeId, acknowledgeRewrites: true });
-        return true;
-      })
-      .then((completed) => {
-        if (!completed) return;
-        toastActionSuccess(t("workspace.git.actions.newChange.success"));
-        return;
-      })
-      .catch((err) => {
-        toastActionError(err, t("workspace.git.actions.toasts.failedNewChange"));
-      });
-  }, [cwd, runNewChange, serverId, t, toastActionError, toastActionSuccess, gitStatus]);
+    if (!isJj || !expectedChangeId) return;
+    setNewChangeSnapshot({
+      serverId,
+      cwd,
+      changeId: expectedChangeId,
+      description: "",
+      mode: "new",
+    });
+  }, [cwd, serverId, gitStatus, isJj]);
 
   const handlePull = useCallback(() => {
     void runPull({ serverId, cwd })
@@ -938,7 +932,29 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     [gitActionsInput, baseRefLabel, hasPullRequest, forge, t, isJj],
   );
 
-  return { gitActions, branchLabel, isGit };
+  const closeNewChangeForm = useCallback(() => setNewChangeSnapshot(null), []);
+  const newChangeForm = (
+    <NewChangeFormHost snapshot={newChangeSnapshot} onClose={closeNewChangeForm} />
+  );
+
+  return { gitActions, branchLabel, isGit, newChangeForm };
+}
+
+function NewChangeFormHost({
+  snapshot,
+  onClose,
+}: {
+  snapshot: JjChangeFormSnapshot | null;
+  onClose(): void;
+}) {
+  if (!snapshot) return null;
+  return (
+    <JjChangeForm
+      key={`${snapshot.serverId}:${snapshot.cwd}:${snapshot.changeId}`}
+      snapshot={snapshot}
+      onClose={onClose}
+    />
+  );
 }
 
 function translateGitActions(
