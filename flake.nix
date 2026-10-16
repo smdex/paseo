@@ -19,6 +19,20 @@
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       pkgsFor = system: import nixpkgs { inherit system; };
+      # Android SDK components are unfree, so the mobile-client shells import
+      # their own nixpkgs with license acceptance instead of loosening the
+      # flake's default (free-only) package set. See nix/android-shell.nix.
+      androidShellsFor =
+        system:
+        import ./nix/android-shell.nix {
+          pkgs = import nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
+          };
+        };
     in
     {
       packages = forAllSystems (
@@ -81,6 +95,11 @@
             ];
           };
         }
+        # The Android SDK shells are Linux-only; macOS uses the mise-managed
+        # toolchain documented in docs/android.md.
+        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.systems.elaborate { inherit system; }).isLinux (
+          androidShellsFor system
+        )
       );
     };
 }

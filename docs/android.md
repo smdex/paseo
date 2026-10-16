@@ -59,6 +59,34 @@ emulator @paseo     # start it; leave running
 
 Gradle auto-fetches the platform/build-tools it needs once licenses are accepted, so adjust `android-35` only if it asks for a different level.
 
+## NixOS Android toolchain
+
+The flake has opt-in development shells for a phone (`nix develop .#android`)
+and an x86_64 emulator (`nix develop .#android-emulator`). They provide Node
+22, Java, ADB, Android SDK API 35/36 and the NDK. The SDK is read-only in the
+Nix store; npm and Gradle still download regular dependencies into writable
+local caches. The Android SDK license is accepted only in these shells.
+
+After `npm ci`, enable USB debugging and authorize your phone in `adb devices`
+(NixOS: enable `programs.adb`). Start `npm run dev:server` in another terminal
+to use the isolated checkout daemon on port 6768 rather than production 6767.
+Then from the Android shell, run:
+
+```bash
+adb reverse tcp:8081 tcp:8081
+adb reverse tcp:6768 tcp:6768
+REACT_NATIVE_PACKAGER_HOSTNAME=localhost EXPO_PUBLIC_LOCAL_DAEMON=localhost:6768 npm run android:development
+```
+
+On a standard emulator you may instead use `10.0.2.2:6768` for
+`EXPO_PUBLIC_LOCAL_DAEMON` and `10.0.2.2` for
+`REACT_NATIVE_PACKAGER_HOSTNAME`. The command generates, builds and installs
+the debug APK and starts Metro. Manually reinstall an existing build using
+`adb install -r packages/app/android/app/build/outputs/apk/debug/app-debug.apk`.
+A cached Metro bundle can retain the old daemon endpoint; restart Metro with
+`npx expo start -c`. See [development.md](development.md) for checkout-local
+daemon state.
+
 ## Local build + install
 
 From repo root:
