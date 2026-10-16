@@ -24,6 +24,7 @@ let
       "35.0.0"
       "36.0.0"
     ];
+    cmakeVersions = [ "3.22.1" ];
     platformToolsVersion = "latest";
     cmdLineToolsVersion = "latest";
     # The React Native Gradle plugin requires an NDK even for prebuilt
@@ -52,6 +53,7 @@ let
     ndkVersions = [ "27.1.12297006" "27.0.12077973" ];
     platformToolsVersion = "latest";
     cmdLineToolsVersion = "latest";
+    cmakeVersions = [ "3.22.1" ];
     includeEmulator = true;
     emulatorVersion = "latest";
     includeSystemImages = true;
