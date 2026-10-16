@@ -23,6 +23,14 @@ describe("native release version", () => {
     });
   });
 
+  it("ignores non-beta prerelease suffixes when deriving the native version", () => {
+    expect(getNativeReleaseVersion("0.11.2-smdex")).toEqual({
+      appVersion: "0.11.2",
+      androidVersionCode: 11002,
+      iosBuildNumber: "11002999",
+    });
+  });
+
   it("rejects beta numbers that consume the stable iOS build slot", () => {
     expect(() => getNativeReleaseVersion("0.2.6-beta.999")).toThrow(
       "iOS beta number must be between 1 and 998",
