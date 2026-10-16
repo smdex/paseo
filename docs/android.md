@@ -83,9 +83,15 @@ On a standard emulator you may instead use `10.0.2.2:6768` for
 `REACT_NATIVE_PACKAGER_HOSTNAME`. The command generates, builds and installs
 the debug APK and starts Metro. Manually reinstall an existing build using
 `adb install -r packages/app/android/app/build/outputs/apk/debug/app-debug.apk`.
-A cached Metro bundle can retain the old daemon endpoint; restart Metro with
-`npx expo start -c`. See [development.md](development.md) for checkout-local
-daemon state.
+A cached Metro bundle can retain the old daemon endpoint. Restart Metro from
+`packages/app` with the same endpoint (use `10.0.2.2` instead for the emulator):
+
+```bash
+cd packages/app
+REACT_NATIVE_PACKAGER_HOSTNAME=localhost EXPO_PUBLIC_LOCAL_DAEMON=localhost:6768 npx expo start -c
+```
+
+See [development.md](development.md) for checkout-local daemon state.
 
 ## Local build + install
 
