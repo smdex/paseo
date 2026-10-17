@@ -1,3 +1,4 @@
+import { piSubagentManager } from "./pi-subagent-manager/index.js";
 import { piAskUser } from "./pi-ask-user/index.js";
 import { piSubagents } from "./pi-subagents/index.js";
 import { edxethPiSubagents } from "./edxeth-pi-subagents/index.js";
@@ -15,6 +16,7 @@ export const piExtensions = [
   piSubagents, // Delegation calls
   tintinwebPiSubagents,
   gotgenesPiSubagents,
+  piSubagentManager,
   piMcpAdapter, // MCP proxy names
   rpivTodo,
   piExampleTodo,

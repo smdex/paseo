@@ -658,7 +658,8 @@ function createPiPaseoExtensionFile({
 	    };
 	}
 
-	function emitEntryCapture(ctx, reason, requestId) {
+	function emitEntryCapture(pi, ctx, reason, requestId) {
+	  pi.events.emit("paseo:extensions:snapshot", ctx);
 	  ctx.ui.notify(
 	    "${PASEO_PI_ENTRY_CAPTURE_MARKER} " +
 	      JSON.stringify({
@@ -718,7 +719,7 @@ function createPiPaseoExtensionFile({
     }
 
 	  pi.on("session_start", async (_event, ctx) => {
-	    emitEntryCapture(ctx, "session_start");
+	    emitEntryCapture(pi, ctx, "session_start");
 	  });
 
 	  pi.on("message_end", async (event) => {
@@ -735,14 +736,14 @@ function createPiPaseoExtensionFile({
 
 	  pi.on("turn_end", async (_event, ctx) => {
 	    emitSubmittedUserEntries(ctx);
-	    emitEntryCapture(ctx, "turn_end");
+	    emitEntryCapture(pi, ctx, "turn_end");
 	  });
 
 	  pi.registerCommand("${PASEO_PI_CAPTURE_EXTENSION_COMMAND}", {
 	    description: "Internal Paseo entry capture bridge",
 	    handler: async (args, ctx) => {
 	      const payload = decodePayload(args.trim());
-	      emitEntryCapture(ctx, "command", payload.requestId);
+	      emitEntryCapture(pi, ctx, "command", payload.requestId);
 	    },
 	  });
 
@@ -754,7 +755,7 @@ function createPiPaseoExtensionFile({
 	        const result = await ctx.navigateTree(payload.targetId, { summarize: false });
 	        // Pi reopens a session at its last entry, so record the rewind on the new branch to keep it.
 	        pi.appendEntry("${PASEO_PI_REWIND_ENTRY_TYPE}", { targetId: payload.targetId });
-	        emitEntryCapture(ctx, "tree_navigation");
+	        emitEntryCapture(pi, ctx, "tree_navigation");
 	        emitCommandResult(ctx, payload.requestId, { ok: true, result });
 	      } catch (error) {
 	        const message = error instanceof Error ? error.message : String(error);
@@ -1441,6 +1442,10 @@ export class PiRpcAgentSession implements AgentSession {
       createPiExtensionHost(this.logger, undefined, 16 * 1024 * 1024),
       this.closeController.signal,
     );
+    for (const event of await this.extensionHost.snapshot()) {
+      if (this.closeController.signal.aborted) return;
+      yield event;
+    }
   }
 
   async getRuntimeInfo(): Promise<AgentRuntimeInfo> {
