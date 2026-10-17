@@ -34,6 +34,13 @@ interface Follower {
   reader: PiChildSessionFollower;
   /** Reads run in order so a final read cannot overtake a tick. */
   pending: Promise<void>;
+  active: boolean;
+  retained: boolean;
+  reading?: boolean;
+  descriptor?: Extract<
+    import("../../../provider-subagents/store.js").ProviderSubagentInputEvent,
+    { type: "upsert" }
+  >;
 }
 
 export class PiExtensionHost {
@@ -61,7 +68,9 @@ export class PiExtensionHost {
   follow(onEvent: (event: AgentStreamEvent) => void): void {
     this.onFollowEvent = onEvent;
     this.followTimer ??= setInterval(() => {
-      for (const [id, follower] of this.followers) void this.readFollower(id, follower);
+      for (const [id, follower] of this.followers) {
+        if (follower.active) void this.readFollower(id, follower, true);
+      }
       void this.pollExtensions();
     }, 250);
   }
@@ -71,12 +80,30 @@ export class PiExtensionHost {
     this.followTimer = undefined;
     this.onFollowEvent = undefined;
     this.followers.clear();
+    this.sessions.length = 0;
   }
 
-  private readFollower(id: string, follower: Follower): Promise<void> {
-    follower.pending = follower.pending
+  private readFollower(id: string, follower: Follower, coalesce = false): Promise<void> {
+    // Lifecycle reads must see bytes appended after an in-flight periodic read captured its size.
+    if (coalesce && follower.reading) return follower.pending;
+    follower.reading = true;
+    const pending = follower.pending
       .then(async () => {
+        if (this.followers.get(id) !== follower || !this.onFollowEvent) return;
         const events = await follower.reader.readNew();
+        if (this.followers.get(id) !== follower || !this.onFollowEvent) return;
+        if (follower.reader.reset && follower.descriptor) {
+          this.onFollowEvent({
+            type: "provider_subagent",
+            provider: "pi",
+            event: { type: "remove", id },
+          });
+          this.onFollowEvent({
+            type: "provider_subagent",
+            provider: "pi",
+            event: follower.descriptor,
+          });
+        }
         for (const event of events) {
           this.onFollowEvent?.({ type: "provider_subagent", provider: "pi", event });
         }
@@ -87,8 +114,12 @@ export class PiExtensionHost {
           { err: error, operation: "follow", childId: id },
           "Pi child follow failed",
         );
+      })
+      .finally(() => {
+        if (follower.pending === pending) follower.reading = false;
       });
-    return follower.pending;
+    follower.pending = pending;
+    return pending;
   }
 
   private async pollExtensions(): Promise<void> {
@@ -180,12 +211,23 @@ export class PiExtensionHost {
   private async followChildren(
     mapping: PiExtensionToolMapping | PiExtensionCustomMapping,
   ): Promise<AgentStreamEvent[]> {
-    for (const { id, file } of mapping.childSessions ?? []) {
-      if (!this.followers.has(id)) {
-        this.followers.set(id, {
-          reader: new PiChildSessionFollower(id, file),
+    for (const child of mapping.childSessions ?? []) {
+      const previous = this.followers.get(child.id);
+      if (!previous || previous.reader.file !== child.file) {
+        this.followers.set(child.id, {
+          reader: new PiChildSessionFollower(child.id, child.file, undefined, child.branch),
           pending: Promise.resolve(),
+          active: true,
+          retained: Boolean(child.branch),
         });
+      } else previous.reader.setBranch(child.branch);
+    }
+    for (const event of mapping.subagents ?? []) {
+      if (event.type === "remove") this.followers.delete(event.id);
+      const follower = this.followers.get(event.id);
+      if (follower && event.type === "upsert") {
+        follower.descriptor = event;
+        if (event.status) follower.active = event.status === "running";
       }
     }
     const finished = (mapping.subagents ?? []).flatMap((event) =>
@@ -197,20 +239,50 @@ export class PiExtensionHost {
       const follower = this.followers.get(id);
       return follower ? [this.readFollower(id, follower)] : [];
     });
-    for (const id of finished) this.followers.delete(id);
     await Promise.all(reads);
+    for (const id of finished) {
+      const follower = this.followers.get(id);
+      if (follower && !follower.active && !follower.retained) this.followers.delete(id);
+    }
     return [];
+  }
+
+  /** Rebuild observed child stores from the same cursors; replays never append a second copy. */
+  async snapshot(): Promise<AgentStreamEvent[]> {
+    await Promise.all([...this.followers.values()].map((follower) => follower.pending));
+    const events: AgentStreamEvent[] = [];
+    for (const { id, adapter } of this.sessions) {
+      const mapping = this.safe(id, "snapshot", () => adapter.snapshot?.());
+      for (const event of mapping?.subagents ?? []) {
+        if (event.type !== "upsert") continue;
+        events.push(
+          { type: "provider_subagent", provider: "pi", event: { type: "remove", id: event.id } },
+          { type: "provider_subagent", provider: "pi", event },
+          ...(this.followers.get(event.id)?.reader.snapshot() ?? []).map(
+            (childEvent): AgentStreamEvent => ({
+              type: "provider_subagent",
+              provider: "pi",
+              event: childEvent,
+            }),
+          ),
+        );
+      }
+    }
+    return events;
   }
 
   private async readChildren(
     mapping: PiExtensionToolMapping | PiExtensionCustomMapping,
   ): Promise<AgentStreamEvent[]> {
     const groups = await Promise.all(
-      (mapping.childSessions ?? []).map(async ({ id, file }) => {
+      (mapping.childSessions ?? []).map(async ({ id, file, branch }) => {
         const bytes = Math.min(this.remainingHydrationBytes, 2 * 1024 * 1024);
         if (bytes <= 0) return [];
         this.remainingHydrationBytes -= bytes;
-        return (await this.readChildSession(id, file, bytes)).map(
+        const events = await (branch
+          ? this.readChildSession(id, file, bytes, branch)
+          : this.readChildSession(id, file, bytes));
+        return events.map(
           (event): AgentStreamEvent => ({ type: "provider_subagent", provider: "pi", event }),
         );
       }),

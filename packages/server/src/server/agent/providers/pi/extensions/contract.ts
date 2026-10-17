@@ -37,6 +37,12 @@ export interface PiExtensionCustomMapping {
 export interface PiChildSessionFile {
   id: string;
   file: string;
+  /** Manager-owned branch selection. Omitted for append-only extension transcripts. */
+  branch?: {
+    leafId: string | null;
+    /** Skip the prefix identified by pi-subagent:thread:v1, never guess from message text. */
+    skipInherited: boolean;
+  };
 }
 
 export type PiExtensionDialog = Extract<PiRuntimeEvent, { type: "extension_ui_request" }>;
@@ -55,6 +61,8 @@ export interface PiExtensionUiReply {
 }
 
 export interface PiExtensionSession {
+  /** Current observed descriptors for history replay; does not restart or inspect children. */
+  snapshot?(): PiExtensionCustomMapping;
   mapToolCall?(call: PiExtensionToolCall): PiExtensionToolMapping | undefined;
   /** Claims a `ctx.ui.notify` message sent by this extension's `runtimeBridge`. */
   mapRuntimeNotification?(message: string): PiExtensionCustomMapping | undefined;
