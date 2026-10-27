@@ -902,6 +902,8 @@ const timer = setInterval(() => {
     await daemon.close();
     await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
+});
+
 test("jj workspace creation defaults to the source parent and preserves sibling recovery authority", async () => {
   const previousDispatch = process.env.PASEO_JJ_DISPATCH;
   process.env.PASEO_JJ_DISPATCH = "1";

@@ -15,13 +15,10 @@ import {
   CheckoutForgeSetAutoMergeRequestSchema,
   CheckoutEditChangeResponseSchema,
   CheckoutFetchRebaseResponseSchema,
-  AgentSnapshotPayloadSchema,
-  AgentTimelineItemPayloadSchema,
   CheckoutIntegrateBaseResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   SessionInboundMessageSchema,
-  UsageReportEntrySchema,
   WSHelloMessageSchema,
   WorkspaceSetupProgressMessageSchema,
   WorkspaceSetupSnapshotSchema,
@@ -615,6 +612,8 @@ test("speech config reads remain compatible with clients before features and fut
       features: { voiceMode: { stt: { provider: "future", region: "eu" } } },
     }).features?.voiceMode?.stt,
   ).toEqual({ provider: "future", region: "eu" });
+});
+
 test("exact workspace refs and default bases remain optional across checkout wire versions", () => {
   const oldStatus = {
     type: "checkout_status_response",

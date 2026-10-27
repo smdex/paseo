@@ -8497,6 +8497,8 @@ test("closes before admission when a protected-capable daemon is reached in lega
   // Only the application hello reached the daemon; the queued command never did.
   expect(daemonReceived).toHaveLength(1);
   expect(JSON.parse(daemonReceived[0] as string)).toMatchObject({ type: "hello" });
+});
+
 test("checkpointed jj actions refuse unsupported hosts before sending intent", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
