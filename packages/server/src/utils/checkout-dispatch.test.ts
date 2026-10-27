@@ -11,6 +11,7 @@ import {
   dispatchDescribeChange,
   dispatchExecuteCreateBranchFromBase,
   dispatchGetCheckoutStatus,
+  dispatchGetCheckoutDiff,
   dispatchListPaseoWorktrees,
   dispatchNewChange,
   dispatchRunStashList,
@@ -42,7 +43,7 @@ function setEnv(name: string, value: string | undefined): void {
   }
 }
 
-/** jj dispatch is opt-in until Phase F; suites that exercise jj routing enable it. */
+/** Exercise jj routing with the explicit enablement gate. */
 function enableJjDispatch(): void {
   setEnv("PASEO_JJ_DISPATCH", "1");
   resetJjRuntimeCache();
@@ -123,6 +124,16 @@ describe("checkout dispatch gate", () => {
         expect(status.vcs).toBe("jj");
         expect(typeof status.changeId).toBe("string");
       }
+    });
+
+    it("passes cancellation to the native diff executor", async () => {
+      const dir = scratchJj();
+      const controller = new AbortController();
+      const reason = new Error("cancelled native diff");
+      controller.abort(reason);
+      await expect(
+        dispatchGetCheckoutDiff(dir, { mode: "uncommitted" }, undefined, controller.signal),
+      ).rejects.toBe(reason);
     });
 
     it("throws JjUnavailableError when the runtime is disabled, without falling back to git", async () => {

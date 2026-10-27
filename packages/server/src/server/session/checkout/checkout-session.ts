@@ -53,6 +53,7 @@ import {
 } from "../../../utils/checkout-git.js";
 import {
   dispatchCommitChanges,
+  dispatchFinishDescription,
   dispatchDescribeChange,
   dispatchFetchAndRebase,
   dispatchIntegrateIntoBase,
@@ -69,7 +70,6 @@ import {
   dispatchStashSave,
   resolveEffectiveBackend,
 } from "../../../utils/checkout-dispatch.js";
-import { getJjSnapshotFacts } from "../../../utils/checkout-jj.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
 
@@ -775,14 +775,10 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      let message = msg.message?.trim() ?? "";
-      if (!message && (await resolveEffectiveBackend(cwd)) === "jj") {
-        const facts = await getJjSnapshotFacts(cwd, {
-          paseoHome: this.paseoHome,
-          worktreesRoot: this.worktreesRoot,
-        });
-        if (facts.isJj) message = facts.workingCopy.meta.description;
-      }
+      let message = await dispatchFinishDescription(cwd, msg.message, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
       if (!message) message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
       if (!message) {
         throw new Error("Commit message is required");

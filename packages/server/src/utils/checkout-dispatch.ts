@@ -220,7 +220,7 @@ export async function dispatchGetCheckoutDiff(
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return getCheckoutDiff(cwd, compare, context, signal);
   }
-  return getJjDiff(cwd, compare, toJjContext(context));
+  return getJjDiff(cwd, compare, { ...toJjContext(context), signal });
 }
 
 export async function dispatchResolveRepositoryDefaultBranch(
@@ -259,6 +259,17 @@ export async function dispatchResolveBranchCheckout(
 const READ_ONLY_ENV = { GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" };
 
 // ---------------------------------------------------------------- mutations
+
+export async function dispatchFinishDescription(
+  cwd: string,
+  message: string | undefined,
+  context?: CheckoutContext,
+): Promise<string> {
+  const supplied = message?.trim() ?? "";
+  if (supplied || (await resolveEffectiveBackend(cwd)) !== "jj") return supplied;
+  const facts = await getJjSnapshotFacts(cwd, toJjContext(context));
+  return facts.isJj ? facts.workingCopy.meta.description : "";
+}
 
 export async function dispatchCommitChanges(
   cwd: string,
