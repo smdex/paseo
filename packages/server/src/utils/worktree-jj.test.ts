@@ -345,7 +345,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     // First archive pins and persists; restore brings the workspace back with
     // the OLD pin still present.
     const pins: string[] = [];
-    const incarnation = readJjWorkspaceIncarnation(created.worktreePath)!;
+    const incarnation = (await readJjWorkspaceIncarnation(created.worktreePath))!;
     const metadata = (await readPaseoWorktreeMetadata(created.worktreePath))!;
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
@@ -362,7 +362,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       revision: pins[0] ?? "",
     });
     // The recovery service reapplies retained incarnation and checkpoint metadata.
-    writeJjWorkspaceIncarnation(created.worktreePath, incarnation);
+    await writeJjWorkspaceIncarnation(created.worktreePath, incarnation);
     await writePaseoWorktreeMetadataFile(created.worktreePath, metadata);
     // A later archive gets its own pin; the previous generation stays intact.
     writeFileSync(join(created.worktreePath, "second-round.txt"), "work\n");
@@ -764,7 +764,7 @@ describeIfJj("jj retained rollback artifacts and lifecycle aliases", () => {
       symlinkSync(fixture.dir, alias, "dir");
       const root = join(fixture.dir, "absent", "workspace");
       const aliasRoot = join(alias, "absent", "workspace");
-      expect(workspaceLifecycleKey(root)).toBe(workspaceLifecycleKey(aliasRoot));
+      expect(await workspaceLifecycleKey(root)).toBe(await workspaceLifecycleKey(aliasRoot));
       const entered = Promise.withResolvers<void>();
       const finishFirst = Promise.withResolvers<void>();
       const events: string[] = [];

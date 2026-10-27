@@ -131,7 +131,7 @@ export class NotSupportedOnJjError extends Error {
  * select an unrelated enclosing repository.
  */
 export async function resolveEffectiveBackend(cwd: string): Promise<VcsBackend | "git-default"> {
-  if (detectVcsBackend(cwd) !== "jj") {
+  if ((await detectVcsBackend(cwd)) !== "jj") {
     return "git-default";
   }
   if (!isJjDispatchEnabled()) {
@@ -402,7 +402,7 @@ export async function dispatchResolveAbsoluteGitDir(
   if ((await resolveEffectiveBackend(cwd)) !== "jj") {
     return resolveAbsoluteGitDir(cwd, context);
   }
-  const identity = resolveJjRepoIdentity(cwd);
+  const identity = await resolveJjRepoIdentity(cwd);
   if (!identity) {
     return null;
   }
@@ -426,7 +426,7 @@ export async function dispatchResolveCheckoutWatchRoot(
       return null;
     }
   }
-  return resolveJjRepoIdentity(cwd)?.workspaceRoot ?? null;
+  return (await resolveJjRepoIdentity(cwd))?.workspaceRoot ?? null;
 }
 
 // ------------------------------------------------------- intentionally limited

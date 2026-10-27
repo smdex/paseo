@@ -1219,7 +1219,7 @@ for (const savedAuthority of [true, false]) {
           ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
           created.worktreePath,
         ).stdout;
-        const incarnation = readJjWorkspaceIncarnation(created.worktreePath);
+        const incarnation = await readJjWorkspaceIncarnation(created.worktreePath);
         const recoveryHead = fixture.jj([
           "log",
           "--no-graph",
@@ -1255,7 +1255,7 @@ for (const savedAuthority of [true, false]) {
         expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
           "replacement subproject\n",
         );
-        expect(readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
+        expect(await readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
         expect(
           fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
             .stdout,
@@ -1274,7 +1274,7 @@ for (const savedAuthority of [true, false]) {
         );
         expect(await workspaceRegistry.get(saved.workspaceId)).toEqual(active);
         expect(await projectRegistry.get(project.projectId)).toEqual(project);
-        expect(readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
+        expect(await readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
         expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
           "replacement subproject\n",
         );
@@ -1346,7 +1346,7 @@ test.skipIf(!isJjAvailable()).each([
       });
       expect(reopened.jjWorkspaceId).toBeUndefined();
       expect(await workspaceRegistry.list()).toEqual([reopened]);
-      expect(readJjWorkspaceIncarnation(fixture.repoDir)).toBeNull();
+      expect(await readJjWorkspaceIncarnation(fixture.repoDir)).toBeNull();
       expect(readFileSync(path.join(fixture.repoDir, "sub/file.txt"), "utf8")).toBe(
         "ordinary jj work\n",
       );
@@ -1412,7 +1412,7 @@ test.skipIf(!isJjAvailable()).each([
       expect(await workspaceRegistry.get(reopened.workspaceId)).toEqual(saved);
       expect(existsSync(root)).toBe(false);
       renameSync(backup, root);
-      expect(readJjWorkspaceIncarnation(root)).toBeNull();
+      expect(await readJjWorkspaceIncarnation(root)).toBeNull();
       expect(readFileSync(path.join(root, "sub/file.txt"), "utf8")).toBe("ordinary jj work\n");
     } finally {
       fixture.dispose();
@@ -1428,7 +1428,7 @@ interface JjOpenRaceFixture {
   provisioning: WorkspaceProvisioningService;
   archiveDeps: ArchiveDependencies;
   git: ReturnType<typeof createNoopWorkspaceGitService>;
-  createReplacement: () => Promise<Awaited<ReturnType<typeof createJjWorktree>>>;
+  createReplacement: (slug?: string) => Promise<Awaited<ReturnType<typeof createJjWorktree>>>;
 }
 
 async function jjOpenRaceFixture(subproject: boolean): Promise<JjOpenRaceFixture> {
@@ -1446,7 +1446,7 @@ async function jjOpenRaceFixture(subproject: boolean): Promise<JjOpenRaceFixture
   writeFileSync(path.join(old.worktreePath, "old-work.txt"), "saved old work\n");
   const git = createNoopWorkspaceGitService({
     getCheckout: async (cwd) => {
-      const identity = resolveJjRepoIdentity(cwd);
+      const identity = await resolveJjRepoIdentity(cwd);
       if (!identity) throw new Error(`Missing jj checkout: ${cwd}`);
       const metadata = await readPaseoWorktreeMetadata(identity.workspaceRoot);
       return {
@@ -1526,10 +1526,10 @@ async function jjOpenRaceFixture(subproject: boolean): Promise<JjOpenRaceFixture
     clearWorkspaceArchiving: () => {},
     killTerminalsForWorkspace: async () => {},
   };
-  const createReplacement = () =>
+  const createReplacement = (slug = "reused") =>
     createJjWorktree({
       cwd: fixture.repoDir,
-      worktreeSlug: "reused",
+      worktreeSlug: slug,
       worktreesRoot,
       source: { kind: "branch-off", baseBranch: "main", branchName: "new-feature" },
       onCreated: async (wt) => {
@@ -1583,13 +1583,12 @@ for (const subproject of [false, true]) {
         expect(reopened.archivedAt).toBeNull();
         expect(reopened.title).toBe("Edited while opening");
         expect((await archiving).removedDirectory).toBe(false);
-        const fresh = await h.createReplacement();
-        expect(fresh.worktreePath).toBe(`${h.old.worktreePath}-1`);
+        await expect(h.createReplacement()).rejects.toThrow("Workspace path already exists");
         expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
           "saved old work\n",
         );
         expect((await workspaceRegistry.get("a"))?.jjWorkspaceId).toBe(
-          readJjWorkspaceIncarnation(h.old.worktreePath),
+          await readJjWorkspaceIncarnation(h.old.worktreePath),
         );
       } finally {
         finishOpen.resolve();
@@ -1866,12 +1865,13 @@ test.skipIf(!isJjAvailable())(
     const continueWinner = Promise.withResolvers<void>();
     const winner = withWorkspaceLifecycle(h.old.worktreePath, async () => {
       await continueWinner.promise;
-      const fresh = await h.createReplacement();
+      const fresh = await h.createReplacement("replacement");
+      const incarnation = (await readJjWorkspaceIncarnation(fresh.worktreePath))!;
       await workspaceRegistry.update("a", (record) => ({
         ...record,
         cwd: path.join(fresh.worktreePath, "sub"),
         worktreeRoot: fresh.worktreePath,
-        jjWorkspaceId: readJjWorkspaceIncarnation(fresh.worktreePath)!,
+        jjWorkspaceId: incarnation,
       }));
     });
     const opening = h.provisioning.ensureWorkspaceRecordUnarchived(stale);
@@ -1899,7 +1899,9 @@ test.skipIf(!isJjAvailable())(
     const h = await jjOpenRaceFixture(true);
     try {
       const saved = (await workspaceRegistry.get("a"))!;
-      h.fixture.jj(["workspace", "forget", "reused"]);
+      expect(h.fixture.jj(["workspace", "forget", path.basename(h.old.worktreePath)]).status).toBe(
+        0,
+      );
       await expect(h.provisioning.findOrCreateWorkspaceForDirectory(h.a.cwd)).rejects.toThrow(
         "no longer registered",
       );
@@ -1950,7 +1952,7 @@ test.skipIf(!isJjAvailable())(
       });
       expect((await workspaceRegistry.get("a"))?.worktreeRoot).toBe(h.old.worktreePath);
       expect((await workspaceRegistry.get("a"))?.jjWorkspaceId).toBe(
-        readJjWorkspaceIncarnation(h.old.worktreePath),
+        await readJjWorkspaceIncarnation(h.old.worktreePath),
       );
       expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
         "saved old work\n",

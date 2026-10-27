@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, statSync, realpathSync } from "node:fs";
+import { readFile, stat, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 export type VcsBackend = "jj" | "git" | "none";
@@ -14,14 +14,27 @@ export type VcsBackend = "jj" | "git" | "none";
  * Pure fs, independent of jj runtime availability; no caching (a stat walk is
  * cheap next to any subprocess).
  */
-export function detectVcsBackend(cwd: string): VcsBackend {
-  let current = resolve(cwd);
+const backendDetections = new Map<string, Promise<VcsBackend>>();
+
+export function detectVcsBackend(cwd: string): Promise<VcsBackend> {
+  const path = resolve(cwd);
+  const existing = backendDetections.get(path);
+  if (existing) return existing;
+  const pending = detectBackend(path).finally(() => {
+    if (backendDetections.get(path) === pending) backendDetections.delete(path);
+  });
+  backendDetections.set(path, pending);
+  return pending;
+}
+
+async function detectBackend(cwd: string): Promise<VcsBackend> {
+  let current = cwd;
   // Walk up until the filesystem root.
   for (;;) {
-    if (hasDirEntry(current, ".jj")) {
+    if (await hasDirEntry(current, ".jj")) {
       return "jj";
     }
-    if (hasDirEntry(current, ".git")) {
+    if (await hasDirEntry(current, ".git")) {
       return "git";
     }
     const parent = dirname(current);
@@ -32,9 +45,9 @@ export function detectVcsBackend(cwd: string): VcsBackend {
   }
 }
 
-function hasDirEntry(dir: string, entry: string): boolean {
+async function hasDirEntry(dir: string, entry: string): Promise<boolean> {
   try {
-    statSync(join(dir, entry));
+    await stat(join(dir, entry));
     return true;
   } catch {
     return false;
@@ -210,15 +223,15 @@ export interface JjRepoIdentity {
  * torn down mid-flight) — callers treat that as "not a usable jj repo right
  * now", never as a different backend.
  */
-export function resolveJjRepoIdentity(cwd: string): JjRepoIdentity | null {
-  const workspaceRoot = findJjRoot(resolve(cwd));
+export async function resolveJjRepoIdentity(cwd: string): Promise<JjRepoIdentity | null> {
+  const workspaceRoot = await findJjRoot(resolve(cwd));
   if (!workspaceRoot) {
     return null;
   }
   const repoPointer = join(workspaceRoot, ".jj", "repo");
   let repoStat;
   try {
-    repoStat = statSync(repoPointer);
+    repoStat = await stat(repoPointer);
   } catch {
     return null;
   }
@@ -229,7 +242,7 @@ export function resolveJjRepoIdentity(cwd: string): JjRepoIdentity | null {
     // the shared repo directory, relative to this workspace's `.jj` directory.
     let target: string;
     try {
-      target = readFileSync(repoPointer, "utf8").trim();
+      target = (await readFile(repoPointer, "utf8")).trim();
     } catch {
       return null;
     }
@@ -244,29 +257,29 @@ export function resolveJjRepoIdentity(cwd: string): JjRepoIdentity | null {
   }
 
   const primaryRoot = dirname(dirname(sharedStorePath));
-  const colocated = isColocatedStore(sharedStorePath, primaryRoot);
+  const colocated = await isColocatedStore(sharedStorePath, primaryRoot);
   // Canonicalize the store path (realpath with fallback) so a symlinked
   // primary and its secondary workspaces report ONE shared identity — the
   // grouping key for observation and probe coalescing.
   let canonicalStorePath = sharedStorePath;
   try {
-    canonicalStorePath = realpathSync(sharedStorePath);
+    canonicalStorePath = await realpath(sharedStorePath);
   } catch {
     // keep the lexical path when realpath fails (race with removal)
   }
   return { workspaceRoot, sharedStorePath: canonicalStorePath, colocated, primaryRoot };
 }
 
-function findJjRoot(startDir: string): string | null {
+async function findJjRoot(startDir: string): Promise<string | null> {
   let current = startDir;
   for (;;) {
     // .jj first: a colocated root (both .jj and .git) IS a jj repo. Then .git
     // blocks the walk: a nested repository is its own repo, never observed
     // through an enclosing jj store.
-    if (hasDirEntry(current, ".jj")) {
+    if (await hasDirEntry(current, ".jj")) {
       return current;
     }
-    if (hasDirEntry(current, ".git")) {
+    if (await hasDirEntry(current, ".git")) {
       return null;
     }
     const parent = dirname(current);
@@ -277,10 +290,10 @@ function findJjRoot(startDir: string): string | null {
   }
 }
 
-function isColocatedStore(sharedStorePath: string, primaryRoot: string): boolean {
+async function isColocatedStore(sharedStorePath: string, primaryRoot: string): Promise<boolean> {
   let gitTarget: string;
   try {
-    gitTarget = readFileSync(join(sharedStorePath, "store", "git_target"), "utf8").trim();
+    gitTarget = (await readFile(join(sharedStorePath, "store", "git_target"), "utf8")).trim();
   } catch {
     return false;
   }

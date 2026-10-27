@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, realpathSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { resolve as resolvePath, sep } from "node:path";
+import pLimit from "p-limit";
 import type { Logger } from "pino";
 import type { ProcessEnvRecord } from "../server/paseo-env.js";
 import { spawnProcess } from "./spawn.js";
@@ -112,9 +113,11 @@ const jjCommandPriority = new AsyncLocalStorage<GitProcessPriority>();
 
 // jj reads snapshot too. Block all commands for a deleting workspace, and
 // drain commands admitted before the barrier before taking the final snapshot.
+// ponytail: one identity admission at a time preserves deletion order; shard only with alias-safe keys.
+const jjIdentityAdmission = pLimit(1);
 const jjDeletionRoots = new Map<string, symbol>();
 const jjDeletionTransaction = new AsyncLocalStorage<symbol>();
-const jjPendingCommands = new Map<Promise<void>, string>();
+const jjPendingCommands = new Map<Promise<void>, Promise<string>>();
 
 export class JjMutationBarrierError extends Error {
   constructor(readonly root: string) {
@@ -123,9 +126,9 @@ export class JjMutationBarrierError extends Error {
   }
 }
 
-function normalizedCommandCwd(cwd: string): string {
+async function normalizedCommandCwd(cwd: string): Promise<string> {
   try {
-    return realpathSync(cwd);
+    return await realpath(cwd);
   } catch {
     return resolvePath(cwd);
   }
@@ -140,7 +143,7 @@ function assertNoDeletionBarrier(
   transaction = jjDeletionTransaction.getStore(),
 ): void {
   for (const [root, owner] of jjDeletionRoots) {
-    if (isWithinRoot(normalizedCommandCwd(cwd), root) && transaction !== owner) {
+    if (isWithinRoot(cwd, root) && transaction !== owner) {
       throw new JjMutationBarrierError(root);
     }
   }
@@ -150,25 +153,29 @@ export async function withJjDeletionTransaction<T>(
   root: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const normalized = normalizedCommandCwd(root);
-  if (
-    [...jjDeletionRoots.keys()].some(
-      (active) => isWithinRoot(normalized, active) || isWithinRoot(active, normalized),
-    )
-  ) {
-    throw new JjMutationBarrierError(normalized);
-  }
-  const owner = Symbol(normalized);
-  jjDeletionRoots.set(normalized, owner);
+  const { normalized: normalizedRoot, owner: transactionOwner } = await jjIdentityAdmission(
+    async () => {
+      const normalized = await normalizedCommandCwd(root);
+      if (
+        [...jjDeletionRoots.keys()].some(
+          (active) => isWithinRoot(normalized, active) || isWithinRoot(active, normalized),
+        )
+      )
+        throw new JjMutationBarrierError(normalized);
+      const owner = Symbol(normalized);
+      jjDeletionRoots.set(normalized, owner);
+      return { normalized, owner };
+    },
+  );
   try {
     await Promise.all(
-      [...jjPendingCommands]
-        .filter(([, cwd]) => isWithinRoot(cwd, normalized))
-        .map(([done]) => done),
+      [...jjPendingCommands].map(async ([done, cwd]) => {
+        if (isWithinRoot(await cwd, normalizedRoot)) await done;
+      }),
     );
-    return await jjDeletionTransaction.run(owner, operation);
+    return await jjDeletionTransaction.run(transactionOwner, operation);
   } finally {
-    jjDeletionRoots.delete(normalized);
+    jjDeletionRoots.delete(normalizedRoot);
   }
 }
 
@@ -203,31 +210,31 @@ interface JjExecutionContext {
   priority: () => GitProcessPriority;
 }
 
-function executeJjCommand(
+async function executeJjCommand(
   args: string[],
   options: JjCommandOptions,
   spawn: JjSpawnFn,
   context: JjExecutionContext,
 ): Promise<JjCommandResult> {
-  try {
-    options.signal?.throwIfAborted();
-    assertNoDeletionBarrier(options.cwd);
-  } catch (error) {
-    return Promise.reject(error);
-  }
+  options.signal?.throwIfAborted();
   const transaction = jjDeletionTransaction.getStore();
   let complete!: () => void;
   const done = new Promise<void>((resolve) => {
     complete = resolve;
   });
-  jjPendingCommands.set(done, normalizedCommandCwd(options.cwd));
+  let resolveCommandCwd!: (cwd: string) => void;
+  const commandCwd = new Promise<string>((resolve) => {
+    resolveCommandCwd = resolve;
+  });
+  jjPendingCommands.set(done, commandCwd);
   const finish = () => {
     jjPendingCommands.delete(done);
     complete();
   };
+  let normalizedCwd: string;
   const startCommand = () => {
     options.signal?.throwIfAborted();
-    assertNoDeletionBarrier(options.cwd, transaction);
+    assertNoDeletionBarrier(normalizedCwd, transaction);
     let releaseProcessSlot!: () => void;
     const exited = new Promise<void>((resolve) => {
       releaseProcessSlot = resolve;
@@ -250,7 +257,6 @@ function executeJjCommand(
             provenance: context.provenance,
             args,
             cwd: options.cwd,
-            cwdExists: existsSync(options.cwd),
             timeout,
             maxOutputBytes,
             acceptExitCodes,
@@ -297,7 +303,7 @@ function executeJjCommand(
       }
       try {
         child = spawn("jj", [...JJ_GLOBAL_ARGS, ...args], {
-          cwd: options.cwd,
+          cwd: normalizedCwd,
           envOverlay,
           shell: false,
           stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
@@ -447,18 +453,30 @@ function executeJjCommand(
     void exited.then(finish);
     return { result: resultPromise, exited };
   };
-  return context
-    .scheduler()
-    .run(startCommand, { priority: context.priority() })
-    .catch((error) => {
-      // An admitted command refused at spawn has no child exit to release it.
-      if (
-        error instanceof JjMutationBarrierError ||
-        (options.signal?.aborted && error === options.signal.reason)
-      )
-        finish();
-      throw error;
+  let scheduled: Promise<JjCommandResult>;
+  try {
+    const admitted = await jjIdentityAdmission(async () => {
+      normalizedCwd = await normalizedCommandCwd(options.cwd);
+      resolveCommandCwd(normalizedCwd);
+      options.signal?.throwIfAborted();
+      assertNoDeletionBarrier(normalizedCwd, transaction);
+      return { result: context.scheduler().run(startCommand, { priority: context.priority() }) };
     });
+    scheduled = admitted.result;
+  } catch (error) {
+    resolveCommandCwd(resolvePath(options.cwd));
+    finish();
+    throw error;
+  }
+  return scheduled.catch((error) => {
+    // An admitted command refused at spawn has no child exit to release it.
+    if (
+      error instanceof JjMutationBarrierError ||
+      (options.signal?.aborted && error === options.signal.reason)
+    )
+      finish();
+    throw error;
+  });
 }
 
 function formatJjCommand(args: string[]): string {

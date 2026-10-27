@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
 import { detectVcsBackend, resolveJjRepoIdentity } from "../utils/vcs-backend.js";
@@ -31,9 +31,11 @@ export function hasDurableJjAuthority(
   );
 }
 
-export function jjWorkspaceBackingRoot(workspace: PersistedWorkspaceRecord): string {
+export async function jjWorkspaceBackingRoot(workspace: PersistedWorkspaceRecord): Promise<string> {
   return (
-    workspace.worktreeRoot ?? resolveJjRepoIdentity(workspace.cwd)?.workspaceRoot ?? workspace.cwd
+    workspace.worktreeRoot ??
+    (await resolveJjRepoIdentity(workspace.cwd))?.workspaceRoot ??
+    workspace.cwd
   );
 }
 
@@ -52,24 +54,34 @@ export function sameJjWorkspaceAuthority(
   );
 }
 
-function hasJjManagementMarker(root: string): boolean {
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function hasJjManagementMarker(root: string): Promise<boolean> {
   return (
-    Boolean(readJjWorkspaceIncarnation(root)) ||
-    existsSync(join(root, ".jj", "paseo", "worktree.json"))
+    Boolean(await readJjWorkspaceIncarnation(root)) ||
+    (await exists(join(root, ".jj", "paseo", "worktree.json")))
   );
 }
 
 /** Evidence stays positive when a legacy backing checkout disappears or is replaced by Git. */
-export function hasPositiveJjEvidence(workspace: PersistedWorkspaceRecord): boolean {
-  const root = jjWorkspaceBackingRoot(workspace);
+export async function hasPositiveJjEvidence(workspace: PersistedWorkspaceRecord): Promise<boolean> {
+  const root = await jjWorkspaceBackingRoot(workspace);
   return (
-    hasJjManagementMarker(root) ||
-    detectVcsBackend(root) === "jj" ||
-    detectVcsBackend(workspace.cwd) === "jj" ||
+    (await hasJjManagementMarker(root)) ||
+    (await detectVcsBackend(root)) === "jj" ||
+    (await detectVcsBackend(workspace.cwd)) === "jj" ||
     Boolean(
       workspace.kind === "worktree" &&
       workspace.mainRepoRoot &&
-      detectVcsBackend(workspace.mainRepoRoot) === "jj",
+      (await detectVcsBackend(workspace.mainRepoRoot)) === "jj",
     )
   );
 }
@@ -79,18 +91,18 @@ export async function validatePresentJjWorkspace(
   workspace: PersistedWorkspaceRecord,
 ): Promise<JjWorkspaceAuthority> {
   const authority = jjWorkspaceAuthority(workspace);
-  const root = jjWorkspaceBackingRoot(workspace);
+  const root = await jjWorkspaceBackingRoot(workspace);
   if (authority === "external") {
-    if (hasJjManagementMarker(root))
+    if (await hasJjManagementMarker(root))
       throw new Error(
         "External jj workspace now has contradictory managed metadata; refusing adoption",
       );
-    if (!existsSync(workspace.cwd))
+    if (!(await exists(workspace.cwd)))
       throw new Error("The external jj workspace directory is missing and cannot be recreated");
     return authority;
   }
   if (authority === "unknown") {
-    if (hasPositiveJjEvidence(workspace)) assertJjWorkspaceIncarnation(root, undefined);
+    if (await hasPositiveJjEvidence(workspace)) await assertJjWorkspaceIncarnation(root, undefined);
     return authority;
   }
   await validateManagedJjWorkspace(workspace, root);
@@ -101,24 +113,24 @@ async function validateManagedJjWorkspace(
   workspace: PersistedWorkspaceRecord,
   root: string,
 ): Promise<void> {
-  const identity = resolveJjRepoIdentity(root);
-  assertJjWorkspaceIncarnation(root, workspace.jjWorkspaceId ?? workspace.recoveryBookmark);
+  const identity = await resolveJjRepoIdentity(root);
+  await assertJjWorkspaceIncarnation(root, workspace.jjWorkspaceId ?? workspace.recoveryBookmark);
   const source = workspace.mainRepoRoot ?? identity?.primaryRoot;
   if (
     !identity ||
     !source ||
-    detectVcsBackend(source) !== "jj" ||
-    workspaceLifecycleKey(identity.workspaceRoot) !== workspaceLifecycleKey(root) ||
-    workspaceLifecycleKey(identity.primaryRoot) !== workspaceLifecycleKey(source)
+    (await detectVcsBackend(source)) !== "jj" ||
+    (await workspaceLifecycleKey(identity.workspaceRoot)) !== (await workspaceLifecycleKey(root)) ||
+    (await workspaceLifecycleKey(identity.primaryRoot)) !== (await workspaceLifecycleKey(source))
   )
     throw new Error(
       "Managed jj backing or source repository changed; retained authority was not changed",
     );
-  const cwdIdentity = resolveJjRepoIdentity(workspace.cwd);
+  const cwdIdentity = await resolveJjRepoIdentity(workspace.cwd);
   if (
     !cwdIdentity ||
     cwdIdentity.sharedStorePath !== identity.sharedStorePath ||
-    workspaceLifecycleKey(cwdIdentity.workspaceRoot) !== workspaceLifecycleKey(root)
+    (await workspaceLifecycleKey(cwdIdentity.workspaceRoot)) !== (await workspaceLifecycleKey(root))
   )
     throw new Error("Managed jj selected directory no longer belongs to its backing checkout");
   const matches = createRealpathAwarePathMatcher(root);
@@ -140,17 +152,20 @@ export interface FreshJjAuthorityInput {
 export async function establishFreshJjAuthority(
   input: FreshJjAuthorityInput,
 ): Promise<PersistedWorkspaceRecord> {
-  const root = jjWorkspaceBackingRoot(input.workspace);
-  if (detectVcsBackend(root) !== "jj") return input.workspace;
-  const incarnation = readJjWorkspaceIncarnation(root);
+  const root = await jjWorkspaceBackingRoot(input.workspace);
+  if ((await detectVcsBackend(root)) !== "jj") return input.workspace;
+  const incarnation = await readJjWorkspaceIncarnation(root);
   const ownership = await isPaseoOwnedWorktreeCwd(root, {
     paseoHome: input.paseoHome,
     worktreesRoot: input.worktreesRoot,
     knownGitCommonDir: null,
   });
-  const managed = input.createdWorktree || ownership.allowed || hasJjManagementMarker(root);
+  const managed = input.createdWorktree || ownership.allowed || (await hasJjManagementMarker(root));
   const matches = createRealpathAwarePathMatcher(root);
-  const siblings = input.siblings.filter((record) => matches(jjWorkspaceBackingRoot(record)));
+  const siblings: PersistedWorkspaceRecord[] = [];
+  for (const record of input.siblings) {
+    if (matches(await jjWorkspaceBackingRoot(record))) siblings.push(record);
+  }
   if (!input.createdWorktree) {
     for (const sibling of siblings) {
       const authority = jjWorkspaceAuthority(sibling);
@@ -161,7 +176,7 @@ export async function establishFreshJjAuthority(
       if (authority === "managed" && !managed)
         throw new Error("Managed jj sibling authority cannot be downgraded");
       if (authority === "managed")
-        assertJjWorkspaceIncarnation(root, sibling.jjWorkspaceId ?? sibling.recoveryBookmark);
+        await assertJjWorkspaceIncarnation(root, sibling.jjWorkspaceId ?? sibling.recoveryBookmark);
     }
   }
   const workspace: PersistedWorkspaceRecord = {

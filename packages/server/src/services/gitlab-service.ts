@@ -916,7 +916,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
   const resolveRemoteUrl = options.resolveRemoteUrl ?? defaultResolveRemoteUrl;
 
   async function run(args: string[], runOptions: GlabCommandRunnerOptions): Promise<string> {
-    const repository = requireForgeRepositoryContext(runOptions);
+    const repository = await requireForgeRepositoryContext(runOptions);
     if (repository) {
       args = args.map((arg) =>
         arg.replace(
@@ -1209,7 +1209,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       if (!glabPath) {
         return false;
       }
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       const remoteUrl = repository ? null : await resolveRemoteUrl(input.cwd);
       const host = repository?.host ?? (remoteUrl ? parseGitLabHostFromRemoteUrl(remoteUrl) : null);
       if (!host) {
@@ -1225,7 +1225,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
 
     async getCurrentPullRequestStatus(input): Promise<CurrentPullRequestStatus | null> {
       try {
-        const repository = requireForgeRepositoryContext(input);
+        const repository = await requireForgeRepositoryContext(input);
         const mr = await resolveCurrentMergeRequest(
           input.cwd,
           input.headRef,
@@ -1318,7 +1318,7 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     },
 
     async createPullRequest(input: CreatePullRequestOptions): Promise<PullRequestCreateResult> {
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       const args = [
         "mr",
         "create",

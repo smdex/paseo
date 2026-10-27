@@ -1536,9 +1536,9 @@ describeIfJj("durable native change checkpoint", () => {
         .stdout.trim(),
     ).toBe(before!.commitId);
 
-    expect(jjCheckpointPath(fixture.repoDir, context.paseoHome).startsWith(context.paseoHome)).toBe(
-      true,
-    );
+    expect(
+      (await jjCheckpointPath(fixture.repoDir, context.paseoHome)).startsWith(context.paseoHome),
+    ).toBe(true);
   });
 
   it("does not silently apply Finish's description fallback to an empty Describe request", async () => {
@@ -1750,7 +1750,7 @@ describeIfJj("durable native change checkpoint", () => {
     const context = { paseoHome: join(fixture.dir, "home") };
     await jjDescribe(fixture.repoDir, { message: "saved" }, context);
     const { jjCheckpointPath } = await import("./jj-checkpoint.js");
-    rmSync(jjCheckpointPath(fixture.repoDir, context.paseoHome));
+    rmSync(await jjCheckpointPath(fixture.repoDir, context.paseoHome));
     await expect(
       jjDescribe(fixture.repoDir, { message: "must not adopt" }, context),
     ).rejects.toThrow("saved jj checkpoint");
@@ -1828,9 +1828,9 @@ describeIfJj("jj bookmark switch (P2)", () => {
     expect(checkpoint!.savedWip).toEqual([
       { commitId: leftChange.commitId, changeId: leftChange.changeId, bookmark: "feature" },
     ]);
-    expect(jjCheckpointPath(fixture.repoDir, context.paseoHome).startsWith(context.paseoHome)).toBe(
-      true,
-    );
+    expect(
+      (await jjCheckpointPath(fixture.repoDir, context.paseoHome)).startsWith(context.paseoHome),
+    ).toBe(true);
   });
 
   it("surfaces unreadable saved Resume state in suggestions without hiding jj status", async () => {
@@ -1853,7 +1853,7 @@ describeIfJj("jj bookmark switch (P2)", () => {
       context,
     );
     const { jjCheckpointPath, readJjCheckpoint } = await import("./jj-checkpoint.js");
-    const checkpointPath = jjCheckpointPath(fixture.repoDir, context.paseoHome);
+    const checkpointPath = await jjCheckpointPath(fixture.repoDir, context.paseoHome);
     const checkpoint = await readJjCheckpoint(fixture.repoDir, context.paseoHome);
     const checkpointBytes = readFileSync(checkpointPath);
     writeFileSync(checkpointPath, "{");
@@ -2455,6 +2455,7 @@ describeIfJj("fetch all remotes and rebase", () => {
     expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
     expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
     expect(fixture.jj(["bookmark", "create", "remote-only", "-r", "main"]).status).toBe(0);
+    expect(fixture.jj(["bookmark", "track", "remote-only@upstream"]).status).toBe(0);
     expect(
       fixture.jj(["git", "push", "--bookmark", "remote-only", "--remote", "upstream"]).status,
     ).toBe(0);

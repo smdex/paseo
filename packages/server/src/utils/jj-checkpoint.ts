@@ -89,13 +89,14 @@ export class JjRewriteApprovalRequiredError extends JjCheckpointError {
   }
 }
 
-export function jjCheckpointPath(
+export async function jjCheckpointPath(
   backingRoot: string,
   paseoHome?: string,
-  incarnation = readJjWorkspaceIncarnation(backingRoot),
-): string {
+  incarnation?: string | null,
+): Promise<string> {
+  if (incarnation === undefined) incarnation = await readJjWorkspaceIncarnation(backingRoot);
   const key = createHash("sha256")
-    .update(JSON.stringify([workspaceLifecycleKey(backingRoot), incarnation]))
+    .update(JSON.stringify([await workspaceLifecycleKey(backingRoot), incarnation]))
     .digest("hex");
   return join(
     paseoHome ? resolve(paseoHome) : resolvePaseoHome(),
@@ -114,7 +115,7 @@ async function checkpointReferenceExists(
   paseoHome?: string,
 ): Promise<boolean> {
   for (const reference of [
-    `${jjCheckpointPath(backingRoot, paseoHome)}.reference`,
+    `${await jjCheckpointPath(backingRoot, paseoHome)}.reference`,
     liveCheckpointReference(backingRoot),
   ]) {
     try {
@@ -133,7 +134,7 @@ export async function readJjCheckpoint(
 ): Promise<JjCheckpoint | null> {
   try {
     return JjCheckpointSchema.parse(
-      JSON.parse(await fs.readFile(jjCheckpointPath(backingRoot, paseoHome), "utf8")),
+      JSON.parse(await fs.readFile(await jjCheckpointPath(backingRoot, paseoHome), "utf8")),
     );
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
@@ -155,7 +156,7 @@ export async function writeJjCheckpoint(
   paseoHome?: string,
 ): Promise<JjCheckpoint> {
   const next = JjCheckpointSchema.parse({ ...checkpoint, generation: checkpoint.generation + 1 });
-  const path = jjCheckpointPath(next.backingRoot, paseoHome, next.incarnation);
+  const path = await jjCheckpointPath(next.backingRoot, paseoHome, next.incarnation);
   await writeJsonFileAtomic(path, next);
   const reference = {
     backingRoot: next.backingRoot,
@@ -164,8 +165,8 @@ export async function writeJjCheckpoint(
   };
   await writeJsonFileAtomic(`${path}.reference`, reference);
   if (
-    readJjWorkspaceIncarnation(next.backingRoot) !== next.incarnation ||
-    !resolveJjRepoIdentity(next.backingRoot)
+    (await readJjWorkspaceIncarnation(next.backingRoot)) !== next.incarnation ||
+    !(await resolveJjRepoIdentity(next.backingRoot))
   )
     throw new JjCheckpointError(
       "The live checkout changed while saving its checkpoint; retained state requires reconciliation.",
@@ -180,13 +181,16 @@ function ownership(metadata: JjCheckpoint["metadata"]): string | null {
   return metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
 }
 
-export async function validateJjCheckpoint(checkpoint: JjCheckpoint, backingRoot: string): Promise<void> {
-  const identity = resolveJjRepoIdentity(backingRoot);
-  const incarnation = readJjWorkspaceIncarnation(backingRoot);
+export async function validateJjCheckpoint(
+  checkpoint: JjCheckpoint,
+  backingRoot: string,
+): Promise<void> {
+  const identity = await resolveJjRepoIdentity(backingRoot);
+  const incarnation = await readJjWorkspaceIncarnation(backingRoot);
   if (
     !identity ||
-    checkpoint.backingRoot !== workspaceLifecycleKey(backingRoot) ||
-    checkpoint.sharedStore !== workspaceLifecycleKey(identity.sharedStorePath) ||
+    checkpoint.backingRoot !== (await workspaceLifecycleKey(backingRoot)) ||
+    checkpoint.sharedStore !== (await workspaceLifecycleKey(identity.sharedStorePath)) ||
     checkpoint.incarnation !== incarnation
   ) {
     throw new JjCheckpointError(
@@ -210,13 +214,15 @@ function metadataAuthority(metadata: JjCheckpoint["metadata"]): string {
   });
 }
 
-export function jjArchiveCheckpointPath(
+export async function jjArchiveCheckpointPath(
   backingRoot: string,
   pin: string,
   paseoHome?: string,
-): string {
+): Promise<string> {
   const key = createHash("sha256").update(pin).digest("hex");
-  const rootKey = createHash("sha256").update(workspaceLifecycleKey(backingRoot)).digest("hex");
+  const rootKey = createHash("sha256")
+    .update(await workspaceLifecycleKey(backingRoot))
+    .digest("hex");
   const home = paseoHome ? resolve(paseoHome) : resolvePaseoHome();
   return join(home, "projects", "jj-checkpoints", "archives", rootKey, `${key}.json`);
 }
@@ -227,7 +233,7 @@ export async function writeJjArchiveCheckpoint(
   paseoHome?: string,
 ): Promise<void> {
   await writeJsonFileAtomic(
-    jjArchiveCheckpointPath(checkpoint.backingRoot, pin, paseoHome),
+    await jjArchiveCheckpointPath(checkpoint.backingRoot, pin, paseoHome),
     checkpoint,
   );
 }
@@ -239,7 +245,9 @@ export async function readJjArchiveCheckpoint(
 ): Promise<JjCheckpoint | null> {
   try {
     return JjCheckpointSchema.parse(
-      JSON.parse(await fs.readFile(jjArchiveCheckpointPath(backingRoot, pin, paseoHome), "utf8")),
+      JSON.parse(
+        await fs.readFile(await jjArchiveCheckpointPath(backingRoot, pin, paseoHome), "utf8"),
+      ),
     );
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
@@ -259,7 +267,7 @@ export async function importJjCheckpoint(input: {
     await validateJjCheckpoint(existing, input.backingRoot);
     return existing;
   }
-  const identity = resolveJjRepoIdentity(input.backingRoot);
+  const identity = await resolveJjRepoIdentity(input.backingRoot);
   if (!identity) throw new JjCheckpointError("The jj backing checkout is unavailable.");
   const metadata = await readPaseoWorktreeMetadata(input.backingRoot);
   if (metadata && (!metadata.baseRef || !/^[0-9a-f]{40,64}$/.test(metadata.baseRef)))
@@ -272,9 +280,9 @@ export async function importJjCheckpoint(input: {
   return writeJjCheckpoint(
     {
       version: 1,
-      backingRoot: workspaceLifecycleKey(input.backingRoot),
-      sharedStore: workspaceLifecycleKey(identity.sharedStorePath),
-      incarnation: readJjWorkspaceIncarnation(input.backingRoot),
+      backingRoot: await workspaceLifecycleKey(input.backingRoot),
+      sharedStore: await workspaceLifecycleKey(identity.sharedStorePath),
+      incarnation: await readJjWorkspaceIncarnation(input.backingRoot),
       generation: 0,
       metadata,
       selection: input.head,
@@ -310,8 +318,10 @@ function restoreReference(phase: JjRestorePhase): JjRestoreReference {
 
 // Registration precedes UUID/metadata materialization. This root-keyed fact
 // must be discoverable even by a newly registered child with no UUID yet.
-function jjRestorePhasePath(backingRoot: string, paseoHome?: string): string {
-  const key = createHash("sha256").update(workspaceLifecycleKey(backingRoot)).digest("hex");
+async function jjRestorePhasePath(backingRoot: string, paseoHome?: string): Promise<string> {
+  const key = createHash("sha256")
+    .update(await workspaceLifecycleKey(backingRoot))
+    .digest("hex");
   return join(
     paseoHome ? resolve(paseoHome) : resolvePaseoHome(),
     "projects",
@@ -338,7 +348,7 @@ async function validateRestoreReference(
   const archive = await readJjArchiveCheckpoint(backingRoot, reference.recoveryPin, paseoHome);
   if (
     !archive ||
-    reference.backingRoot !== workspaceLifecycleKey(backingRoot) ||
+    reference.backingRoot !== (await workspaceLifecycleKey(backingRoot)) ||
     archive.backingRoot !== reference.backingRoot ||
     archive.sharedStore !== reference.sharedStore ||
     archive.incarnation !== reference.incarnation ||
@@ -356,7 +366,7 @@ export async function readJjRestorePhase(
   paseoHome?: string,
 ): Promise<JjRestorePhase | null> {
   try {
-    const path = jjRestorePhasePath(backingRoot, paseoHome);
+    const path = await jjRestorePhasePath(backingRoot, paseoHome);
     const [payload, witness] = await Promise.all([
       readRestoreJson(path),
       readRestoreJson(`${path}.reference`),
@@ -419,10 +429,10 @@ export async function beginJjCheckpointRestoration(
   await validateRestoreReference(reference, phase.backingRoot, paseoHome);
   // A missing payload after this boundary is required state, not legacy absence.
   await writeJsonFileAtomic(
-    `${jjRestorePhasePath(phase.backingRoot, paseoHome)}.reference`,
+    `${await jjRestorePhasePath(phase.backingRoot, paseoHome)}.reference`,
     reference,
   );
-  await writeJsonFileAtomic(jjRestorePhasePath(phase.backingRoot, paseoHome), phase);
+  await writeJsonFileAtomic(await jjRestorePhasePath(phase.backingRoot, paseoHome), phase);
   return phase;
 }
 
@@ -435,7 +445,7 @@ export async function completeJjCheckpointRestoration(
     throw new JjCheckpointError(
       "The jj restoration phase changed; retained heads require reconciliation.",
     );
-  await writeJsonFileAtomic(jjRestorePhasePath(phase.backingRoot, paseoHome), {
+  await writeJsonFileAtomic(await jjRestorePhasePath(phase.backingRoot, paseoHome), {
     ...phase,
     status: "completed",
   });
@@ -458,14 +468,15 @@ export async function restoreJjCheckpoint(input: {
   if (!checkpoint) return null;
   if (
     checkpoint.incarnation !== input.incarnation ||
-    checkpoint.sharedStore !== workspaceLifecycleKey(input.sharedStore) ||
+    checkpoint.sharedStore !== (await workspaceLifecycleKey(input.sharedStore)) ||
     !checkpoint.recoveryPins.includes(input.recoveryPin)
   ) {
     throw new JjCheckpointError(
       "The retained checkpoint does not authorize this recovery pin or backing checkout.",
     );
   }
-  if (checkpoint.metadata) await writePaseoWorktreeMetadataFile(input.backingRoot, checkpoint.metadata);
+  if (checkpoint.metadata)
+    await writePaseoWorktreeMetadataFile(input.backingRoot, checkpoint.metadata);
   const current = await readJjCheckpoint(input.backingRoot, input.paseoHome);
   const generation = Math.max(checkpoint.generation, current?.generation ?? 0);
   const operations = new Map(

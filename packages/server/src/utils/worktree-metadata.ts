@@ -1,6 +1,6 @@
-import { mkdir, open, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { constants } from "node:fs";
 import pLimit from "p-limit";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { z } from "zod";
@@ -170,7 +170,10 @@ async function getGitDirForWorktreeRoot(worktreeRoot: string): Promise<string> {
 }
 
 async function pathExists(path: string): Promise<boolean> {
-  try { await stat(path); return true; } catch (error) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
@@ -188,31 +191,39 @@ export async function getPaseoWorktreeMetadataPath(worktreeRoot: string): Promis
 }
 
 /** A reused pathname is not the same jj backing checkout. */
-export function readJjWorkspaceIncarnation(worktreeRoot: string): string | null {
+export async function readJjWorkspaceIncarnation(worktreeRoot: string): Promise<string | null> {
   const path = join(worktreeRoot, ".jj", "paseo", "incarnation");
-  if (!existsSync(path)) return null;
-  const identity = readFileSync(path, "utf8").trim();
+  let identity: string;
+  try {
+    identity = (await readFile(path, "utf8")).trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
   if (!identity || identity.includes("\n"))
     throw new Error(`Invalid jj workspace incarnation: ${path}`);
   return identity;
 }
 
-export function writeJjWorkspaceIncarnation(worktreeRoot: string, identity: string): void {
+export async function writeJjWorkspaceIncarnation(
+  worktreeRoot: string,
+  identity: string,
+): Promise<void> {
   const jjDir = join(worktreeRoot, ".jj");
-  if (!existsSync(jjDir)) throw new Error(`Not a jj workspace: ${worktreeRoot}`);
+  if (!(await pathExists(jjDir))) throw new Error(`Not a jj workspace: ${worktreeRoot}`);
   const dir = join(jjDir, "paseo");
-  const current = readJjWorkspaceIncarnation(worktreeRoot);
+  const current = await readJjWorkspaceIncarnation(worktreeRoot);
   if (current && current !== identity) throw new Error("Cannot replace a jj workspace incarnation");
   if (current === identity) return;
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "incarnation"), `${identity}\n`, { flag: "wx" });
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "incarnation"), `${identity}\n`, { flag: "wx" });
 }
 
-export function assertJjWorkspaceIncarnation(
+export async function assertJjWorkspaceIncarnation(
   worktreeRoot: string,
   expected: string | null | undefined,
-): void {
-  const actual = readJjWorkspaceIncarnation(worktreeRoot);
+): Promise<void> {
+  const actual = await readJjWorkspaceIncarnation(worktreeRoot);
   if (!expected || !actual || actual !== expected) {
     throw new Error(
       "The backing jj checkout has an unknown or different incarnation; retained recovery data and live files were not changed.",
@@ -303,12 +314,12 @@ export async function writePaseoWorktreeMetadata(
 
 export async function updatePaseoWorktreeJjBookmark(
   worktreeRoot: string,
-  rename: { from: string | null; to: string },
+  change: { from: string | null; to: string },
 ): Promise<void> {
   return mutateMetadata(worktreeRoot, async (root) => {
     const current = await readMetadataFile(root);
-    if (!current || current.version !== 2 || (current.jjBookmark ?? null) !== rename.from) return;
-    await writePaseoWorktreeMetadataFile(root, { ...current, jjBookmark: rename.to });
+    if (!current || current.version !== 2 || (current.jjBookmark ?? null) !== change.from) return;
+    await writePaseoWorktreeMetadataFile(root, { ...current, jjBookmark: change.to });
   });
 }
 

@@ -162,7 +162,9 @@ export interface ProjectRegistry {
   upsert(record: PersistedProjectRecord): Promise<void>;
   update(
     projectId: string,
-    updater: (record: PersistedProjectRecord) => PersistedProjectRecord,
+    updater: (
+      record: PersistedProjectRecord,
+    ) => PersistedProjectRecord | Promise<PersistedProjectRecord>,
   ): Promise<PersistedProjectRecord | null>;
   archive(projectId: string, archivedAt: string): Promise<void>;
   remove(projectId: string): Promise<void>;
@@ -177,7 +179,9 @@ export interface WorkspaceRegistry {
   get(workspaceId: string): Promise<PersistedWorkspaceRecord | null>;
   update(
     workspaceId: string,
-    updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    updater: (
+      record: PersistedWorkspaceRecord,
+    ) => PersistedWorkspaceRecord | Promise<PersistedWorkspaceRecord>,
   ): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord, context?: WorkspaceMutationContext): Promise<void>;
   archive(
@@ -299,11 +303,14 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     });
   }
 
-  async update(id: string, updater: (record: TRecord) => TRecord): Promise<TRecord | null> {
-    return this.mutateCache((records) => {
+  async update(
+    id: string,
+    updater: (record: TRecord) => TRecord | Promise<TRecord>,
+  ): Promise<TRecord | null> {
+    return this.mutateCache(async (records) => {
       const existing = records.get(id);
       if (!existing) return null;
-      const next = this.schema.parse(updater(existing));
+      const next = this.schema.parse(await updater(existing));
       records.set(id, next);
       return next;
     });
@@ -366,7 +373,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   }
 
   protected async mutateCache<TResult>(
-    updater: (records: Map<string, TRecord>) => TResult,
+    updater: (records: Map<string, TRecord>) => TResult | Promise<TResult>,
     hooks?: {
       forcePersist?: (result: TResult) => boolean;
       beforeWrite?: (records: readonly TRecord[]) => Promise<void>;
@@ -386,7 +393,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
         throw new Error("Workspace registry mutations are blocked until daemon restart");
       }
       const staged = new Map(this.cache);
-      const result = updater(staged);
+      const result = await updater(staged);
       const recordsChanged = !mapsEqual(this.cache, staged);
       if (!recordsChanged && !hooks?.forcePersist?.(result)) return result;
       const records = Array.from(staged.values());
@@ -525,7 +532,9 @@ export class FileBackedProjectRegistry
 
   override async update(
     projectId: string,
-    updater: (record: PersistedProjectRecord) => PersistedProjectRecord,
+    updater: (
+      record: PersistedProjectRecord,
+    ) => PersistedProjectRecord | Promise<PersistedProjectRecord>,
   ): Promise<PersistedProjectRecord | null> {
     const project = await super.update(projectId, updater);
     if (!project) return null;
@@ -591,7 +600,9 @@ export class FileBackedWorkspaceRegistry
 
   override async update(
     workspaceId: string,
-    updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    updater: (
+      record: PersistedWorkspaceRecord,
+    ) => PersistedWorkspaceRecord | Promise<PersistedWorkspaceRecord>,
   ): Promise<PersistedWorkspaceRecord | null> {
     const workspace = await super.update(workspaceId, updater);
     if (workspace) {

@@ -17,7 +17,7 @@ import {
 } from "../../../utils/jj-checkpoint.js";
 import { randomUUID } from "node:crypto";
 import { basename, dirname } from "node:path";
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { stat, mkdir, rename } from "node:fs/promises";
 
 import { resolveRepositoryDefaultBranch } from "../../../utils/checkout-git.js";
 import { detectVcsBackend, resolveJjRepoIdentity } from "../../../utils/vcs-backend.js";
@@ -53,6 +53,16 @@ import {
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
 } from "../../workspace-registry.js";
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 export type WorkspaceRecoveryAction = "unarchive" | "restore";
 
@@ -129,15 +139,15 @@ async function jjWorkspaceRootRegistered(
  * throws (the restore aborts with the directory intact).
  */
 async function quarantineSurvivingDirectory(worktreePath: string): Promise<string | null> {
-  if (!existsSync(worktreePath)) {
+  if (!(await pathExists(worktreePath))) {
     return null;
   }
   // Preserve even an apparently empty directory: an external write can race
   // an emptiness check. A unique sibling avoids overwriting an earlier orphan.
   const orphanPath = `${worktreePath}.orphan-${randomUUID()}`;
   try {
-    mkdirSync(dirname(orphanPath), { recursive: true });
-    renameSync(worktreePath, orphanPath);
+    await mkdir(dirname(orphanPath), { recursive: true });
+    await rename(worktreePath, orphanPath);
     return orphanPath;
   } catch (error) {
     throw new WorktreeRequestError({
@@ -204,9 +214,11 @@ export function createWorkspaceRecoveryService(deps: {
     }
     const backingRoot = workspace.worktreeRoot ?? workspace.cwd;
     const sourceRepoRoot =
-      workspace.mainRepoRoot ?? resolveJjRepoIdentity(backingRoot)?.primaryRoot ?? project.rootPath;
+      workspace.mainRepoRoot ??
+      (await resolveJjRepoIdentity(backingRoot))?.primaryRoot ??
+      project.rootPath;
     const backingPresent = await deps.isDirectory(backingRoot);
-    if (backingPresent || existsSync(backingRoot))
+    if (backingPresent || (await pathExists(backingRoot)))
       return resolveSurvivingRecovery(workspace, sourceRepoRoot);
     if (authority === "external")
       return unavailableWorkspace(
@@ -217,7 +229,7 @@ export function createWorkspaceRecoveryService(deps: {
       if (
         !workspace.recoveryBookmark ||
         !(await deps.isDirectory(sourceRepoRoot)) ||
-        detectVcsBackend(sourceRepoRoot) !== "jj"
+        (await detectVcsBackend(sourceRepoRoot)) !== "jj"
       )
         return unavailableWorkspace(
           workspaceId,
@@ -225,7 +237,7 @@ export function createWorkspaceRecoveryService(deps: {
         );
       return createRecoveryPlan({ action: "restore", workspace, sourceRepoRoot });
     }
-    if (detectVcsBackend(sourceRepoRoot) === "jj")
+    if ((await detectVcsBackend(sourceRepoRoot)) === "jj")
       return unavailableWorkspace(
         workspaceId,
         "Unknown legacy jj workspace authority; refusing automatic recreation.",
@@ -279,29 +291,30 @@ export function createWorkspaceRecoveryService(deps: {
 
   async function validateJjRestoreBacking(input: JjRestoreBackingInput): Promise<boolean> {
     const { workspace, sourceRepoRoot, backingRoot } = input;
-    if (detectVcsBackend(sourceRepoRoot) !== "jj")
+    if ((await detectVcsBackend(sourceRepoRoot)) !== "jj")
       throw new Error("Managed jj source repository is unavailable; refusing Git recovery");
     const registered = await jjWorkspaceRootRegistered(sourceRepoRoot, backingRoot);
-    if (!existsSync(backingRoot)) return registered;
+    if (!(await pathExists(backingRoot))) return registered;
     if (!(await deps.isDirectory(backingRoot)))
       throw new Error("The surviving backing root is not a directory; refusing recreation");
     // Retained exact pins may reconstruct forgotten plain partial directories, never replacement checkouts.
     const plainPartial =
       !registered &&
-      detectVcsBackend(backingRoot) === "none" &&
+      (await detectVcsBackend(backingRoot)) === "none" &&
       Boolean(workspace.recoveryBookmark);
     if (plainPartial) return registered;
-    assertJjWorkspaceIncarnation(
+    await assertJjWorkspaceIncarnation(
       backingRoot,
       workspace.jjWorkspaceId ?? workspace.recoveryBookmark,
     );
-    const backingIdentity = resolveJjRepoIdentity(backingRoot);
-    const sourceIdentity = resolveJjRepoIdentity(sourceRepoRoot);
+    const backingIdentity = await resolveJjRepoIdentity(backingRoot);
+    const sourceIdentity = await resolveJjRepoIdentity(sourceRepoRoot);
     if (
       !backingIdentity ||
       !sourceIdentity ||
       backingIdentity.sharedStorePath !== sourceIdentity.sharedStorePath ||
-      workspaceLifecycleKey(backingIdentity.workspaceRoot) !== workspaceLifecycleKey(backingRoot)
+      (await workspaceLifecycleKey(backingIdentity.workspaceRoot)) !==
+        (await workspaceLifecycleKey(backingRoot))
     )
       throw new Error("The surviving jj backing repository changed; refusing recreation");
     return registered;
@@ -343,7 +356,7 @@ export function createWorkspaceRecoveryService(deps: {
     }
 
     const currentRoot = await recoveryBackingRoot(resolved.workspace);
-    if (workspaceLifecycleKey(currentRoot) !== workspaceLifecycleKey(lockedRoot))
+    if ((await workspaceLifecycleKey(currentRoot)) !== (await workspaceLifecycleKey(lockedRoot)))
       throw new Error("Workspace placement changed during recovery; retry");
     if (resolved.kind === "restore") {
       await recreateArchivedWorktree(resolved.workspace, resolved.sourceRepoRoot);
@@ -389,7 +402,7 @@ export function createWorkspaceRecoveryService(deps: {
     sourceRepoRoot: string,
   ): Promise<void> {
     if (jjWorkspaceAuthority(workspace) === "managed") {
-      if (detectVcsBackend(sourceRepoRoot) !== "jj")
+      if ((await detectVcsBackend(sourceRepoRoot)) !== "jj")
         throw new Error("Managed jj source changed; refusing Git recovery");
       await recreateArchivedJjWorkspace(workspace, sourceRepoRoot);
       return;
@@ -489,17 +502,17 @@ export function createWorkspaceRecoveryService(deps: {
     if (
       reference &&
       (!checkpoint ||
-        reference.path !== jjArchiveCheckpointPath(worktreePath, pin, deps.paseoHome) ||
+        reference.path !== (await jjArchiveCheckpointPath(worktreePath, pin, deps.paseoHome)) ||
         checkpoint.generation !== reference.generation)
     )
       throw new JjCheckpointError(
         "The retained jj checkpoint is missing or differs from its archive reference; directory retained.",
       );
     if (!checkpoint) return;
-    const source = resolveJjRepoIdentity(sourceRepoRoot);
+    const source = await resolveJjRepoIdentity(sourceRepoRoot);
     if (
       !source ||
-      checkpoint.sharedStore !== workspaceLifecycleKey(source.sharedStorePath) ||
+      checkpoint.sharedStore !== (await workspaceLifecycleKey(source.sharedStorePath)) ||
       checkpoint.incarnation !== (workspace.jjWorkspaceId ?? pin) ||
       !checkpoint.recoveryPins.includes(pin)
     )
@@ -519,7 +532,7 @@ export function createWorkspaceRecoveryService(deps: {
     worktreePath: string,
     pin: string,
   ): Promise<void> {
-    const sourceIdentity = resolveJjRepoIdentity(sourceRepoRoot);
+    const sourceIdentity = await resolveJjRepoIdentity(sourceRepoRoot);
     if (!sourceIdentity) throw new JjCheckpointError("The saved jj source is unavailable.");
     const restoredCheckpoint = await restoreJjCheckpoint({
       backingRoot: worktreePath,
@@ -702,7 +715,7 @@ export function createWorkspaceRecoveryService(deps: {
         revision: pin,
       });
       // Legacy pins become the shared incarnation only after recreation from that exact pin.
-      writeJjWorkspaceIncarnation(worktreePath, workspace.jjWorkspaceId ?? pin);
+      await writeJjWorkspaceIncarnation(worktreePath, workspace.jjWorkspaceId ?? pin);
     } catch (error) {
       throw toWorktreeRequestError(error);
     }

@@ -1106,7 +1106,7 @@ describeIfJj("archiveByScope on jj (sibling recovery authority)", () => {
       mainRepoRoot: fixture.repoDir,
     };
     const pinsByWorkspace = new Map<string, string>();
-    const incarnation = readJjWorkspaceIncarnation(created.worktreePath)!;
+    const incarnation = (await readJjWorkspaceIncarnation(created.worktreePath))!;
     const siblingRecords = new Map(
       ["ws-root", "ws-archived-earlier"].map((workspaceId) => [
         workspaceId,
@@ -1178,7 +1178,7 @@ describeIfJj("jj durable archive and recovery", () => {
           displayName: workspaceId,
           branch: "feature",
           worktreeRoot: created.worktreePath,
-          jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+          jjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
           baseBranch: "main",
           mainRepoRoot: fixture.repoDir,
           isPaseoOwnedWorktree: true,
@@ -1352,7 +1352,7 @@ describeIfJj("jj archive with legacy placement", () => {
       worktreeRoot: created.worktreePath,
       kind: "worktree",
       isPaseoOwnedWorktree: true,
-      jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+      jjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
       displayName: "legacy",
       createdAt: "now",
       updatedAt: "now",
@@ -1401,7 +1401,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     await registry.upsert(
       createPersistedWorkspaceRecord({
         workspaceId: "lifecycle-a",
-        jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+        jjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
         projectId: "project",
         cwd: created.worktreePath,
         worktreeRoot: created.worktreePath,
@@ -1706,7 +1706,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
         workspaceName: "repo-lifecycle",
         revision: pin,
       });
-      if (stage !== "registered") writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
+      if (stage !== "registered") await writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
       if (stage === "metadata" || stage === "lost-phase")
         await writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
       if (stage === "lost-phase") {
@@ -2059,12 +2059,13 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       h.archive({
         getWorkspace: async (id) => {
           reads++;
+          const incarnation = (await readJjWorkspaceIncarnation(replacement.worktreePath))!;
           if (reads === 3)
             await h.registry.update(id, (current) => ({
               ...current,
               cwd: replacement.worktreePath,
               worktreeRoot: replacement.worktreePath,
-              jjWorkspaceId: readJjWorkspaceIncarnation(replacement.worktreePath)!,
+              jjWorkspaceId: incarnation,
               jjWorkspaceManagement: "managed",
             }));
           return h.registry.get(id);
@@ -2114,7 +2115,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
         kind: "worktree",
         displayName: "old",
         jjWorkspaceManagement: "managed",
-        jjWorkspaceId: readJjWorkspaceIncarnation(root)!,
+        jjWorkspaceId: (await readJjWorkspaceIncarnation(root))!,
         recoveryBookmark: pin,
         isPaseoOwnedWorktree: true,
         archivedAt: "earlier",

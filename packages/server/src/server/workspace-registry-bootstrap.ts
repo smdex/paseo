@@ -80,7 +80,10 @@ export async function bootstrapWorkspaceRegistries(options: {
       await withWorkspaceLifecycle(workspace.worktreeRoot, async () => {
         const current = await options.workspaceRegistry.get(workspace.workspaceId);
         if (!current || current.archivedAt || !current.worktreeRoot || !current.branch) return;
-        if (hasDurableJjAuthority(current) || detectVcsBackend(current.worktreeRoot) === "jj") {
+        if (
+          hasDurableJjAuthority(current) ||
+          (await detectVcsBackend(current.worktreeRoot)) === "jj"
+        ) {
           await validatePresentJjWorkspace(current);
           if (current.jjWorkspaceManagement === "external") return;
         }

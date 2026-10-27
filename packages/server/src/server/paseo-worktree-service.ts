@@ -237,11 +237,11 @@ export interface FirstAgentBranchAutoNameOptions {
 export async function attemptFirstAgentBranchAutoName(
   options: FirstAgentBranchAutoNameOptions,
 ): Promise<AttemptFirstAgentBranchAutoNameResult> {
-  const root = resolveJjRepoIdentity(options.cwd)?.workspaceRoot ?? options.cwd;
+  const root = (await resolveJjRepoIdentity(options.cwd))?.workspaceRoot ?? options.cwd;
   return withWorkspaceLifecycle(root, async () => {
     if (
       options.expectedJjWorkspaceId &&
-      readJjWorkspaceIncarnation(root) !== options.expectedJjWorkspaceId
+      (await readJjWorkspaceIncarnation(root)) !== options.expectedJjWorkspaceId
     )
       throw new JjCheckpointError(
         "The workspace incarnation changed before auto-name; replacement files and bookmarks were not changed.",
@@ -278,7 +278,7 @@ async function attemptFirstAgentBranchAutoNameUnderLifecycle(
     currentBranch: getCurrentBranchImpl,
     exists: localBranchExistsImpl,
     rename: renameCurrentBranchImpl,
-  } = autoNameBackendPorts(options, backend);
+  } = await autoNameBackendPorts(options, backend);
   const placeholderBranchName = metadata.firstAgentBranchAutoName.placeholderBranchName;
   if ((await getCurrentBranchImpl(options.cwd)) !== placeholderBranchName) {
     await markPaseoWorktreeFirstAgentBranchAutoNameAttempted(options.cwd);
@@ -321,7 +321,7 @@ async function attemptFirstAgentBranchAutoNameUnderLifecycle(
   };
 }
 
-function autoNameBackendPorts(
+async function autoNameBackendPorts(
   options: FirstAgentBranchAutoNameOptions,
   backend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
 ) {
@@ -338,9 +338,9 @@ function autoNameBackendPorts(
           exists: options.localBranchExists ?? localBranchExists,
           rename: options.renameCurrentBranch ?? renameCurrentBranch,
         };
-  const incarnation = readJjWorkspaceIncarnation(options.cwd);
+  const incarnation = await readJjWorkspaceIncarnation(options.cwd);
   const assertCurrentBackend = async (cwd: string) => {
-    if (readJjWorkspaceIncarnation(cwd) !== incarnation)
+    if ((await readJjWorkspaceIncarnation(cwd)) !== incarnation)
       throw new JjCheckpointError(
         "The workspace incarnation changed during auto-name; replacement bookmarks were not changed.",
       );

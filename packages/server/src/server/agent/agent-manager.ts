@@ -5629,10 +5629,7 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
-    const useNativeTools =
-      this.paseoToolsEnabled &&
-      isPaseoToolPolicyEnabled(paseoToolPolicy) &&
-      client.capabilities.supportsNativePaseoTools;
+    const useNativeTools = this.useNativePaseoTools(client, paseoToolPolicy);
     if (
       this.paseoToolCatalogFactory &&
       (useNativeTools || this.getPluginTools(agentId).length > 0)
@@ -5650,6 +5647,17 @@ export class AgentManager {
     }
     this.sessionOpenGenerations.set(agentId, generation);
     return context;
+  }
+
+  private useNativePaseoTools(
+    client: AgentClient,
+    policy: ProviderPaseoToolsPolicy | undefined,
+  ): boolean {
+    return Boolean(
+      this.paseoToolsEnabled &&
+      isPaseoToolPolicyEnabled(policy) &&
+      client.capabilities.supportsNativePaseoTools,
+    );
   }
 
   private resolveProviderLaunchConfig(

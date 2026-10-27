@@ -196,7 +196,7 @@ async function createWorktreeForBackend(input: {
   worktreesRoot?: string;
 }): Promise<CreatedWorktree> {
   if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
-    const identity = resolveJjRepoIdentity(input.cwd);
+    const identity = await resolveJjRepoIdentity(input.cwd);
     if (!identity) throw new Error("Unable to resolve jj repository identity");
     return createJjWorktree({ ...input, cwd: identity.workspaceRoot });
   }
@@ -254,7 +254,7 @@ export async function resolveWorktreeRepoRoot(
   }
 
   if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
-    const identity = resolveJjRepoIdentity(input.cwd);
+    const identity = await resolveJjRepoIdentity(input.cwd);
     if (!identity) throw new Error("Unable to resolve jj repository identity");
     return identity.primaryRoot;
   }

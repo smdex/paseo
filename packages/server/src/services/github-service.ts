@@ -1183,7 +1183,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     readOptions?: ForgeReadOptions;
     load: () => Promise<T>;
   }): Promise<T> {
-    requireForgeRepositoryContext({ cwd: params.cwd, repository: params.readOptions?.repository });
+    await requireForgeRepositoryContext({
+      cwd: params.cwd,
+      repository: params.readOptions?.repository,
+    });
     if (params.readOptions?.force && !params.readOptions.reason) {
       throw new Error("ForgeService forced read requires a reason");
     }
@@ -1234,8 +1237,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     if (cachedHost && (cachedHost.expiresAt === null || deps.now() < cachedHost.expiresAt)) {
       return cachedHost.promise;
     }
-    const pending = deps
-      .resolveRepoHost(cwd)
+    const pending = requireForgeRepositoryContext({ cwd })
+      .then(() => deps.resolveRepoHost(cwd))
       .then((host) => {
         const current = repoHostByCwd.get(cwd);
         if (current?.promise === pending) {
@@ -1285,8 +1288,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       expiresAt: number | null;
       resolved?: { value: string | null };
     } = {
-      promise: deps
-        .resolveRepoSlug(cwd)
+      promise: requireForgeRepositoryContext({ cwd })
+        .then(() => deps.resolveRepoSlug(cwd))
         .then((slug) => {
           if (repoSlugByCwd.get(cwd) === entry) {
             entry.resolved = { value: slug };
@@ -1330,7 +1333,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     // otherwise default to github.com regardless of the resolved repository,
     // which silently queries the wrong server on GitHub Enterprise. GH_HOST is
     // safe even for auto-routing subcommands because it matches the repo's host.
-    const repository = requireForgeRepositoryContext(runOptions);
+    const repository = await requireForgeRepositoryContext(runOptions);
     const host = repository?.host ?? (await resolveRepoHostCached(runOptions.cwd));
     if (repository && ["pr", "issue", "repo"].includes(args[0]) && !args.includes("--repo")) {
       if (args[0] === "repo" && args[1] === "view")
@@ -1491,6 +1494,36 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     );
   }
 
+  async function validateGitHubPollTargets(due: GitHubPollTarget[]) {
+    const validations: Array<PromiseSettledResult<ForgeRepositoryContext | undefined> | undefined> =
+      [];
+    let validationDeadlinePassed = false;
+    const pendingValidations = due.map((target, index) =>
+      requireForgeRepositoryContext({ cwd: target.cwd, repository: target.repository })
+        .then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason: unknown) => ({ status: "rejected" as const, reason }),
+        )
+        .then((result) => {
+          validations[index] = result;
+          if (validationDeadlinePassed && target.retainCount > 0 && target.nextDueAt === null)
+            scheduleGitHubPollAfter(target, 1);
+          return undefined;
+        }),
+    );
+    // ponytail: wait at most 100 ms for one batch's filesystem checks; upgrade to per-target admission if this becomes a throughput limit.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(pendingValidations),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, 100);
+      }),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    validationDeadlinePassed = true;
+    return validations;
+  }
+
   async function flushDueGitHubPolls(): Promise<void> {
     const now = deps.now();
     const due: GitHubPollTarget[] = [];
@@ -1506,10 +1539,20 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       return;
     }
 
+    const validations = await validateGitHubPollTargets(due);
     const legacyTargets: GitHubPollTarget[] = [];
     const batchGroups = new Map<string, GitHubBatchPollEntry[]>();
-    for (const target of due) {
+    for (const [index, target] of due.entries()) {
       if (target.retainCount <= 0) {
+        continue;
+      }
+      const validation = validations[index];
+      if (!validation) {
+        target.pollCycleStartedAt = null;
+        continue;
+      }
+      if (validation.status === "rejected") {
+        updatePollTargetAfterError(target, validation.reason);
         continue;
       }
       // Explicit contexts use the same retained scheduler, without cwd discovery
@@ -2185,8 +2228,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       });
     },
 
-    getCurrentPullRequestStatus(input) {
-      const repository = requireForgeRepositoryContext(input);
+    async getCurrentPullRequestStatus(input) {
+      const repository = await requireForgeRepositoryContext(input);
       const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
         run(args, { ...runnerOptions, repository });
       return cached({
@@ -2225,7 +2268,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     async getPullRequestTimeline(input) {
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
         throw new ForgeRepositoryContextError(
           "Timeline repository differs from the explicit target",
@@ -2274,11 +2317,11 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       });
     },
 
-    getCheckDetails(input) {
+    async getCheckDetails(input) {
       const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
         run(args, { ...runnerOptions, repository: input.repository });
       const { repoOwner, repoName, checkRunId } = input;
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       if (repository && `${repoOwner}/${repoName}` !== repository.targetRepository) {
         throw new ForgeRepositoryContextError("Checks repository differs from the explicit target");
       }
@@ -2437,7 +2480,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       const readOptions: ForgeReadOptions = input.force
         ? { force: true, reason: input.reason }
         : { force: false, reason: input.reason };
-      readOptions.repository = requireForgeRepositoryContext(input);
+      readOptions.repository = await requireForgeRepositoryContext(input);
       const enterpriseHost = readOptions.repository
         ? readOptions.repository.host
         : await resolveRepoHostCached(input.cwd).catch(() => null);
@@ -2535,7 +2578,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       // transient `gh repo view` failure can't block PR creation on github.com.
       // `gh repo view` is the fallback: it auto-routes to the cwd remote's host
       // (covering GitHub Enterprise Server) and survives a renamed repo.
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       let slug = repository?.targetRepository ?? (await resolveGitHubSlugFromOrigin(input.cwd));
       if (!slug) {
         const repoView = await getGitHubRepoView({ cwd: input.cwd, run });
@@ -2625,7 +2668,6 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     retainCurrentPullRequestStatusPoll(input) {
-      requireForgeRepositoryContext(input);
       const key = getPollTargetKey(input);
       let target = pollTargets.get(key);
       if (!target) {

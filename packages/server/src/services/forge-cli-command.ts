@@ -6,13 +6,13 @@ import { detectVcsBackend } from "../utils/vcs-backend.js";
 import { ForgeRepositoryContextError, type ForgeRepositoryContext } from "./forge-service.js";
 
 /** Native/colocated jj must never let a CLI infer a repository from cwd. */
-export function requireForgeRepositoryContext(options: {
+export async function requireForgeRepositoryContext(options: {
   cwd: string;
   repository?: ForgeRepositoryContext;
-}): ForgeRepositoryContext | undefined {
+}): Promise<ForgeRepositoryContext | undefined> {
   const repository = options.repository;
   if (!repository) {
-    if (detectVcsBackend(options.cwd) === "jj") {
+    if ((await detectVcsBackend(options.cwd)) === "jj") {
       throw new ForgeRepositoryContextError("Explicit forge repository context is required for jj");
     }
     return undefined;

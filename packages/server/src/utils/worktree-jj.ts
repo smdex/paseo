@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { stat, mkdir, rename } from "node:fs/promises";
 import type { Logger } from "pino";
 import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import type { ForgeRepositoryContext } from "../services/forge-service.js";
@@ -57,6 +57,16 @@ import { readPaseoWorktreeMetadata, writeJjWorkspaceIncarnation } from "./worktr
  * `jj workspace update-stale` and retrying once.
  */
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 const STALE_WORKING_COPY_PATTERN = /working copy is stale/i;
 
 const WORKSPACE_LIST_TEMPLATE =
@@ -109,7 +119,7 @@ async function runJjWorkspaceSafe(
  * common dir) and finally to the raw path.
  */
 export async function deriveJjWorktreeProjectHash(cwd: string): Promise<string> {
-  const identity = resolveJjRepoIdentity(cwd);
+  const identity = await resolveJjRepoIdentity(cwd);
   if (identity?.primaryRoot) {
     return deriveShortAlphanumericHash(await normalizePathForOwnership(identity.primaryRoot));
   }
@@ -210,6 +220,8 @@ async function prepareJjPrSource(
         "--ignore-working-copy",
         "--config",
         "git.abandon-unreachable-commits=false",
+        "--config",
+        `remotes.${JSON.stringify(remote)}.auto-track-bookmarks=${JSON.stringify('regex:"a^"')}`,
         "git",
         "fetch",
         "--remote",
@@ -358,7 +370,7 @@ export async function createJjWorktree(options: {
     throw new Error(`Invalid worktree name: ${slugValidation.error}`);
   }
 
-  const identity = resolveJjRepoIdentity(options.cwd);
+  const identity = await resolveJjRepoIdentity(options.cwd);
   if (!identity) throw new Error("Unable to resolve jj repository identity");
   const primaryRoot = await normalizePathForOwnership(identity.workspaceRoot);
   const projectRoot = await normalizePathForOwnership(identity.primaryRoot);
@@ -389,7 +401,7 @@ async function createJjWorkspaceAtPath(
   worktreePath: string,
   workspaceName: string,
 ): Promise<CreatedWorktree> {
-  if (existsSync(worktreePath)) throw new JjWorkspacePathExistsError(worktreePath);
+  if (await pathExists(worktreePath)) throw new JjWorkspacePathExistsError(worktreePath);
   // Base selection: branch-off cuts from the requested base (bookmark or
   // revset); checkout-branch continues at the existing bookmark. The base is
   // pinned to its commit id before anything is created so later bookmark
@@ -435,7 +447,7 @@ async function createJjWorkspaceAtPath(
   let branchName: string;
   let createdBookmark: { name: string; target: string } | undefined;
   try {
-    writeJjWorkspaceIncarnation(worktreePath, randomUUID());
+    await writeJjWorkspaceIncarnation(worktreePath, randomUUID());
     if (source.kind === "checkout-branch") branchName = source.branchName;
     else {
       createdBookmark = await createJjFeatureBookmark(
@@ -746,7 +758,10 @@ async function deleteJjWorkspaceUnderLifecycle(
   const workspaces = await listJjWorkspaces(primaryRoot);
   let match = null;
   for (const entry of workspaces) {
-    if (await normalizePathForOwnership(entry.root) === resolvedWorktree) { match = entry; break; }
+    if ((await normalizePathForOwnership(entry.root)) === resolvedWorktree) {
+      match = entry;
+      break;
+    }
   }
   if (match?.name === "default") {
     // Guard BEFORE anything else: jj itself only warns when forgetting the
@@ -867,7 +882,7 @@ async function quarantineWorktreeDirectory(
   primaryRoot: string,
   options: Pick<DeleteJjPaseoWorktreeOptions, "paseoHome" | "worktreesRoot" | "worktreesBaseRoot">,
 ): Promise<string | null> {
-  if (!existsSync(worktreePath)) {
+  if (!(await pathExists(worktreePath))) {
     return null;
   }
   const baseRoot = resolvePaseoWorktreesBaseRoot({
@@ -881,9 +896,9 @@ async function quarantineWorktreeDirectory(
     projectHash,
     `${basename(worktreePath)}-${randomUUID()}`,
   );
-  mkdirSync(dirname(quarantinePath), { recursive: true });
+  await mkdir(dirname(quarantinePath), { recursive: true });
   try {
-    renameSync(worktreePath, quarantinePath);
+    await rename(worktreePath, quarantinePath);
     return quarantinePath;
   } catch (error) {
     throw new JjQuarantineError(worktreePath, error);

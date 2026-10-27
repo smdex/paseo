@@ -956,12 +956,12 @@ export async function isPaseoOwnedWorktreeCwd(
   options?: PaseoWorktreeOwnershipOptions,
 ): Promise<PaseoWorktreeOwnership> {
   const resolvedCwd = await normalizePathForOwnership(cwd);
-  const jjIdentity = resolveJjRepoIdentity(resolvedCwd);
+  const jjIdentity = await resolveJjRepoIdentity(resolvedCwd);
   if (
     jjIdentity &&
     (await normalizePathForOwnership(jjIdentity.workspaceRoot)) !==
       (await normalizePathForOwnership(jjIdentity.primaryRoot)) &&
-    readJjWorkspaceIncarnation(jjIdentity.workspaceRoot) &&
+    (await readJjWorkspaceIncarnation(jjIdentity.workspaceRoot)) &&
     (await readPaseoWorktreeMetadata(jjIdentity.workspaceRoot))?.version === 2
   ) {
     // Sibling jj workspaces carry creation authority; their location alone proves nothing.

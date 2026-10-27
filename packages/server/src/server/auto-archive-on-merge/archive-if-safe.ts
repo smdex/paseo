@@ -62,7 +62,7 @@ export async function archiveIfSafe(input: {
   const pullRequest = snapshot.forge.pullRequest;
 
   // Native merge/source proof and durable WIP accounting land with jj auto-archive parity.
-  if (snapshot.git.vcs === "jj" || detectVcsBackend(cwd) === "jj") return;
+  if (snapshot.git.vcs === "jj" || (await detectVcsBackend(cwd)) === "jj") return;
 
   if (!pullRequest?.isMerged) {
     return;

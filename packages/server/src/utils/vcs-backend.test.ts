@@ -32,49 +32,58 @@ describe("detectVcsBackend", () => {
     return target;
   }
 
-  it("returns none for a plain directory", () => {
-    expect(detectVcsBackend(subdir("plain"))).toBe("none");
+  it("shares only in-flight detection and observes a newly created repository", async () => {
+    const cwd = subdir("changed");
+    const first = detectVcsBackend(cwd);
+    expect(detectVcsBackend(cwd)).toBe(first);
+    expect(await first).toBe("none");
+    mkdirSync(join(cwd, ".jj"));
+    expect(await detectVcsBackend(cwd)).toBe("jj");
   });
 
-  it("detects a git repo and its subdirectories", () => {
+  it("returns none for a plain directory", async () => {
+    expect(await detectVcsBackend(subdir("plain"))).toBe("none");
+  });
+
+  it("detects a git repo and its subdirectories", async () => {
     mkdirSync(join(subdir("gitrepo"), ".git"));
-    expect(detectVcsBackend(join(dir, "gitrepo"))).toBe("git");
-    expect(detectVcsBackend(subdir("gitrepo", "nested", "deeper"))).toBe("git");
+    expect(await detectVcsBackend(join(dir, "gitrepo"))).toBe("git");
+    expect(await detectVcsBackend(subdir("gitrepo", "nested", "deeper"))).toBe("git");
   });
 
-  it("detects a jj repo (marker only) and its subdirectories", () => {
+  it("detects a jj repo (marker only) and its subdirectories", async () => {
     mkdirSync(join(subdir("jjrepo"), ".jj"));
-    expect(detectVcsBackend(join(dir, "jjrepo"))).toBe("jj");
-    expect(detectVcsBackend(subdir("jjrepo", "nested", "deeper"))).toBe("jj");
+    expect(await detectVcsBackend(join(dir, "jjrepo"))).toBe("jj");
+    expect(await detectVcsBackend(subdir("jjrepo", "nested", "deeper"))).toBe("jj");
   });
 
-  it("prefers jj when one directory holds both markers (colocated layout)", () => {
+  it("prefers jj when one directory holds both markers (colocated layout)", async () => {
     const colocated = subdir("colocated");
     mkdirSync(join(colocated, ".git"));
     mkdirSync(join(colocated, ".jj"));
-    expect(detectVcsBackend(colocated)).toBe("jj");
+    expect(await detectVcsBackend(colocated)).toBe("jj");
   });
 
-  it("keeps a nested git repo inside a jj repo on git", () => {
+  it("keeps a nested git repo inside a jj repo on git", async () => {
     mkdirSync(join(subdir("outer-jj"), ".jj"));
     const nested = subdir("outer-jj", "inner-git");
     mkdirSync(join(nested, ".git"));
-    expect(detectVcsBackend(nested)).toBe("git");
-    expect(detectVcsBackend(subdir("outer-jj", "inner-git", "deep"))).toBe("git");
-    expect(detectVcsBackend(subdir("outer-jj", "plain-sibling"))).toBe("jj");
+    expect(await detectVcsBackend(nested)).toBe("git");
+    expect(await detectVcsBackend(subdir("outer-jj", "inner-git", "deep"))).toBe("git");
+    expect(await detectVcsBackend(subdir("outer-jj", "plain-sibling"))).toBe("jj");
   });
 
-  it("keeps a nested jj repo inside a git repo on jj", () => {
+  it("keeps a nested jj repo inside a git repo on jj", async () => {
     mkdirSync(join(subdir("outer-git"), ".git"));
     const nested = subdir("outer-git", "inner-jj");
     mkdirSync(join(nested, ".jj"));
-    expect(detectVcsBackend(nested)).toBe("jj");
-    expect(detectVcsBackend(subdir("outer-git", "plain-sibling"))).toBe("git");
+    expect(await detectVcsBackend(nested)).toBe("jj");
+    expect(await detectVcsBackend(subdir("outer-git", "plain-sibling"))).toBe("git");
   });
 
-  it("is marker-based, not content-based: an empty .jj directory still counts", () => {
+  it("is marker-based, not content-based: an empty .jj directory still counts", async () => {
     mkdirSync(join(subdir("empty-marker"), ".jj"), { recursive: true });
-    expect(detectVcsBackend(join(dir, "empty-marker"))).toBe("jj");
+    expect(await detectVcsBackend(join(dir, "empty-marker"))).toBe("jj");
   });
 });
 
@@ -170,10 +179,10 @@ describe.skipIf(!jjAvailable)("resolveJjRepoIdentity", () => {
       fixture.dispose();
     });
 
-    it("resolves identity for the repo root and subdirectories", () => {
+    it("resolves identity for the repo root and subdirectories", async () => {
       mkdirSync(join(fixture.repoDir, "sub"));
       for (const cwd of [fixture.repoDir, join(fixture.repoDir, "sub")]) {
-        const identity = resolveJjRepoIdentity(cwd);
+        const identity = await resolveJjRepoIdentity(cwd);
         expect(identity).not.toBeNull();
         expect(identity?.workspaceRoot).toBe(fixture.repoDir);
         expect(identity?.sharedStorePath).toBe(join(fixture.repoDir, ".jj", "repo"));
@@ -194,8 +203,8 @@ describe.skipIf(!jjAvailable)("resolveJjRepoIdentity", () => {
       fixture.dispose();
     });
 
-    it("reports colocated false", () => {
-      const identity = resolveJjRepoIdentity(fixture.repoDir);
+    it("reports colocated false", async () => {
+      const identity = await resolveJjRepoIdentity(fixture.repoDir);
       expect(identity).not.toBeNull();
       expect(identity?.colocated).toBe(false);
       expect(identity?.primaryRoot).toBe(fixture.repoDir);
@@ -217,8 +226,8 @@ describe.skipIf(!jjAvailable)("resolveJjRepoIdentity", () => {
       fixture.dispose();
     });
 
-    it("resolves through the pointer file to the shared store and primary root", () => {
-      const identity = resolveJjRepoIdentity(workspaceDir);
+    it("resolves through the pointer file to the shared store and primary root", async () => {
+      const identity = await resolveJjRepoIdentity(workspaceDir);
       expect(identity).not.toBeNull();
       expect(identity?.workspaceRoot).toBe(workspaceDir);
       expect(identity?.sharedStorePath).toBe(join(fixture.repoDir, ".jj", "repo"));
@@ -227,21 +236,21 @@ describe.skipIf(!jjAvailable)("resolveJjRepoIdentity", () => {
     });
   });
 
-  it("returns null outside any jj repo", () => {
+  it("returns null outside any jj repo", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paseo-vcs-none-"));
     try {
-      expect(resolveJjRepoIdentity(dir)).toBeNull();
+      expect(await resolveJjRepoIdentity(dir)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("returns null when the .jj layout is unreadable (repo mid-teardown)", () => {
+  it("returns null when the .jj layout is unreadable (repo mid-teardown)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paseo-vcs-broken-"));
     try {
       mkdirSync(join(dir, ".jj"));
       writeFileSync(join(dir, ".jj", "repo"), ""); // empty pointer file
-      expect(resolveJjRepoIdentity(dir)).toBeNull();
+      expect(await resolveJjRepoIdentity(dir)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

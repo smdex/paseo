@@ -166,8 +166,8 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
     cwd: string,
   ): Promise<void> {
     await vi.waitFor(
-      () => {
-        expect(service.peekSnapshot(cwd)?.git.isGit).toBe(true);
+      async () => {
+        expect((await service.getSnapshot(cwd)).git.isGit).toBe(true);
       },
       { timeout: 15_000, interval: 100 },
     );
@@ -189,7 +189,7 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       expect(snapshot.git.vcs).toBe("jj");
       expect(snapshot.git.changeId).toBeTruthy();
 
-      const identity = resolveJjRepoIdentity(fixtureRepo.repoDir);
+      const identity = await resolveJjRepoIdentity(fixtureRepo.repoDir);
       expect(identity).not.toBeNull();
 
       // Repository metadata observation anchors on the shared store with no
@@ -228,10 +228,10 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
     });
     try {
       await waitForSnapshot(service, fixtureRepo.repoDir);
-      const identity = resolveJjRepoIdentity(fixtureRepo.repoDir)!;
+      const identity = (await resolveJjRepoIdentity(fixtureRepo.repoDir))!;
       const storeRecord = recordsFor(watcher, identity.sharedStorePath)[0]!;
       const callsAfterInitial = statusCalls.length;
-      const initialChangeId = service.peekSnapshot(fixtureRepo.repoDir)!.git.changeId;
+      const initialChangeId = (await service.getSnapshot(fixtureRepo.repoDir)).git.changeId;
 
       // Own, already-published echo: no operation landed since the snapshot
       // was read, so the publication fence suppresses the refresh.
@@ -245,7 +245,7 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       // @ to a fresh change id, which the next facts read must observe.
       const external = fixtureRepo.jj(["new", "-m", "external change"]);
       expect(external.status).toBe(0);
-      expect(service.peekSnapshot(fixtureRepo.repoDir)!.git.changeId).toBe(initialChangeId);
+      expect((await service.getSnapshot(fixtureRepo.repoDir)).git.changeId).toBe(initialChangeId);
 
       storeRecord.callback(null, [
         {
@@ -260,8 +260,10 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
         { timeout: 15_000, interval: 100 },
       );
       await vi.waitFor(
-        () => {
-          expect(service.peekSnapshot(fixtureRepo.repoDir)!.git.changeId).not.toBe(initialChangeId);
+        async () => {
+          expect((await service.getSnapshot(fixtureRepo.repoDir)).git.changeId).not.toBe(
+            initialChangeId,
+          );
         },
         { timeout: 15_000, interval: 100 },
       );
@@ -359,7 +361,8 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
         },
       ]);
       await vi.waitFor(
-        () => expect(nativeService.peekSnapshot(nativeRepo.repoDir)?.git.isDirty).toBe(true),
+        async () =>
+          expect((await nativeService.getSnapshot(nativeRepo.repoDir)).git.isDirty).toBe(true),
         { timeout: 5000 },
       );
       // No git ls-files evaluation ran against the native jj checkout.
@@ -616,10 +619,13 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
           })
         ).git.vcs,
       ).toBe("jj");
-      await vi.waitFor(() => expect(service.peekSnapshot(sibling)?.git.vcs).toBe("jj"), {
-        timeout: 5_000,
-        interval: 25,
-      });
+      await vi.waitFor(
+        async () => expect((await service.getSnapshot(sibling)).git.vcs).toBe("jj"),
+        {
+          timeout: 5_000,
+          interval: 25,
+        },
+      );
       await vi.waitFor(() => {
         expect(service.getMetrics().repositoryTargetCount).toBe(1);
         expect(jjFetch).toHaveBeenCalledTimes(1);
@@ -631,7 +637,7 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
       await vi.advanceTimersByTimeAsync(180_000);
       await vi.waitFor(() => expect(jjFetch).toHaveBeenCalledTimes(2));
       expect(gitFetch).toHaveBeenCalledTimes(1);
-      const identity = resolveJjRepoIdentity(repo.repoDir)!;
+      const identity = (await resolveJjRepoIdentity(repo.repoDir))!;
       expect(recordsFor(watcher, identity.sharedStorePath)).toHaveLength(1);
       first.unsubscribe();
       await vi.waitFor(() => expect(service.getMetrics().fetchInFlightCount).toBe(0));
@@ -814,7 +820,7 @@ describe.skipIf(!isJjAvailable())("WorkspaceGitService jj observation", () => {
           mkdirSync(marker);
           writeFileSync(
             join(marker, "repo"),
-            resolveJjRepoIdentity(other.repoDir)!.sharedStorePath,
+            (await resolveJjRepoIdentity(other.repoDir))!.sharedStorePath,
           );
         }
         retained.callback();

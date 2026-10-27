@@ -1401,7 +1401,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
   const currentPrHeadShaCache = new Map<string, { sha: string; expiresAt: number }>();
 
   async function run(args: string[], runOptions: TeaCommandRunnerOptions): Promise<string> {
-    const repository = requireForgeRepositoryContext(runOptions);
+    const repository = await requireForgeRepositoryContext(runOptions);
     const teaPath = await resolveTea();
     if (!teaPath) {
       throw new TeaCliMissingError();
@@ -1639,7 +1639,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       headSha?: string;
     },
   ): Promise<GiteaPrListItem | null> {
-    const repository = requireForgeRepositoryContext(input);
+    const repository = await requireForgeRepositoryContext(input);
     if (repository) {
       if (!repository.headRef || !repository.headSha) return null;
       const matches: GiteaCurrentPullRequestApi[] = [];
@@ -2077,7 +2077,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       if (!teaPath) {
         return false;
       }
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       const remoteUrl = repository ? null : await resolveRemoteUrl(input.cwd);
       const host = repository?.host ?? (remoteUrl ? parseGiteaHostFromRemoteUrl(remoteUrl) : null);
       if (!host) {
@@ -2163,7 +2163,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     async createPullRequest(input: CreatePullRequestOptions): Promise<PullRequestCreateResult> {
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       const crossRepository =
         repository && repository.sourceRepository !== repository.targetRepository;
       const head = crossRepository
@@ -2213,7 +2213,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     async getPullRequestTimeline(
       input: GetPullRequestTimelineOptions,
     ): Promise<PullRequestTimeline> {
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
         throw new ForgeRepositoryContextError(
           "Timeline repository differs from the explicit target",
@@ -2306,7 +2306,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     async getCheckDetails(input: GetCheckDetailsOptions): Promise<CheckDetails> {
-      const repository = requireForgeRepositoryContext(input);
+      const repository = await requireForgeRepositoryContext(input);
       if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
         throw new ForgeRepositoryContextError("Checks repository differs from the explicit target");
       }

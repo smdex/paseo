@@ -69,7 +69,7 @@ export function createTestRegistries() {
     update: async (id, updater) => {
       const existing = workspaces.get(id);
       if (!existing) return null;
-      const updated = updater(existing);
+      const updated = await updater(existing);
       workspaces.set(id, updated);
       return updated;
     },

@@ -1647,6 +1647,7 @@ test.skipIf(!isJjAvailable() || isPlatform("win32"))(
       0,
     );
     expect(h.fixture.jj(["git", "remote", "add", "fork", fork], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "track", "review/PR_7@fork"], publisher).status).toBe(0);
     expect(
       h.fixture.jj(["git", "push", "--remote", "fork", "--bookmark", "review/PR_7"], publisher)
         .status,
@@ -2021,7 +2022,7 @@ for (const failProvisioning of [false, true]) {
       } else {
         expect(result.error).toBeNull();
         expect(result.value?.workspace.jjWorkspaceId).toBe(
-          readJjWorkspaceIncarnation(old.worktree.worktreePath),
+          await readJjWorkspaceIncarnation(old.worktree.worktreePath),
         );
       }
       expect(
@@ -2052,7 +2053,7 @@ test.skipIf(!isJjAvailable() || isPlatform("win32"))(
     };
     const { resolveJjRepoIdentity } = await import("../utils/vcs-backend.js");
     h.deps.workspaceGitService.resolveRepoRoot = async (cwd) => {
-      const identity = resolveJjRepoIdentity(cwd);
+      const identity = await resolveJjRepoIdentity(cwd);
       if (!identity) throw new Error("not jj");
       return identity.workspaceRoot;
     };
@@ -2061,7 +2062,7 @@ test.skipIf(!isJjAvailable() || isPlatform("win32"))(
       isGit: true,
       currentBranch: "main",
       remoteUrl: null,
-      worktreeRoot: resolveJjRepoIdentity(cwd)?.workspaceRoot ?? cwd,
+      worktreeRoot: (await resolveJjRepoIdentity(cwd))?.workspaceRoot ?? cwd,
       mainRepoRoot: null,
       isPaseoOwnedWorktree: false,
     });
@@ -2204,7 +2205,7 @@ test.skipIf(!isJjAvailable())(
       cwd: path.join(created.worktreePath, "sub"),
       paseoHome,
       worktreesRoot,
-      expectedJjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+      expectedJjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
       firstAgentContext: { prompt: "Name this native project" },
       generateBranchNameFromContext: async () => "native-generated",
       getCurrentBranch: forbiddenGit,

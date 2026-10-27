@@ -260,7 +260,7 @@ export function createForgeResolver(options: CreateForgeResolverOptions = {}): F
         const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
           paseoHome: options.paseoHome,
         });
-        requireForgeRepositoryContext({ cwd, repository });
+        await requireForgeRepositoryContext({ cwd, repository });
         const resolution = await resolveFromRemoteUrlAsync(remoteUrl);
         return resolution
           ? { ...resolution, repository: { ...repository, host: resolution.host } }

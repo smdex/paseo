@@ -600,7 +600,7 @@ describeIfJj("workspace recovery on jj", () => {
     fixture.jj(["bookmark", "create", "paseo/recovery/subproject", "-r", "repo-root-name@"]);
     const record = createWorkspace({
       workspaceId: "wks_subproject",
-      jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+      jjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
       projectId: project.projectId,
       cwd,
       worktreeRoot: created.worktreePath,
@@ -931,7 +931,7 @@ describeIfJj("workspace recovery on jj", () => {
   it("reports retained reference cleanup failure without rejecting an already successful unarchive", async () => {
     const { fixture, project } = jjProjectFixture();
     const pin = "paseo/recovery/retained-cleanup";
-    writeJjWorkspaceIncarnation(fixture.repoDir, "retained-cleanup");
+    await writeJjWorkspaceIncarnation(fixture.repoDir, "retained-cleanup");
     fixture.jj(["bookmark", "create", pin, "--revision", "main"]);
     const record = createWorkspace({
       workspaceId: "retained-cleanup",
@@ -980,7 +980,7 @@ describeIfJj("workspace recovery on jj", () => {
         cwd: created.worktreePath,
         worktreeRoot: created.worktreePath,
         mainRepoRoot: fixture.repoDir,
-        jjWorkspaceId: readJjWorkspaceIncarnation(created.worktreePath)!,
+        jjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
         jjWorkspaceManagement: "managed",
         recoveryBookmark: pin,
         kind: "directory",
@@ -1022,7 +1022,7 @@ describeIfJj("workspace recovery on jj", () => {
       worktreeRoot: root,
       mainRepoRoot: fixture.repoDir,
       jjWorkspaceManagement: "managed",
-      jjWorkspaceId: readJjWorkspaceIncarnation(root)!,
+      jjWorkspaceId: (await readJjWorkspaceIncarnation(root))!,
       recoveryBookmark: pin,
     });
     return { fixture, root, record, harness: jjHarness({ records: [record], project }) };
@@ -1054,7 +1054,7 @@ describeIfJj("workspace recovery on jj", () => {
             "root()",
           ]).status,
         ).toBe(0);
-        writeJjWorkspaceIncarnation(h.root, "replacement-incarnation");
+        await writeJjWorkspaceIncarnation(h.root, "replacement-incarnation");
       }
       writeFileSync(join(h.root, "user.txt"), "unrelated checkout bytes\n");
       const orphans: string[] = [];
@@ -1091,7 +1091,7 @@ describeIfJj("workspace recovery on jj", () => {
     await expect(recovery.restore(h.record.workspaceId)).rejects.toThrow(
       "selected project directory",
     );
-    expect(readJjWorkspaceIncarnation(h.root)).toBe(h.record.jjWorkspaceId);
+    expect(await readJjWorkspaceIncarnation(h.root)).toBe(h.record.jjWorkspaceId);
     expect(h.harness.records.get(h.record.workspaceId)).toEqual(h.record);
     expect(h.harness.cleared).toEqual([]);
     expect(orphans).toEqual([]);

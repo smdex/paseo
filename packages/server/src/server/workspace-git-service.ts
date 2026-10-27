@@ -59,10 +59,7 @@ import {
   type ForgeResolution,
   type ForgeResolver,
 } from "../services/forge-resolver.js";
-import {
-  isPathInsideRoot,
-  looksLikeDefiniteWindowsPath,
-} from "../utils/path.js";
+import { isPathInsideRoot, looksLikeDefiniteWindowsPath } from "../utils/path.js";
 import {
   createRunGitCommand,
   runGitCommand,
@@ -420,7 +417,7 @@ interface WorkspaceGitServiceDependencies {
    * enablement as the rest of the jj surface. Null for git checkouts and
    * whenever jj dispatch is disabled.
    */
-  resolveJjRepoIdentity: (cwd: string) => JjRepoIdentity | null;
+  resolveJjRepoIdentity: (cwd: string) => Promise<JjRepoIdentity | null>;
   /**
    * Best-effort head jj operation id for the publication fence. Null keeps
    * the fence fail-open (refresh).
@@ -658,7 +655,7 @@ function resolveWorkspaceGitServiceDeps(
 }
 
 /** Dispatch+runtime-gated jj identity probe: null whenever the jj surface is off. */
-function resolveDispatchedJjRepoIdentity(cwd: string): JjRepoIdentity | null {
+async function resolveDispatchedJjRepoIdentity(cwd: string): Promise<JjRepoIdentity | null> {
   // The warmed feature gate tracks the runtime probe, so observation never
   // binds a target to the jj store while dispatch would refuse the runtime.
   return isJjDispatchEnabled() && isJjFeatureAvailable() ? resolveJjRepoIdentity(cwd) : null;
@@ -1439,7 +1436,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       this.removeWorkspaceRepoLink(target);
       return;
     }
-    if ((backend === "jj") !== (this.deps.resolveJjRepoIdentity(target.cwd) !== null)) {
+    const jjIdentity = await this.deps.resolveJjRepoIdentity(target.cwd);
+    if ((backend === "jj") !== (jjIdentity !== null)) {
       throw new Error("Repository backend changed while binding observation");
     }
     const gitDir = facts.absoluteGitDir;
@@ -1455,7 +1453,6 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     // and it is the one identity secondary workspaces share. Colocated repos
     // additionally keep the `.git` dir under observation (see
     // startColocatedGitMetadataObservation).
-    const jjIdentity = this.deps.resolveJjRepoIdentity(target.cwd);
     const vcs = jjIdentity ? "jj" : "git";
     if (jjIdentity) {
       repoGitRoot = jjIdentity.sharedStorePath;
@@ -1466,22 +1463,27 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
     const oldRepoTarget = target.repoGitRoot ? this.repoTargets.get(target.repoGitRoot) : undefined;
     if (target.repoGitRoot !== repoGitRoot || oldRepoTarget?.vcs !== vcs) {
-      const siblings = [...(oldRepoTarget?.workspaceKeys ?? [])];
       this.removeWorkspaceRepoLink(target);
-      for (const cwd of siblings) {
-        if (cwd !== target.cwd) {
-          this.scheduleWorkspaceRefresh(cwd, {
-            force: true,
-            scope: "structure",
-            reason: "repo-binding-change",
-          });
-        }
-      }
+      this.refreshRepoSiblings(target, oldRepoTarget);
     }
     target.vcs = vcs;
     target.repoGitRoot = repoGitRoot;
     target.colocatedJjGitDir = colocatedGitDir;
     await this.ensureRepoTarget(target);
+  }
+
+  private refreshRepoSiblings(
+    target: WorkspaceGitTarget,
+    previous: RepoGitTarget | undefined,
+  ): void {
+    for (const cwd of previous?.workspaceKeys ?? []) {
+      if (cwd === target.cwd) continue;
+      this.scheduleWorkspaceRefresh(cwd, {
+        force: true,
+        scope: "structure",
+        reason: "repo-binding-change",
+      });
+    }
   }
 
   private async getFactsForObservation(target: WorkspaceGitTarget): Promise<CheckoutSnapshotFacts> {
@@ -1537,7 +1539,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.assertNotDisposed();
     const target: WorkingTreeWatchTarget = {
       paths,
-      acceptsEvent: paths.createEventFilter([join(watchPath, ".git"), join(watchPath, ".jj"), ...ignoredDirectories]),
+      acceptsEvent: paths.createEventFilter([
+        join(watchPath, ".git"),
+        join(watchPath, ".jj"),
+        ...ignoredDirectories,
+      ]),
       cwd,
       watchPath,
       repoRoot,
@@ -2400,7 +2406,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options?: { replaceFallback?: boolean },
   ): Promise<boolean> {
     const paths = target.paths;
-    const ignore = target.vcs === "jj" ? [] : getPrunedGitMetadataPaths("common").map((path) => join(target.repoGitRoot, path));
+    const ignore =
+      target.vcs === "jj"
+        ? []
+        : getPrunedGitMetadataPaths("common").map((path) => join(target.repoGitRoot, path));
     const matchesRepoGitRoot = paths.matches;
     const canary = this.deps.createWatcherLivenessCanary(target.repoGitRoot);
     let openedSubscription: FileObserverSubscription | null = null;
@@ -2572,15 +2581,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const matchesRepoGitRoot = paths.matches;
 
     for (const event of events) {
-      if (
-        !this.routeRepoMetadataEvent(
-          target,
-          event,
-          matchesRepoGitRoot,
-          paths,
-          refreshes,
-        )
-      )
+      if (!this.routeRepoMetadataEvent(target, event, matchesRepoGitRoot, paths, refreshes))
         return null;
     }
 
@@ -2670,7 +2671,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
     const ignore = getPrunedGitMetadataPaths("common").map((path) => join(gitDir, path));
     const paths = await GitObservationPaths.create(gitDir);
-    if (target.closed || this.disposed || this.repoTargets.get(target.repoGitRoot) !== target) return;
+    if (target.closed || this.disposed || this.repoTargets.get(target.repoGitRoot) !== target)
+      return;
     const matchesGitDir = paths.matches;
     try {
       const subscription = await this.subscribeWithDeadline(
@@ -3762,7 +3764,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     // workspace refreshing — the miss direction is one extra refresh. The
     // identity probe (cheap fs walk) decides jj-ness here because observation
     // setup — which sets target.vcs — races the initial refresh.
-    const jjFenceIdentity = this.deps.resolveJjRepoIdentity(cwd);
+    const jjFenceIdentity = await this.deps.resolveJjRepoIdentity(cwd);
     if (jjFenceIdentity) {
       target.vcs = "jj";
     }
@@ -3787,7 +3789,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
         if (resolution) {
           const resolvedRepository = { ...repository, host: resolution.host };
-          requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
+          await requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
           jjForgeResolution = { ...resolution, repository: resolvedRepository };
         }
       } catch (error) {
@@ -4042,7 +4044,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     let currentRoot: string | null;
     if (backend === "jj") {
       if (target.vcs !== "jj") return false;
-      currentRoot = this.deps.resolveJjRepoIdentity(cwd)?.sharedStorePath ?? null;
+      currentRoot = (await this.deps.resolveJjRepoIdentity(cwd))?.sharedStorePath ?? null;
     } else {
       if (target.vcs !== "git") return false;
       const gitDir = await this.deps.resolveAbsoluteGitDir(cwd);
@@ -4054,7 +4056,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       this.repoTargets.get(target.repoGitRoot) === target &&
       target.workspaceKeys.has(cwd) &&
       currentRoot === target.repoGitRoot &&
-      (detectVcsBackend(cwd) === "jj") === (target.vcs === "jj")
+      ((await detectVcsBackend(cwd)) === "jj") === (target.vcs === "jj")
     );
   }
 

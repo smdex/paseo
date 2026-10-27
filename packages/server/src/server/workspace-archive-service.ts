@@ -222,7 +222,7 @@ async function archiveByScopeWithPriority(
   const target = await resolveArchiveTarget(dependencies, request.scope);
   if (
     target.backing &&
-    workspaceLifecycleKey(target.backing.path) !== workspaceLifecycleKey(lockedRoot)
+    (await workspaceLifecycleKey(target.backing.path)) !== (await workspaceLifecycleKey(lockedRoot))
   ) {
     throw new Error(
       "Workspace placement changed during archive; retry before changing its lifecycle",
@@ -362,9 +362,9 @@ async function validateJjArchiveIncarnations(
   if (!backing) return;
   const ids = scope.kind === "workspace" ? [scope.workspaceId] : target.workspaceIds;
   const liveJj =
-    detectVcsBackend(backing.path) === "jj" ||
-    Boolean(readJjWorkspaceIncarnation(backing.path)) ||
-    Boolean(backing.mainRepoRoot && detectVcsBackend(backing.mainRepoRoot) === "jj");
+    (await detectVcsBackend(backing.path)) === "jj" ||
+    Boolean(await readJjWorkspaceIncarnation(backing.path)) ||
+    Boolean(backing.mainRepoRoot && (await detectVcsBackend(backing.mainRepoRoot)) === "jj");
   await validateEmptyPathArchiveAuthority(dependencies, { backing, targetWorkspaceIds: ids });
   if (!dependencies.getWorkspace) {
     const refs = await dependencies.listActiveWorkspaces();
@@ -383,7 +383,8 @@ async function validateJjArchiveIncarnations(
     if (!record) throw new Error("Workspace disappeared before archive authority validation");
     if (
       (hasDurableJjAuthority(record) || liveJj) &&
-      workspaceLifecycleKey(jjWorkspaceBackingRoot(record)) !== workspaceLifecycleKey(backing.path)
+      (await workspaceLifecycleKey(await jjWorkspaceBackingRoot(record))) !==
+        (await workspaceLifecycleKey(backing.path))
     )
       throw new Error("Workspace backing authority changed before archive; retry");
     const authority = await validatePresentJjWorkspace(record);
@@ -417,7 +418,7 @@ async function validateEmptyPathArchiveAuthority(
   for (const id of ids) {
     const record = await dependencies.getWorkspace?.(id);
     if (!record) throw new Error("Cannot inspect a retained workspace record for archive by path");
-    if (hasDurableJjAuthority(record) || hasPositiveJjEvidence(record))
+    if (hasDurableJjAuthority(record) || (await hasPositiveJjEvidence(record)))
       throw new Error(
         "No workspace record authorizes archive by path over retained jj authority; directory retained",
       );
@@ -509,7 +510,7 @@ async function resolveBackingDirectory(
     worktreesRoot: dependencies.paseoWorktreesBaseRoot,
   };
   const backend = await resolveEffectiveBackend(cwd);
-  const jjIdentity = backend === "jj" ? resolveJjRepoIdentity(cwd) : null;
+  const jjIdentity = backend === "jj" ? await resolveJjRepoIdentity(cwd) : null;
   const ownership = await isPaseoOwnedWorktreeCwd(cwd, {
     ...options,
     ...(backend === "jj" ? { knownGitCommonDir: null } : {}),
@@ -651,12 +652,12 @@ async function deleteBackingWorktreeForBackend(
   backing: BackingDirectory,
   archivedWorkspaceIds: string[],
 ): Promise<void> {
-  if (backing.jjManaged && detectVcsBackend(backing.mainRepoRoot ?? backing.path) !== "jj")
+  if (backing.jjManaged && (await detectVcsBackend(backing.mainRepoRoot ?? backing.path)) !== "jj")
     throw new Error("Managed jj source unavailable; refusing Git deletion");
   const backingBackend = backing.jjManaged ? "jj" : await resolveEffectiveBackend(backing.path);
   const sourceRepoRoot =
     backingBackend === "jj"
-      ? (resolveJjRepoIdentity(backing.path)?.primaryRoot ?? backing.mainRepoRoot)
+      ? ((await resolveJjRepoIdentity(backing.path))?.primaryRoot ?? backing.mainRepoRoot)
       : backing.mainRepoRoot;
   if (
     backingBackend === "jj" ||
@@ -697,7 +698,7 @@ async function deleteBackingWorktreeForBackend(
           await dependencies.setWorkspaceRecoveryPin!(record.workspaceId, pin, {
             ...record,
             jjCheckpointRef: {
-              path: jjArchiveCheckpointPath(backing.path, pin, dependencies.paseoHome),
+              path: await jjArchiveCheckpointPath(backing.path, pin, dependencies.paseoHome),
               generation: checkpoint.generation,
             },
           });
@@ -741,7 +742,7 @@ async function resolveJjRecoveryPinTargets(
   const candidates = new Set(archivedWorkspaceIds);
   for (const id of await dependencies.findWorkspaceIdsForBackingPath(backingPath))
     candidates.add(id);
-  const incarnation = readJjWorkspaceIncarnation(backingPath);
+  const incarnation = await readJjWorkspaceIncarnation(backingPath);
   const targets = new Map<string, PersistedWorkspaceRecord>();
   for (const id of candidates) {
     const record = await dependencies.getWorkspace(id);

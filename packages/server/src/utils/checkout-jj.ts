@@ -537,10 +537,10 @@ export async function getJjSnapshotFacts(
   cwd: string,
   context?: JjCheckoutContext,
 ): Promise<JjSnapshotFacts> {
-  if (detectVcsBackend(cwd) !== "jj") {
+  if ((await detectVcsBackend(cwd)) !== "jj") {
     return { isJj: false };
   }
-  const identity = resolveJjRepoIdentity(cwd);
+  const identity = await resolveJjRepoIdentity(cwd);
   if (!identity) {
     return { isJj: false };
   }
@@ -563,7 +563,7 @@ export async function getJjSnapshotFacts(
   }
   const metadata = ownership.owned
     ? (checkpoint?.metadata ??
-      await readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot))
+      (await readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot)))
     : null;
   const storedBaseRef = storedBaseRefFromMetadata(metadata?.baseRefName, metadata?.baseRef);
   const managedBookmark = metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
@@ -1489,7 +1489,7 @@ function assertSafeJjRef(name: string, label: string): void {
  * the WRONG file. Every path-scoped command executes from this root.
  */
 async function jjWorkspaceRoot(cwd: string): Promise<string> {
-  return resolveJjRepoIdentity(cwd)?.workspaceRoot ?? resolve(cwd);
+  return (await resolveJjRepoIdentity(cwd))?.workspaceRoot ?? resolve(cwd);
 }
 
 /**
@@ -2178,7 +2178,10 @@ async function mutateJjChange(
         freshContext,
       );
       if (transition && facts.paseoOwnedWorktree) {
-        await updatePaseoWorktreeJjBookmark(root, { from: transition.oldBookmark, to: transition.name });
+        await updatePaseoWorktreeJjBookmark(root, {
+          from: transition.oldBookmark,
+          to: transition.name,
+        });
         await validateJjCheckpoint(checkpoint, root);
       }
       operation.status = "completed";
@@ -2438,6 +2441,30 @@ export async function jjPush(
       context: freshContext,
       expectedHead,
     });
+    const localHead = await uniqueChange(
+      cwd,
+      `bookmarks(exact:${JSON.stringify(bookmark)})`,
+      freshContext,
+    );
+    const remoteRef = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:${JSON.stringify(remote.name)})`;
+    if (await countRevset(cwd, `${remoteRef} ~ ::${localHead.commitId}`, freshContext))
+      throw new JjPushTargetError(
+        "The remote bookmark is not an ancestor of the publication head. Fetch and reconcile before pushing.",
+      );
+    await runJj(
+      ["bookmark", "track", `exact:${bookmark}`, "--remote", `exact:${remote.name}`],
+      { cwd },
+      freshContext,
+    );
+    const trackedHead = await uniqueChange(
+      cwd,
+      `bookmarks(exact:${JSON.stringify(bookmark)})`,
+      freshContext,
+    );
+    if (trackedHead.commitId !== localHead.commitId)
+      throw new JjPushTargetError(
+        "Tracking changed the publication bookmark. Refresh before pushing.",
+      );
     await runJj(
       ["git", "push", "--bookmark", bookmark, "--remote", remote.name],
       { cwd },
@@ -2476,7 +2503,7 @@ interface JjPullRequestBaseInput extends JjPullRequestPreparation {
 async function resolveJjPullRequestBase(input: JjPullRequestBaseInput): Promise<string> {
   const { cwd, facts, checkpoint, context } = input;
   const metadata =
-    checkpoint?.metadata ?? await readJjPaseoWorktreeMetadata(facts.identity.workspaceRoot);
+    checkpoint?.metadata ?? (await readJjPaseoWorktreeMetadata(facts.identity.workspaceRoot));
   const storedBase = checkpoint?.comparison.liveBase ?? metadata?.baseRefName;
   const requestedBase = input.requestedBase?.trim();
   const storedNamesBookmark = Boolean(

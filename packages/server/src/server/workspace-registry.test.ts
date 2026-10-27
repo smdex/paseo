@@ -569,6 +569,38 @@ describe("workspace registries", () => {
     });
   });
 
+  test("serializes asynchronous workspace updates before later mutations", async () => {
+    await workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-async",
+        projectId: "proj-1",
+        cwd: "/tmp/repo",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    );
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const first = workspaceRegistry.update("ws-async", async (record) => {
+      started.resolve();
+      await release.promise;
+      return { ...record, title: "first" };
+    });
+    await started.promise;
+    const second = workspaceRegistry.update("ws-async", (record) => ({
+      ...record,
+      pinnedAt: "second",
+    }));
+    release.resolve();
+    await Promise.all([first, second]);
+    expect(await workspaceRegistry.get("ws-async")).toMatchObject({
+      title: "first",
+      pinnedAt: "second",
+    });
+  });
+
   test("composes concurrent workspace field updates without losing either change", async () => {
     await workspaceRegistry.initialize();
     await workspaceRegistry.upsert(
