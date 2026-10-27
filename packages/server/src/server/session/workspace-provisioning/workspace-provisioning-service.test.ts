@@ -11,6 +11,8 @@ import {
   readPaseoWorktreeMetadata,
   readJjWorkspaceIncarnation,
   updatePaseoWorktreeJjBookmark,
+  writeJjWorkspaceIncarnation,
+  writePaseoWorktreeMetadata,
 } from "../../../utils/worktree-metadata.js";
 import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
 import { createJjWorktree } from "../../../utils/worktree-jj.js";
@@ -1431,18 +1433,38 @@ interface JjOpenRaceFixture {
   createReplacement: (slug?: string) => Promise<Awaited<ReturnType<typeof createJjWorktree>>>;
 }
 
-async function jjOpenRaceFixture(subproject: boolean): Promise<JjOpenRaceFixture> {
+async function jjOpenRaceFixture(subproject: boolean, legacy = false): Promise<JjOpenRaceFixture> {
   const fixture = createScratchJjRepo({
     files: { "base.txt": "base\n", "sub/file.txt": "sub base\n" },
   });
   fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
   const worktreesRoot = path.join(tmpDir, "jj-worktrees");
-  const old = await createJjWorktree({
-    cwd: fixture.repoDir,
-    worktreeSlug: "reused",
-    worktreesRoot,
-    source: { kind: "branch-off", baseBranch: "main", branchName: "old-feature" },
-  });
+  let old: JjOpenRaceFixture["old"];
+  if (legacy) {
+    // Before sibling placement, managed workspaces lived under <base>/<project>/<slug>.
+    const worktreePath = path.join(worktreesRoot, "legacy-project", "reused");
+    mkdirSync(path.dirname(worktreePath), { recursive: true });
+    const base = fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    expect(
+      fixture.jj(["workspace", "add", worktreePath, "--name", "reused", "--revision", "main"])
+        .status,
+    ).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "old-feature"], worktreePath).status).toBe(0);
+    await writeJjWorkspaceIncarnation(worktreePath, "legacy-fixture");
+    await writePaseoWorktreeMetadata(worktreePath, {
+      baseRefName: "main",
+      baseRef: base,
+      jjBookmark: "old-feature",
+    });
+    old = { worktreePath, branchName: "old-feature", comparisonBaseRef: base };
+  } else {
+    old = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "reused",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "old-feature" },
+    });
+  }
   writeFileSync(path.join(old.worktreePath, "old-work.txt"), "saved old work\n");
   const git = createNoopWorkspaceGitService({
     getCheckout: async (cwd) => {
@@ -1918,21 +1940,20 @@ test.skipIf(!isJjAvailable())(
 test.skipIf(!isJjAvailable())(
   "legacy exact-subproject recovery uses the shared backing root for provisioning reentry",
   async () => {
-    const h = await jjOpenRaceFixture(true);
+    const h = await jjOpenRaceFixture(true, true);
     try {
-      expect(
-        (
-          await archiveByScope(h.archiveDeps, {
-            scope: { kind: "workspace", workspaceId: "b" },
-            requestId: "legacy",
-          })
-        ).removedDirectory,
-      ).toBe(true);
+      // Model an archive made before incarnation IDs and checkpoints were persisted.
+      const legacyPin = "paseo/recovery/reused-legacy";
+      expect(h.fixture.jj(["bookmark", "create", legacyPin], h.old.worktreePath).status).toBe(0);
+      expect(h.fixture.jj(["workspace", "forget", "reused"]).status).toBe(0);
+      rmSync(h.old.worktreePath, { recursive: true });
+      await workspaceRegistry.archive("b", ARCHIVED_AT);
       for (const id of ["a", "b"])
         await workspaceRegistry.update(id, (record) => ({
           ...record,
           worktreeRoot: null,
           jjWorkspaceId: undefined,
+          recoveryBookmark: legacyPin,
         }));
       const recovery = createWorkspaceRecoveryService({
         paseoHome: tmpDir,
