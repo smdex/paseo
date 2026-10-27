@@ -490,14 +490,13 @@ async function createJjWorkspaceAtPath(
     await seedPaseoConfigFile({ sourceCwd: primaryRoot, targetCwd: worktreePath });
 
     if (options.runSetup) {
-      // cleanupOnFailure stays FALSE for jj: the git-only cleanup helper would
-      // run `git worktree remove` and leave the jj workspace registered
-      // (review fix 14) — the encompassing catch below rolls back jj-first.
+      // No inline cleanup here: a failed setup throws and the encompassing
+      // catch rolls back jj-first (git worktree remove would leave the jj
+      // workspace registered) — review fix 14.
       await runWorktreeSetupCommands({
         worktreePath,
         branchName,
         repoRootPath: primaryRoot,
-        cleanupOnFailure: false,
       });
     }
   } catch (error) {
