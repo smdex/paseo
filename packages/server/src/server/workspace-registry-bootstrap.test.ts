@@ -598,8 +598,8 @@ describe("bootstrapWorkspaceRegistries", () => {
     async (management) => {
       const fixture = createScratchJjRepo({ colocate: false, files: { "readme.txt": "keep\n" } });
       try {
-        writePaseoWorktreeMetadata(fixture.repoDir, { baseRefName: "main", jjBookmark: "feature" });
-        const metadata = readPaseoWorktreeMetadata(fixture.repoDir);
+        await writePaseoWorktreeMetadata(fixture.repoDir, { baseRefName: "main", jjBookmark: "feature" });
+        const metadata = await readPaseoWorktreeMetadata(fixture.repoDir);
         await workspaceRegistry.upsert(
           createPersistedWorkspaceRecord({
             workspaceId: "protected",
@@ -635,7 +635,7 @@ describe("bootstrapWorkspaceRegistries", () => {
           workspaceGitService,
           logger,
         });
-        expect(readPaseoWorktreeMetadata(fixture.repoDir)).toEqual(metadata);
+        expect(await readPaseoWorktreeMetadata(fixture.repoDir)).toEqual(metadata);
         expect(await workspaceRegistry.get("protected")).toEqual(saved);
       } finally {
         fixture.dispose();

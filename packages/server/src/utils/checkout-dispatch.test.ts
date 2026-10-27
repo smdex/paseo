@@ -397,9 +397,9 @@ describeIfJj("jj dispatch uses daemon placement for ownership", () => {
       source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
     });
     fixture.jj(["bookmark", "delete", "feature"]);
-    writePaseoWorktreeMetadata(created.worktreePath, {
+    await writePaseoWorktreeMetadata(created.worktreePath, {
       baseRefName: "main",
-      baseRef: readPaseoWorktreeMetadata(created.worktreePath)?.baseRef,
+      baseRef: (await readPaseoWorktreeMetadata(created.worktreePath))?.baseRef,
       jjBookmark: null,
     });
     const cwd = join(created.worktreePath, "subproject");
@@ -429,8 +429,8 @@ describeIfJj("jj dispatch uses daemon placement for ownership", () => {
     const cwd = join(created.worktreePath, "subproject");
     mkdirSync(cwd);
     await dispatchRenameCurrentBranch(cwd, "feature-new", { worktreesRoot });
-    expect(readPaseoWorktreeMetadata(created.worktreePath)?.version).toBe(2);
-    expect(readPaseoWorktreeMetadata(created.worktreePath)).toMatchObject({
+    expect((await readPaseoWorktreeMetadata(created.worktreePath))?.version).toBe(2);
+    expect(await readPaseoWorktreeMetadata(created.worktreePath)).toMatchObject({
       jjBookmark: "feature-new",
     });
   });

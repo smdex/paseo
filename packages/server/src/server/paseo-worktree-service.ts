@@ -368,9 +368,9 @@ function autoNameBackendPorts(
 async function checkpointAutoNameAttempt(options: FirstAgentBranchAutoNameOptions): Promise<void> {
   const checkpoint = await readJjCheckpoint(options.cwd, options.paseoHome);
   if (!checkpoint) return;
-  validateJjCheckpoint(checkpoint, options.cwd);
+  await validateJjCheckpoint(checkpoint, options.cwd);
   await writeJjCheckpoint(
-    { ...checkpoint, metadata: readPaseoWorktreeMetadata(options.cwd) },
+    { ...checkpoint, metadata: await readPaseoWorktreeMetadata(options.cwd) },
     options.paseoHome,
   );
 }

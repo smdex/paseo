@@ -1448,7 +1448,7 @@ async function jjOpenRaceFixture(subproject: boolean): Promise<JjOpenRaceFixture
     getCheckout: async (cwd) => {
       const identity = resolveJjRepoIdentity(cwd);
       if (!identity) throw new Error(`Missing jj checkout: ${cwd}`);
-      const metadata = readPaseoWorktreeMetadata(identity.workspaceRoot);
+      const metadata = await readPaseoWorktreeMetadata(identity.workspaceRoot);
       return {
         cwd,
         isGit: true,
@@ -1813,7 +1813,7 @@ test.skipIf(!isJjAvailable())(
     const finish = Promise.withResolvers<void>();
     await workspaceRegistry.update("a", (record) => ({ ...record, archivedAt: null }));
     h.fixture.jj(["bookmark", "rename", "old-feature", "refreshed-feature"], h.old.worktreePath);
-    updatePaseoWorktreeJjBookmark(h.old.worktreePath, {
+    await updatePaseoWorktreeJjBookmark(h.old.worktreePath, {
       from: "old-feature",
       to: "refreshed-feature",
     });

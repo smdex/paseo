@@ -1557,7 +1557,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       ]);
       expect(restored.completedChanges).toEqual(checkpoint.completedChanges);
       expect(restored.comparison).toEqual(checkpoint.comparison);
-      expect(readPaseoWorktreeMetadata(root)).toEqual(restored.metadata);
+      expect(await readPaseoWorktreeMetadata(root)).toEqual(restored.metadata);
       expect((await getJjChangeMeta(root, "@"))!.changeId).toBe(archivedSelection.changeId);
       await jjSwitchBookmark(
         subproject ? path.join(root, "sub") : root,
@@ -1708,7 +1708,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
       });
       if (stage !== "registered") writeJjWorkspaceIncarnation(root, archived.jjWorkspaceId!);
       if (stage === "metadata" || stage === "lost-phase")
-        writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
+        await writePaseoWorktreeMetadataFile(root, checkpoint.metadata!);
       if (stage === "lost-phase") {
         const { readdirSync } = await import("node:fs");
         const directory = path.join(h.fixture.dir, "projects", "jj-checkpoints", "restores");

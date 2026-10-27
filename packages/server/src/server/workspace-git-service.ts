@@ -59,7 +59,6 @@ import {
   type ForgeResolution,
   type ForgeResolver,
 } from "../services/forge-resolver.js";
-import { parseGitRevParsePath } from "../utils/git-rev-parse-path.js";
 import {
   isPathInsideRoot,
   looksLikeDefiniteWindowsPath,

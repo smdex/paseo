@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentStorage } from "./agent-storage.js";
 import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import { relative } from "node:path";
 import { execFileSync } from "node:child_process";

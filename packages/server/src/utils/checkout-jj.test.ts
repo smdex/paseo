@@ -1145,7 +1145,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     jj: ScratchJjRepoFixture["jj"];
   }
 
-  function managedFixture(options?: { jjBookmark?: string | null }): ManagedFixture {
+  async function managedFixture(options?: { jjBookmark?: string | null }): Promise<ManagedFixture> {
     const fixture = scratch({ colocate: true, files: { "readme.md": "hello\n" } });
     const base = fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]).stdout.trim();
     fixture.jj(["bookmark", "create", "main", "-r", base]);
@@ -1154,7 +1154,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     const workspacePath = join(worktreesRoot, "projhash", "owned-ws");
     mkdirSync(dirname(workspacePath), { recursive: true });
     fixture.jj(["workspace", "add", workspacePath, "--name", "owned-ws"]);
-    writePaseoWorktreeMetadata(workspacePath, {
+    await writePaseoWorktreeMetadata(workspacePath, {
       baseRefName: "main",
       baseRef: base,
       ...(options?.jjBookmark !== undefined && options.jjBookmark !== null
@@ -1168,7 +1168,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
   }
 
   it("status uses the recorded owner, not the derived ancestor bookmark", async () => {
-    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const managed = await managedFixture({ jjBookmark: "feat/owned" });
     const status = await getJjStatus(managed.workspacePath, {
       worktreesRoot: managed.worktreesRoot,
     });
@@ -1178,7 +1178,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
   });
 
   it("managed ownership null never falls back to ancestor inference", async () => {
-    const managed = managedFixture({ jjBookmark: null });
+    const managed = await managedFixture({ jjBookmark: null });
     const status = await getJjStatus(managed.workspacePath, {
       worktreesRoot: managed.worktreesRoot,
     });
@@ -1191,9 +1191,9 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
   });
 
   it("persists explicit null ownership and rejects materialized comparison mismatch", async () => {
-    const managed = managedFixture({ jjBookmark: null });
-    const metadata = readPaseoWorktreeMetadata(managed.workspacePath)!;
-    writePaseoWorktreeMetadata(managed.workspacePath, {
+    const managed = await managedFixture({ jjBookmark: null });
+    const metadata = (await readPaseoWorktreeMetadata(managed.workspacePath))!;
+    await writePaseoWorktreeMetadata(managed.workspacePath, {
       baseRefName: metadata.baseRefName,
       baseRef: metadata.baseRef,
       jjBookmark: null,
@@ -1208,7 +1208,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
       (await readJjCheckpoint(managed.workspacePath, context.paseoHome))!.metadata,
     ).toMatchObject({ version: 2, jjBookmark: null });
     expect(await getJjWorkspaceBookmark(managed.workspacePath, context)).toBeNull();
-    writePaseoWorktreeMetadata(managed.workspacePath, {
+    await writePaseoWorktreeMetadata(managed.workspacePath, {
       baseRefName: "other-base",
       baseRef: metadata.baseRef,
       jjBookmark: null,
@@ -1222,7 +1222,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
   });
 
   it("branch creation from a managed subproject retains WIP and pinned comparison while replacing only its owner", async () => {
-    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const managed = await managedFixture({ jjBookmark: "feat/owned" });
     const context = {
       worktreesRoot: managed.worktreesRoot,
       paseoHome: join(managed.worktreesRoot, "home"),
@@ -1233,7 +1233,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     const before = (await getJjChangeMeta(managed.workspacePath, "@"))!;
     const base = (await getJjChangeMeta(managed.workspacePath, "main"))!;
     const old = (await getJjChangeMeta(managed.workspacePath, "feat/owned"))!;
-    const metadata = readPaseoWorktreeMetadata(managed.workspacePath)!;
+    const metadata = (await readPaseoWorktreeMetadata(managed.workspacePath))!;
     await jjCreateBranchOnBase(
       sub,
       { baseBranch: "main", newBranchName: "feat/new-owner" },
@@ -1245,7 +1245,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
     expect((await getJjChangeMeta(managed.workspacePath, "feat/owned"))!.commitId).toBe(
       old.commitId,
     );
-    expect(readPaseoWorktreeMetadata(managed.workspacePath)).toMatchObject({
+    expect(await readPaseoWorktreeMetadata(managed.workspacePath)).toMatchObject({
       version: 2,
       baseRef: metadata.baseRef,
       baseRefName: metadata.baseRefName,
@@ -1262,7 +1262,7 @@ describeIfJj("checkout-jj managed bookmark ownership", () => {
   });
 
   it("commit from a subdirectory advances the recorded owner, never the base", async () => {
-    const managed = managedFixture({ jjBookmark: "feat/owned" });
+    const managed = await managedFixture({ jjBookmark: "feat/owned" });
     const subprojectDir = join(managed.workspacePath, "subdir");
     mkdirSync(subprojectDir, { recursive: true });
     writeFileSync(join(managed.workspacePath, "work.txt"), "work\n");
@@ -1382,7 +1382,7 @@ describeIfJj("checkout-jj rename preserves metadata", () => {
     mkdirSync(dirname(workspacePath), { recursive: true });
     fixture.jj(["workspace", "add", workspacePath, "--name", "renamable"]);
     fixture.jj(["bookmark", "create", "feat/old", "-r", "renamable@"], workspacePath);
-    writePaseoWorktreeMetadata(workspacePath, {
+    await writePaseoWorktreeMetadata(workspacePath, {
       baseRefName: "main",
       baseRef: base,
       jjBookmark: "feat/old",
@@ -1391,11 +1391,11 @@ describeIfJj("checkout-jj rename preserves metadata", () => {
     writePaseoWorktreeFirstAgentBranchAutoNameMetadata(workspacePath, {
       placeholderBranchName: "feat/old",
     });
-    const metadataBefore = readPaseoWorktreeMetadata(workspacePath);
+    const metadataBefore = await readPaseoWorktreeMetadata(workspacePath);
 
     await jjRenameBookmark(workspacePath, "feat/new", { worktreesRoot });
 
-    const updated = readPaseoWorktreeMetadata(workspacePath);
+    const updated = await readPaseoWorktreeMetadata(workspacePath);
     expect(updated).toEqual({ ...metadataBefore, jjBookmark: "feat/new" });
     expect(updated?.version).toBe(2);
     expect(updated?.jjBookmark).toBe("feat/new");
@@ -1462,7 +1462,7 @@ describeIfJj("jj local core parity", () => {
       worktreesRoot: join(target.dir, "worktrees"),
       runSetup: false,
     });
-    expect(readPaseoWorktreeMetadata(created.worktreePath)?.baseRef).toBe(remoteId);
+    expect((await readPaseoWorktreeMetadata(created.worktreePath))?.baseRef).toBe(remoteId);
   });
 
   it("keeps dirty unreachable work when fetch prunes a remote bookmark", async () => {
@@ -2582,7 +2582,7 @@ describeIfJj("integrate native work into its base", () => {
         fixture.jj(["workspace", "add", "-r", parent.commitId, workspacePath, "--name", "work"])
           .status,
       ).toBe(0);
-      writePaseoWorktreeMetadata(workspacePath, {
+      await writePaseoWorktreeMetadata(workspacePath, {
         baseRefName: baseLabel === "exact" ? parent.commitId : baseLabel,
         baseRef: parent.commitId,
         jjBookmark: "feature",
@@ -2606,7 +2606,7 @@ describeIfJj("integrate native work into its base", () => {
         baseCommitId: selected.commitId,
         bookmark: "feature",
       });
-      expect(readPaseoWorktreeMetadata(workspacePath)).toMatchObject({
+      expect(await readPaseoWorktreeMetadata(workspacePath)).toMatchObject({
         baseRef: selected.commitId,
         baseRefName: baseLabel === "exact" ? parent.commitId : baseLabel,
         jjBookmark: "feature",

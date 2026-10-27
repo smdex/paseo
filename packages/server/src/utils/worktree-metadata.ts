@@ -1,6 +1,6 @@
 import { mkdir, open, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import pLimit from "p-limit";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { z } from "zod";
@@ -198,7 +198,9 @@ export function readJjWorkspaceIncarnation(worktreeRoot: string): string | null 
 }
 
 export function writeJjWorkspaceIncarnation(worktreeRoot: string, identity: string): void {
-  const dir = join(getJjDirForWorkspaceRoot(worktreeRoot), "paseo");
+  const jjDir = join(worktreeRoot, ".jj");
+  if (!existsSync(jjDir)) throw new Error(`Not a jj workspace: ${worktreeRoot}`);
+  const dir = join(jjDir, "paseo");
   const current = readJjWorkspaceIncarnation(worktreeRoot);
   if (current && current !== identity) throw new Error("Cannot replace a jj workspace incarnation");
   if (current === identity) return;

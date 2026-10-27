@@ -352,7 +352,7 @@ export function createWorkspaceRecoveryService(deps: {
       await assertJjRestorationResolved(currentRoot, deps.paseoHome);
       const checkpoint = await readJjCheckpoint(currentRoot, deps.paseoHome);
       if (checkpoint) {
-        validateJjCheckpoint(checkpoint, currentRoot);
+        await validateJjCheckpoint(checkpoint, currentRoot);
         if (
           checkpoint.operations.some(
             (operation) =>
@@ -538,7 +538,7 @@ export function createWorkspaceRecoveryService(deps: {
       // Legacy exact-pin recovery keeps its existing compatibility contract.
       try {
         const pinnedBase = await resolveJjPinnedRevision(sourceRepoRoot, workspace.baseBranch);
-        writePaseoWorktreeMetadata(worktreePath, {
+        await writePaseoWorktreeMetadata(worktreePath, {
           baseRefName: workspace.baseBranch,
           baseRef: pinnedBase,
           ...(workspace.branch ? { jjBookmark: workspace.branch } : {}),
@@ -593,7 +593,7 @@ export function createWorkspaceRecoveryService(deps: {
         throw new JjCheckpointError(
           "Restoration did not reapply the exact saved native change. Retained pins require reconciliation.",
         );
-      validateJjCheckpoint(checkpoint, worktreePath);
+      await validateJjCheckpoint(checkpoint, worktreePath);
       operation.status = "completed";
       operation.after = after;
       operation.afterOperation = await getJjOperationId(worktreePath, context);
@@ -636,7 +636,7 @@ export function createWorkspaceRecoveryService(deps: {
       throw new JjCheckpointError(
         "Restoration did not retain the exact saved native selection; reconciliation is required.",
       );
-    validateJjCheckpoint(checkpoint, worktreePath);
+    await validateJjCheckpoint(checkpoint, worktreePath);
     await completeJjCheckpointRestoration(phase, deps.paseoHome);
   }
 

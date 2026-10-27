@@ -178,7 +178,7 @@ async function prepareJjPrSource(
   const facts = await getJjSnapshotFacts(cwd, options);
   if (!facts.isJj) throw new Error("The jj source workspace is unavailable");
   const checkpoint = await readJjCheckpoint(facts.identity.workspaceRoot, options.paseoHome);
-  if (checkpoint) validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
+  if (checkpoint) await validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
   const selection = checkpoint?.publication ?? checkpoint?.forgeRemote;
   let selectedRemote = facts.remotes.length === 1 ? facts.remotes[0] : undefined;
   if (selection)
@@ -449,7 +449,7 @@ async function createJjWorkspaceAtPath(
       branchName = createdBookmark.name;
     }
 
-    writePaseoWorktreeMetadata(worktreePath, {
+    await writePaseoWorktreeMetadata(worktreePath, {
       baseRefName,
       baseRef: pinnedBase,
       // Managed ownership (review fix 7): mutations advance exactly this
@@ -778,7 +778,7 @@ async function deleteJjWorkspaceUnderLifecycle(
     // snapshot is the last chance external writes have to enter the pin; the
     // directory is then quarantined (moved aside, preserved) instead of
     // deleted, so even a write racing the move is never destroyed.
-    const metadata = readPaseoWorktreeMetadata(resolvedWorktree);
+    const metadata = await readPaseoWorktreeMetadata(resolvedWorktree);
     const branchName = metadata?.version === 2 ? (metadata.jjBookmark ?? "") : "";
     for (const teardownCwd of options.teardownCwds ?? [resolvedWorktree]) {
       // Repo-configured teardown commands are VCS-agnostic (paseo.json driven).
@@ -825,7 +825,7 @@ async function deleteJjWorkspaceUnderLifecycle(
     const archivedCheckpoint = await writeJjCheckpoint(
       {
         ...checkpoint,
-        metadata: readPaseoWorktreeMetadata(resolvedWorktree),
+        metadata: await readPaseoWorktreeMetadata(resolvedWorktree),
         selection: { commitId: headCommitId, changeId },
         savedWip:
           checkpoint.selection.changeId === changeId

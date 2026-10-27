@@ -558,12 +558,12 @@ export async function getJjSnapshotFacts(
   // simply means "no stored base" — e.g. the user's own unmanaged checkout.
   const checkpoint = await readJjCheckpoint(identity.workspaceRoot, context?.paseoHome);
   if (checkpoint) {
-    validateJjCheckpoint(checkpoint, identity.workspaceRoot);
+    await validateJjCheckpoint(checkpoint, identity.workspaceRoot);
     await validateJjCheckpointHistory(cwd, checkpoint, context);
   }
   const metadata = ownership.owned
     ? (checkpoint?.metadata ??
-      readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot))
+      await readJjPaseoWorktreeMetadata(ownership.worktreeRoot ?? identity.workspaceRoot))
     : null;
   const storedBaseRef = storedBaseRefFromMetadata(metadata?.baseRefName, metadata?.baseRef);
   const managedBookmark = metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
@@ -678,7 +678,7 @@ export async function getJjForgeRepositoryContext(
   const facts = context?.facts ?? (await getJjSnapshotFacts(cwd, context));
   if (!facts.isJj) throw new ForgeRepositoryContextError("The jj repository is unavailable");
   const checkpoint = await readJjCheckpoint(facts.identity.workspaceRoot, context?.paseoHome);
-  if (checkpoint) validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
+  if (checkpoint) await validateJjCheckpoint(checkpoint, facts.identity.workspaceRoot);
   const mapping = checkpoint?.publication;
   const remoteSelection = mapping ?? checkpoint?.forgeRemote;
   let remote = facts.remotes.length === 1 ? facts.remotes[0] : undefined;
@@ -1974,7 +1974,7 @@ async function materializeJjTransition(
     throw new JjCheckpointError(
       "The live selection changed during validation. Retained heads require reconciliation.",
     );
-  validateJjCheckpoint(checkpoint, root);
+  await validateJjCheckpoint(checkpoint, root);
   if (transition && facts.paseoOwnedWorktree) {
     if (checkpoint.metadata?.version !== 2)
       throw new JjCheckpointError(
@@ -2032,7 +2032,7 @@ async function verifyJjMutationResult(
       await assertCapturedBookmark(cwd, transition.oldBookmark, transition.oldHead, context);
     if (transition.create) await assertCapturedBookmark(cwd, transition.name, after, context);
   }
-  validateJjCheckpoint(checkpoint, root);
+  await validateJjCheckpoint(checkpoint, root);
   const current = await uniqueChange(cwd, "@", context);
   if (current.commitId !== after.commitId || current.changeId !== after.changeId)
     throw new JjCheckpointError(
@@ -2178,8 +2178,8 @@ async function mutateJjChange(
         freshContext,
       );
       if (transition && facts.paseoOwnedWorktree) {
-        updatePaseoWorktreeJjBookmark(root, { from: transition.oldBookmark, to: transition.name });
-        validateJjCheckpoint(checkpoint, root);
+        await updatePaseoWorktreeJjBookmark(root, { from: transition.oldBookmark, to: transition.name });
+        await validateJjCheckpoint(checkpoint, root);
       }
       operation.status = "completed";
       operation.after = after;
@@ -2402,7 +2402,7 @@ export async function jjPush(
     await assertJjRestorationResolved(checkpointRoot, freshContext.paseoHome);
     const checkpoint = await readJjCheckpoint(checkpointRoot, freshContext?.paseoHome);
     if (checkpoint) {
-      validateJjCheckpoint(checkpoint, checkpointRoot);
+      await validateJjCheckpoint(checkpoint, checkpointRoot);
       await validateJjCheckpointHistory(cwd, checkpoint, freshContext);
       if (
         checkpoint.operations.some(
@@ -2476,7 +2476,7 @@ interface JjPullRequestBaseInput extends JjPullRequestPreparation {
 async function resolveJjPullRequestBase(input: JjPullRequestBaseInput): Promise<string> {
   const { cwd, facts, checkpoint, context } = input;
   const metadata =
-    checkpoint?.metadata ?? readJjPaseoWorktreeMetadata(facts.identity.workspaceRoot);
+    checkpoint?.metadata ?? await readJjPaseoWorktreeMetadata(facts.identity.workspaceRoot);
   const storedBase = checkpoint?.comparison.liveBase ?? metadata?.baseRefName;
   const requestedBase = input.requestedBase?.trim();
   const storedNamesBookmark = Boolean(
@@ -2747,7 +2747,7 @@ async function saveJjIntegratedBase(
 ): Promise<JjCheckpoint> {
   const { base, baseBookmark, before } = prepared;
   await assertJjIntegrationSelection(cwd, before, context);
-  validateJjCheckpoint(prepared.checkpoint, cwd);
+  await validateJjCheckpoint(prepared.checkpoint, cwd);
   if (baseBookmark)
     await jjMoveBookmark(
       cwd,
@@ -2757,8 +2757,8 @@ async function saveJjIntegratedBase(
     );
   // Preserve runtime metadata while advancing only this workspace's comparison
   // pin. Rewriting its parent would also rewrite unrelated workspace descendants.
-  validateJjCheckpoint(prepared.checkpoint, cwd);
-  const metadata = readPaseoWorktreeMetadata(cwd);
+  await validateJjCheckpoint(prepared.checkpoint, cwd);
+  const metadata = await readPaseoWorktreeMetadata(cwd);
   const nextMetadata = metadata ? { ...metadata, baseRef: integrated.commitId } : null;
   const checkpoint = await writeJjCheckpoint(
     {
@@ -2768,8 +2768,8 @@ async function saveJjIntegratedBase(
     },
     context.paseoHome,
   );
-  if (nextMetadata) writePaseoWorktreeMetadataFile(cwd, nextMetadata);
-  validateJjCheckpoint(checkpoint, cwd);
+  if (nextMetadata) await writePaseoWorktreeMetadataFile(cwd, nextMetadata);
+  await validateJjCheckpoint(checkpoint, cwd);
   await assertJjIntegrationSelection(cwd, before, context);
   if (baseBookmark) await assertCapturedBookmark(cwd, baseBookmark, integrated, context);
   return checkpoint;
@@ -2864,7 +2864,7 @@ export async function jjIntegrateIntoBase(
         freshContext.paseoHome,
       );
       await assertJjIntegrationSelection(root, before, freshContext);
-      validateJjCheckpoint(prepared.checkpoint, root);
+      await validateJjCheckpoint(prepared.checkpoint, root);
       if (await countRevset(root, `${integrated.commitId} & conflicts()`, freshContext)) {
         if (prepared.baseBookmark)
           await assertCapturedBookmark(root, prepared.baseBookmark, base, freshContext);
@@ -3037,7 +3037,7 @@ export async function jjRenameBookmark(
         context?.paseoHome,
       );
       if (facts.paseoOwnedWorktree)
-        updatePaseoWorktreeJjBookmark(root, { from: bookmark, to: newName });
+        await updatePaseoWorktreeJjBookmark(root, { from: bookmark, to: newName });
       operation.status = "completed";
       operation.after = await readWorkingCopyIds(cwd, freshContext);
       operation.afterOperation = await getJjOperationId(cwd, freshContext);

@@ -5640,7 +5640,7 @@ export class AgentManager {
       try {
         const catalog = await this.paseoToolCatalogFactory({
           callerAgentId: agentId,
-          paseoToolPolicy,
+          paseoToolPolicy: paseoToolPolicy ?? {},
         });
         if (useNativeTools) context.paseoTools = catalog;
       } catch (error) {

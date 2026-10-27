@@ -180,7 +180,7 @@ function ownership(metadata: JjCheckpoint["metadata"]): string | null {
   return metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null;
 }
 
-export function validateJjCheckpoint(checkpoint: JjCheckpoint, backingRoot: string): void {
+export async function validateJjCheckpoint(checkpoint: JjCheckpoint, backingRoot: string): Promise<void> {
   const identity = resolveJjRepoIdentity(backingRoot);
   const incarnation = readJjWorkspaceIncarnation(backingRoot);
   if (
@@ -193,7 +193,7 @@ export function validateJjCheckpoint(checkpoint: JjCheckpoint, backingRoot: stri
       "The jj checkpoint belongs to a different backing checkout. Live files and retained heads were not changed.",
     );
   }
-  const live = readPaseoWorktreeMetadata(backingRoot);
+  const live = await readPaseoWorktreeMetadata(backingRoot);
   if (metadataAuthority(live) !== metadataAuthority(checkpoint.metadata)) {
     throw new JjCheckpointError(
       "The live jj metadata does not match its saved checkpoint. Reconcile ownership and comparison state before changing this workspace.",
@@ -256,12 +256,12 @@ export async function importJjCheckpoint(input: {
 }): Promise<JjCheckpoint> {
   const existing = await readJjCheckpoint(input.backingRoot, input.paseoHome);
   if (existing) {
-    validateJjCheckpoint(existing, input.backingRoot);
+    await validateJjCheckpoint(existing, input.backingRoot);
     return existing;
   }
   const identity = resolveJjRepoIdentity(input.backingRoot);
   if (!identity) throw new JjCheckpointError("The jj backing checkout is unavailable.");
-  const metadata = readPaseoWorktreeMetadata(input.backingRoot);
+  const metadata = await readPaseoWorktreeMetadata(input.backingRoot);
   if (metadata && (!metadata.baseRef || !/^[0-9a-f]{40,64}$/.test(metadata.baseRef)))
     throw new JjCheckpointError(
       "Legacy jj comparison metadata has no exact base pin. Reconcile it before importing a checkpoint.",
@@ -465,7 +465,7 @@ export async function restoreJjCheckpoint(input: {
       "The retained checkpoint does not authorize this recovery pin or backing checkout.",
     );
   }
-  if (checkpoint.metadata) writePaseoWorktreeMetadataFile(input.backingRoot, checkpoint.metadata);
+  if (checkpoint.metadata) await writePaseoWorktreeMetadataFile(input.backingRoot, checkpoint.metadata);
   const current = await readJjCheckpoint(input.backingRoot, input.paseoHome);
   const generation = Math.max(checkpoint.generation, current?.generation ?? 0);
   const operations = new Map(

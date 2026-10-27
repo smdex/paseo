@@ -166,7 +166,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     expect(mainStillAtBase).toBe(baseCommit);
 
     // Metadata: readable through the jj-aware reader with the pinned base.
-    const metadata = readPaseoWorktreeMetadata(created.worktreePath);
+    const metadata = await readPaseoWorktreeMetadata(created.worktreePath);
     expect(metadata?.baseRefName).toBe("main");
     expect(metadata?.baseRef).toBe(baseCommit);
   });
@@ -187,7 +187,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     });
 
     expect(created.branchName).toBe("main");
-    const metadata = readPaseoWorktreeMetadata(created.worktreePath);
+    const metadata = await readPaseoWorktreeMetadata(created.worktreePath);
     expect(metadata?.baseRef).toBe(mainHead);
     // Workspace head is a child of the bookmark head; no new bookmark created.
     const parent = fixture
@@ -206,13 +206,13 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       source: { kind: "branch-off", baseBranch: "main", branchName: "feat/pinned" },
       worktreesRoot: fixture.worktreesRoot,
     });
-    const recordedBase = readPaseoWorktreeMetadata(created.worktreePath)?.baseRef;
+    const recordedBase = (await readPaseoWorktreeMetadata(created.worktreePath))?.baseRef;
 
     // Move main far forward in the primary.
     fixture.jj(["new", "main", "-m", "moved"]);
     fixture.jj(["bookmark", "set", "main"]);
 
-    const metadataAfter = readPaseoWorktreeMetadata(created.worktreePath);
+    const metadataAfter = await readPaseoWorktreeMetadata(created.worktreePath);
     expect(metadataAfter?.baseRef).toBe(recordedBase);
     const resolves = await jjRevisionResolves(fixture.repoDir, recordedBase ?? "");
     expect(resolves).toBe(true);
@@ -346,7 +346,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     // the OLD pin still present.
     const pins: string[] = [];
     const incarnation = readJjWorkspaceIncarnation(created.worktreePath)!;
-    const metadata = readPaseoWorktreeMetadata(created.worktreePath)!;
+    const metadata = (await readPaseoWorktreeMetadata(created.worktreePath))!;
     await deleteJjPaseoWorktree({
       cwd: fixture.repoDir,
       worktreePath: created.worktreePath,
@@ -363,7 +363,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
     });
     // The recovery service reapplies retained incarnation and checkpoint metadata.
     writeJjWorkspaceIncarnation(created.worktreePath, incarnation);
-    writePaseoWorktreeMetadataFile(created.worktreePath, metadata);
+    await writePaseoWorktreeMetadataFile(created.worktreePath, metadata);
     // A later archive gets its own pin; the previous generation stays intact.
     writeFileSync(join(created.worktreePath, "second-round.txt"), "work\n");
     fixture.jj(["describe", "-m", "second round", "-r", "repo-repin@"]);
@@ -393,7 +393,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       worktreesRoot: fixture.worktreesRoot,
     });
 
-    const metadata = readPaseoWorktreeMetadata(created.worktreePath);
+    const metadata = await readPaseoWorktreeMetadata(created.worktreePath);
     expect(metadata?.version).toBe(2);
     expect(metadata?.version === 2 ? metadata.jjBookmark : null).toBe("feat/owned");
 
@@ -464,7 +464,7 @@ describeIfJj("jj workspaces as Paseo worktrees", () => {
       worktreesRoot: fixture.worktreesRoot,
     });
     expect(existsSync(join(created.worktreePath, ".jj"))).toBe(true);
-    const metadata = readPaseoWorktreeMetadata(created.worktreePath);
+    const metadata = await readPaseoWorktreeMetadata(created.worktreePath);
     expect(metadata?.baseRefName).toBe("main");
     const listed = await listJjPaseoWorktrees({
       cwd: fixture.repoDir,

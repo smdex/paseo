@@ -1551,7 +1551,7 @@ test.skipIf(!isJjAvailable())(
     expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
       sourceHead,
     );
-    expect(readPaseoWorktreeMetadata(result.workspace.cwd)).toMatchObject({
+    expect(await readPaseoWorktreeMetadata(result.workspace.cwd)).toMatchObject({
       baseRef: base,
       jjBookmark: result.worktree.branchName,
       changeRequestLookupTarget: {
