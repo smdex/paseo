@@ -33,6 +33,11 @@
       "source": "./src/server/acp.ts",
       "default": "./dist/server/acp.js"
     },
+    "./internal/lifecycle": {
+      "types": "./dist/server/lifecycle.d.ts",
+      "source": "./src/server/lifecycle.ts",
+      "default": "./dist/server/lifecycle.js"
+    },
     "./client/react-native": {
       "types": "./dist/client/react-native.d.ts",
       "source": "./src/client/react-native.ts",

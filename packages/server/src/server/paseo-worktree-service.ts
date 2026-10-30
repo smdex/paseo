@@ -4,6 +4,7 @@ import { basename, resolve } from "node:path";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { getRealpathAwareRelativePath } from "../utils/path.js";
 import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
+import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
 import type { WorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import {
   createWorktreeCore,
@@ -72,6 +73,7 @@ export interface AttemptFirstAgentBranchAutoNameResult {
 }
 
 export interface CreatePaseoWorktreeDeps extends CreateWorktreeCoreDeps {
+  lifecycle?: PluginLifecycle;
   workspaceGitService: WorkspaceGitService;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForWorktree">;
 }
