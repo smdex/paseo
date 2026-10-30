@@ -322,6 +322,42 @@ describe("pi-subagent-manager observation v1", () => {
     }
   });
 
+  test("awaits image mapping in append-only and branch-selected child history", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "paseo-manager-image-"));
+    const file = join(dir, "child.jsonl");
+    try {
+      await writeFile(
+        file,
+        JSON.stringify({
+          type: "message",
+          id: "image",
+          parentId: null,
+          message: {
+            role: "toolResult",
+            toolCallId: "image-read",
+            toolName: "read",
+            content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+          },
+        }) + "\n",
+      );
+      for (const branch of [undefined, { leafId: "image", skipInherited: false }]) {
+        const reader = new PiChildSessionFollower("child", file, undefined, branch);
+        const events = await reader.readNew();
+        const image = events.find(
+          (event) => event.type === "timeline" && event.item.type === "assistant_message",
+        );
+        if (image?.type !== "timeline" || image.item.type !== "assistant_message") {
+          throw new Error("Missing child image");
+        }
+        const url = image.item.text.match(/\((file:[^)]+)\)/)![1];
+        expect(await readFile(new URL(url))).toEqual(Buffer.from("hello"));
+        expect(await reader.readNew()).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("reconnect replay replaces child timelines, retains identity and follows post-completion resume", async () => {
     const dir = await mkdtemp(join(tmpdir(), "paseo-manager-host-"));
     const file = join(dir, "child.jsonl");

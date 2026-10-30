@@ -90,17 +90,18 @@ export class PiChildSessionFollower {
   private async map(entry: ChildEntry): Promise<TimelineEvent[]> {
     if (!entry.message || typeof entry.message !== "object" || !("role" in entry.message))
       return [];
-    const mapped = (await this.mapper.mapMessages([entry.message])).flatMap((event): TimelineEvent[] =>
-      event.type === "timeline"
-        ? [
-            {
-              type: "timeline",
-              id: this.id,
-              item: limitAgentTimelineItemContent(event.item),
-              ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
-            },
-          ]
-        : [],
+    const mapped = (await this.mapper.mapMessages([entry.message])).flatMap(
+      (event): TimelineEvent[] =>
+        event.type === "timeline"
+          ? [
+              {
+                type: "timeline",
+                id: this.id,
+                item: limitAgentTimelineItemContent(event.item),
+                ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
+              },
+            ]
+          : [],
     );
     const room = Math.max(0, MAX_ITEMS - this.history.length);
     const kept = mapped.slice(0, room);
