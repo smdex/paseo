@@ -460,7 +460,11 @@ async function resolveWorkspaceBackingDirectory(
       paseoWorktreesRoot: null,
     };
   }
-  if (workspace.jjWorkspaceManagement === "managed" || workspace.jjWorkspaceId || workspace.recoveryBookmark) {
+  if (
+    workspace.jjWorkspaceManagement === "managed" ||
+    workspace.jjWorkspaceId ||
+    workspace.recoveryBookmark
+  ) {
     return {
       path: resolve(workspace.worktreeRoot ?? workspace.cwd),
       isPaseoOwnedWorktree: true,
@@ -725,6 +729,7 @@ async function deleteBackingWorktreeForBackend(
   await deletePaseoWorktree({
     cwd: backing.mainRepoRoot,
     worktreePath: backing.path,
+    registryProven: backing.registryProven,
     teardownCwds: [],
     worktreesRoot: backing.paseoWorktreesRoot ?? undefined,
     paseoHome: dependencies.paseoHome,
