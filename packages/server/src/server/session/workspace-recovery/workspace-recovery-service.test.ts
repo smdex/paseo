@@ -10,9 +10,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  readFileSync,
   renameSync,
-
   rmSync,
   statSync,
   writeFileSync,
@@ -533,6 +531,8 @@ test("restores a user-created worktree at its recorded path outside Paseo's root
     }).trim(),
   ).toBe("external-feature");
   expect(unarchived).toEqual([workspace.workspaceId]);
+});
+
 describeIfJj("workspace recovery on jj", () => {
   function jjHarness(input: {
     records: PersistedWorkspaceRecord[];
