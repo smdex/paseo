@@ -999,7 +999,7 @@ describe("PluginAgentClientRegistry", () => {
         }),
     });
     const agent = await manager.createAgent(
-      { provider: harness.registration.id, cwd: "/workspace" },
+      { provider: harness.registration.id, cwd: tmpdir() },
       undefined,
       { workspaceId: undefined },
     );
@@ -1130,7 +1130,7 @@ describe("PluginAgentClientRegistry", () => {
     });
     const external = { type: "http", url: "http://example.test/mcp" } as const;
     const agent = await manager.createAgent(
-      { provider: harness.registration.id, cwd: "/workspace", mcpServers: { external } },
+      { provider: harness.registration.id, cwd: tmpdir(), mcpServers: { external } },
       undefined,
       { workspaceId: undefined },
     );

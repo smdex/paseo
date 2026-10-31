@@ -53,6 +53,9 @@ beforeAll(async () => {
     bundle: true,
     platform: "node",
     format: "esm",
+    banner: {
+      js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);',
+    },
   });
 });
 afterAll(() => rmSync(probeDirectory, { recursive: true, force: true }));

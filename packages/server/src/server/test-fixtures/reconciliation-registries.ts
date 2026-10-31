@@ -43,7 +43,7 @@ export function createTestRegistries() {
     update: async (id, updater) => {
       const current = projects.get(id);
       if (!current) return null;
-      const updated = updater(current);
+      const updated = await updater(current);
       projects.set(id, updated);
       return updated;
     },
