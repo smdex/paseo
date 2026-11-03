@@ -11,6 +11,7 @@ export const builtinPlugins = [
   "fx-provider",
   "grok-usage-source",
   "hoplite-provider",
+  "jcode-provider",
   "kimi-usage-source",
   "minimax-usage-source",
   "muse-provider",
