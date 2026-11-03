@@ -7,6 +7,8 @@ import { beforeEach, afterEach, describe, expect, test } from "vitest";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import {
+  setWorkspaceRecoveryReference,
+  clearWorkspaceRecoveryReference,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
@@ -567,6 +569,38 @@ describe("workspace registries", () => {
     });
   });
 
+  test("serializes asynchronous workspace updates before later mutations", async () => {
+    await workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-async",
+        projectId: "proj-1",
+        cwd: "/tmp/repo",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    );
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const first = workspaceRegistry.update("ws-async", async (record) => {
+      started.resolve();
+      await release.promise;
+      return { ...record, title: "first" };
+    });
+    await started.promise;
+    const second = workspaceRegistry.update("ws-async", (record) => ({
+      ...record,
+      pinnedAt: "second",
+    }));
+    release.resolve();
+    await Promise.all([first, second]);
+    expect(await workspaceRegistry.get("ws-async")).toMatchObject({
+      title: "first",
+      pinnedAt: "second",
+    });
+  });
+
   test("composes concurrent workspace field updates without losing either change", async () => {
     await workspaceRegistry.initialize();
     await workspaceRegistry.upsert(
@@ -604,4 +638,90 @@ describe("workspace registries", () => {
       pinnedAt: "2026-03-03T00:00:00.000Z",
     });
   });
+});
+
+test("jj management provenance survives reload without defaulting unknown legacy records", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "jj-provenance-registry-"));
+  try {
+    const file = path.join(directory, "workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(file, createTestLogger());
+    for (const management of [undefined, "managed", "external"] as const) {
+      const record = createPersistedWorkspaceRecord({
+        workspaceId: management ?? "unknown",
+        projectId: "project",
+        cwd: directory,
+        kind: "worktree",
+        displayName: "workspace",
+        createdAt: "now",
+        updatedAt: "now",
+        jjWorkspaceManagement: management,
+      });
+      expect(record.jjWorkspaceManagement).toBe(management);
+      await registry.upsert(record);
+    }
+    const reloaded = new FileBackedWorkspaceRegistry(file, createTestLogger());
+    for (const management of [undefined, "managed", "external"] as const)
+      expect((await reloaded.get(management ?? "unknown"))?.jjWorkspaceManagement).toBe(management);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("pin persistence checks current incarnation and provenance, and retirement retains established authority", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "jj-pin-registry-"));
+  try {
+    const registry = new FileBackedWorkspaceRegistry(
+      path.join(directory, "workspaces.json"),
+      createTestLogger(),
+    );
+    const record = createPersistedWorkspaceRecord({
+      workspaceId: "managed",
+      projectId: "project",
+      cwd: directory,
+      kind: "worktree",
+      displayName: "workspace",
+      createdAt: "now",
+      updatedAt: "now",
+      jjWorkspaceManagement: "managed",
+      jjWorkspaceId: "incarnation",
+      recoveryBookmark: "paseo/recovery/old",
+    });
+    await registry.upsert(record);
+    await registry.update(record.workspaceId, (current) => ({
+      ...current,
+      jjWorkspaceManagement: "external",
+    }));
+    await expect(
+      setWorkspaceRecoveryReference(registry, record.workspaceId, "paseo/recovery/new", record),
+    ).rejects.toThrow("managed incarnation changed");
+    await registry.upsert(record);
+    await registry.update(record.workspaceId, (current) => ({
+      ...current,
+      jjWorkspaceId: "replacement",
+    }));
+    await expect(
+      setWorkspaceRecoveryReference(registry, record.workspaceId, "paseo/recovery/new", record),
+    ).rejects.toThrow("managed incarnation changed");
+    await clearWorkspaceRecoveryReference(
+      registry,
+      record.workspaceId,
+      "paseo/recovery/old",
+      record,
+    );
+    expect((await registry.get(record.workspaceId))?.recoveryBookmark).toBe("paseo/recovery/old");
+    await registry.upsert(record);
+    await registry.update(record.workspaceId, (current) => ({ ...current, title: "Edited title" }));
+    await setWorkspaceRecoveryReference(registry, record.workspaceId, "paseo/recovery/new", record);
+    await clearWorkspaceRecoveryReference(registry, record.workspaceId, "paseo/recovery/old");
+    expect((await registry.get(record.workspaceId))?.recoveryBookmark).toBe("paseo/recovery/new");
+    await clearWorkspaceRecoveryReference(registry, record.workspaceId, "paseo/recovery/new");
+    expect(await registry.get(record.workspaceId)).toMatchObject({
+      title: "Edited title",
+      jjWorkspaceId: "incarnation",
+      jjWorkspaceManagement: "managed",
+      recoveryBookmark: null,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -799,6 +799,27 @@ export const en = {
           pending: "Committing...",
           success: "Committed",
         },
+        integrateBase: {
+          pending: "Integrating into base…",
+          approve: "Approve integration",
+          detail:
+            "Integrate the selected change into {{base}}. The selected working copy and other workspace heads remain unchanged.",
+          integrated: "The base now contains the selected work.",
+          noop: "The base already contains the selected work.",
+        },
+        fetchRebase: {
+          label: "Fetch and rebase",
+          pending: "Fetching and rebasing…",
+          detail: "Fetch every remote, then rebase all mutable branches onto trunk.",
+          rebased: "Fetched all remotes and rebased mutable work onto trunk.",
+          unchanged: "Fetched all remotes. Mutable work is already on trunk.",
+          conflicts: "Rebased with conflicts. Resolve conflicts on the host before continuing.",
+        },
+        fetch: {
+          label: "Fetch",
+          pending: "Fetching...",
+          success: "Fetched",
+        },
         pull: {
           label: "Pull",
           pending: "Pulling...",
@@ -817,6 +838,12 @@ export const en = {
         viewPr: "View PR",
         viewPr_mr: "View MR",
         createPr: {
+          form: {
+            title: "Title",
+            body: "Description",
+            base: "Base bookmark (optional)",
+            automatic: "Generate automatically",
+          },
           label: "Create PR",
           pending: "Creating PR...",
           success: "PR Created",
@@ -839,6 +866,28 @@ export const en = {
           pending: "Archiving...",
           success: "Archived",
         },
+        finishChange: {
+          label: "Finish change",
+          pending: "Finishing...",
+          success: "Change finished",
+        },
+        describeChange: { label: "Describe change" },
+        editChange: { label: "Edit change" },
+        newChangeOn: { label: "New change on…" },
+        jj: {
+          rewriteWarning:
+            "Native jj rewrites keep the change ID. Describe/Edit and later snapshots can rebase descendants, including shared or published work and changes added externally. Captured heads and operation history are retained; this is not a cross-process lock. Continue?",
+          snapshotRefused: "jj could not snapshot these files",
+          description: "Description",
+          loadingHistory: "Loading history...",
+          saved: "Change saved",
+          saving: "Saving...",
+        },
+        newChange: {
+          label: "New change",
+          pending: "Starting new change...",
+          success: "New change started",
+        },
         mergePr: {
           squash: "Merge PR (squash)",
           merge: "Merge PR (merge)",
@@ -852,6 +901,7 @@ export const en = {
           success_mr: "MR merged",
         },
         autoMerge: {
+          disable: "Disable auto-merge",
           enableSquash: "Auto merge (squash)",
           enableMerge: "Auto merge (merge)",
           enableRebase: "Auto merge (rebase)",
@@ -912,6 +962,7 @@ export const en = {
         },
         toasts: {
           failedCommit: "Failed to commit",
+          failedNewChange: "Failed to start a new change",
           failedPull: "Failed to pull",
           failedPush: "Failed to push",
           failedPullAndPush: "Failed to pull and push",
@@ -1377,6 +1428,7 @@ export const en = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Current change",
       startingRef: "Starting ref",
       intoBase: "into {{baseRef}}",
       searching: "Searching...",
@@ -1636,6 +1688,17 @@ export const en = {
     restore: "Restore",
     later: "Later",
     stashRestored: "Stashed changes restored",
+    jjSwitchTitle: "Switch to {{branchName}}",
+    jjSwitchMessage:
+      "A new change starts on this bookmark's captured revision. Your open changes are snapshotted onto the previous change. Later commits on that line can automatically rewrite its descendants.",
+    jjSwitchConfirm: "Switch",
+    jjResumeTitle: "Saved work on {{branchName}}",
+    jjResumeMessage:
+      "This bookmark's line has saved work. Resume it (edit the same change ID; later edits can automatically rewrite descendants, including published or shared commits) or start a new change on the bookmark's captured revision?",
+    jjResumeConfirm: "Resume saved work",
+    jjResumeNewChange: "New change",
+    jjSwitchedResume: "Switched to {{branchName}} — resumed saved work",
+    jjSwitchedNewOn: "Switched to {{branchName}} — new change",
   },
   agentAutocomplete: {
     searchingWorkspace: "Searching workspace...",

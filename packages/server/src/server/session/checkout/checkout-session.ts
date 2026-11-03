@@ -1,3 +1,9 @@
+import type { CheckoutPrIdentity } from "@getpaseo/protocol/messages";
+import { ForgeRepositoryContextError } from "../../../services/forge-service.js";
+import {
+  jjCreatePullRequest,
+  JjIntegrationApprovalRequiredError,
+} from "../../../utils/checkout-jj.js";
 import type pino from "pino";
 import type { SessionDelivery } from "../owned-subscriptions/index.js";
 import { isAbsolute } from "node:path";
@@ -30,30 +36,40 @@ import {
 import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitService,
-  WorkspaceGitSnapshotOptions,
 } from "../../workspace-git-service.js";
 import { assertSafeGitRef } from "../../worktree-session.js";
 import type { GitMutationService } from "../git-mutation/git-mutation-service.js";
 import type {
   ForgeAuthState,
   ForgeService,
+  ForgeRepositoryContext,
   PullRequestTimelineItem,
   SearchResult,
 } from "../../../services/forge-service.js";
 import {
-  commitChanges,
   createPullRequest,
-  discardChanges,
   forgeAuthStateFromError,
   isForgeAuthError,
-  mergeFromBase,
-  mergeToBase,
-  pullCurrentBranch,
-  pushCurrentBranch,
-  listCheckoutCommits,
-  getCommitFileDiff,
 } from "../../../utils/checkout-git.js";
-import { runGitCommand } from "../../../utils/run-git-command.js";
+import {
+  dispatchCommitChanges,
+  dispatchFinishDescription,
+  dispatchDescribeChange,
+  dispatchFetchAndRebase,
+  dispatchIntegrateIntoBase,
+  dispatchEditChange,
+  dispatchGetCommitFileDiff,
+  dispatchDiscardChanges,
+  dispatchMergeFromBase,
+  dispatchMergeToBase,
+  dispatchListCheckoutCommits,
+  dispatchNewChange,
+  dispatchPullCurrentBranch,
+  dispatchPushCurrentBranch,
+  dispatchStashPop,
+  dispatchStashSave,
+  resolveEffectiveBackend,
+} from "../../../utils/checkout-dispatch.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
 
@@ -75,12 +91,6 @@ export interface CheckoutSessionHost {
     branch: string,
   ): Promise<{ previousBranch: string | null; currentBranch: string | null }>;
 }
-
-type CurrentWorkspacePullRequest = NonNullable<
-  WorkspaceGitRuntimeSnapshot["forge"]["pullRequest"]
-> & {
-  number: number;
-};
 
 class NoResolvedForgeServiceError extends Error {
   readonly authState = "no_remote" satisfies ForgeAuthState;
@@ -172,17 +182,21 @@ export class CheckoutSession {
 
   private async resolveForgeService(
     cwd: string,
-  ): Promise<{ forge: string; service: ForgeService } | null> {
+  ): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext } | null> {
     const resolution = await this.workspaceGitService.resolveForge(cwd);
     if (!resolution) {
       return null;
     }
-    return { forge: resolution.forge, service: resolution.service };
+    return {
+      forge: resolution.forge,
+      service: resolution.service,
+      repository: resolution.repository,
+    };
   }
 
   private async requireForgeService(
     cwd: string,
-  ): Promise<{ forge: string; service: ForgeService }> {
+  ): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext }> {
     const resolution = await this.resolveForgeService(cwd);
     if (!resolution) {
       throw new NoResolvedForgeServiceError(cwd);
@@ -223,7 +237,7 @@ export class CheckoutSession {
       return { forge: await this.resolveForgeIdForError(cwd), authState: error.authState };
     }
     try {
-      const resolution = await this.workspaceGitService.resolveForge(cwd);
+      const resolution = await this.resolveForgeService(cwd);
       return {
         forge: resolution?.forge ?? "github",
         authState: resolution ? "error" : "no_remote",
@@ -274,9 +288,9 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      const { baseRef, commits } = await listCheckoutCommits({
-        cwd: expandTilde(cwd),
-        context: { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      const { baseRef, commits } = await dispatchListCheckoutCommits(expandTilde(cwd), {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
       });
       this.host.emit({
         type: "checkout.commits.list.response",
@@ -301,7 +315,7 @@ export class CheckoutSession {
       if (path.length === 0 || isAbsolute(path) || path.split(/[\\/]/).includes("..")) {
         throw new Error(`Invalid path: ${path}`);
       }
-      const file = await getCommitFileDiff({ cwd: expandTilde(cwd), sha, path, signal });
+      const file = await dispatchGetCommitFileDiff(expandTilde(cwd), sha, path, signal);
       this.host.emit({
         type: "checkout.commits.file_diff.response",
         payload: { cwd, sha, path, file, error: null, requestId },
@@ -487,7 +501,9 @@ export class CheckoutSession {
     const resolvedCwd = expandTilde(cwd);
 
     try {
-      (await this.resolveForgeService(resolvedCwd))?.service.invalidate({ cwd: resolvedCwd });
+      if ((await resolveEffectiveBackend(resolvedCwd)) !== "jj") {
+        (await this.resolveForgeService(resolvedCwd))?.service.invalidate({ cwd: resolvedCwd });
+      }
       await this.workspaceGitService.getSnapshot(resolvedCwd, {
         force: true,
         includeForge: true,
@@ -561,7 +577,20 @@ export class CheckoutSession {
     const { cwd, branch, requestId } = msg;
 
     try {
-      const checkoutResult = await this.gitMutation.checkoutExistingBranch(cwd, branch);
+      // jj intent fields are captured when the switcher opens (exact target
+      // revision, saved-WIP change ID, working-copy CAS) and verified again
+      // at execution; git ignores them entirely.
+      const checkoutResult = await this.gitMutation.checkoutExistingBranch(cwd, branch, {
+        intent: {
+          mode: msg.mode,
+          wipChangeId: msg.wipChangeId,
+          targetCommitId: msg.targetCommitId,
+          message: msg.message,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        context: { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      });
       this.scheduleDiffRefresh(cwd);
 
       // Push a workspace_update immediately so the sidebar/header reflect
@@ -575,6 +604,9 @@ export class CheckoutSession {
           success: true,
           branch,
           source: checkoutResult.source,
+          mode: checkoutResult.mode,
+          changeId: checkoutResult.changeId,
+          commitId: checkoutResult.commitId,
           error: null,
           requestId,
         },
@@ -654,7 +686,11 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, paths, requestId } = msg;
     try {
-      await discardChanges(cwd, paths);
+      await dispatchDiscardChanges(cwd, paths, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+        logger: this.logger,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "discard-changes");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -678,10 +714,7 @@ export class CheckoutSession {
       const message = branchLabel
         ? `${CheckoutSession.PASEO_STASH_PREFIX} ${branchLabel}`
         : `${CheckoutSession.PASEO_STASH_PREFIX} unnamed`;
-      await runGitCommand(["stash", "push", "--include-untracked", "-m", message], {
-        cwd,
-        timeout: 120_000,
-      });
+      await dispatchStashSave(cwd, message);
       await this.gitMutation.notifyGitMutation(cwd, "stash-push");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -701,10 +734,7 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, stashIndex, requestId } = msg;
     try {
-      await runGitCommand(["stash", "pop", `stash@{${stashIndex}}`], {
-        cwd,
-        timeout: 120_000,
-      });
+      await dispatchStashPop(cwd, stashIndex);
       await this.gitMutation.notifyGitMutation(cwd, "stash-pop");
       this.scheduleDiffRefresh(cwd);
       this.host.emit({
@@ -745,18 +775,25 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      let message = msg.message?.trim() ?? "";
-      if (!message) {
-        message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
-      }
+      let message = await dispatchFinishDescription(cwd, msg.message, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
+      if (!message) message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
       if (!message) {
         throw new Error("Commit message is required");
       }
 
-      await commitChanges(cwd, {
-        message,
-        addAll: msg.addAll ?? true,
-      });
+      await dispatchCommitChanges(
+        cwd,
+        {
+          message,
+          addAll: msg.addAll ?? true,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
       await this.gitMutation.notifyGitMutation(cwd, "commit-changes");
       this.scheduleDiffRefresh(cwd);
 
@@ -775,6 +812,210 @@ export class CheckoutSession {
         payload: {
           cwd,
           success: false,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutNewChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.new_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchNewChange(
+        cwd,
+        {
+          message: msg.message,
+          targetCommitId: msg.targetCommitId,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "new-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.new_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutDescribeChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.describe_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const message = msg.message?.trim() ?? "";
+      if (!message) {
+        throw new Error("Description is required");
+      }
+      const result = await dispatchDescribeChange(
+        cwd,
+        {
+          message,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "describe-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.describe_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutIntegrateBaseRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.jj.integrate_base.request" }>,
+  ): Promise<void> {
+    const {
+      cwd,
+      requestId,
+      baseRef,
+      expectedChangeId,
+      expectedCommitId,
+      expectedBaseCommitId,
+      acknowledgeRewrites,
+    } = msg;
+    try {
+      const result = await dispatchIntegrateIntoBase(
+        cwd,
+        { baseRef, expectedChangeId, expectedCommitId, expectedBaseCommitId, acknowledgeRewrites },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "merge-to-base", { invalidateForge: true });
+      this.scheduleDiffRefresh(cwd);
+      const conflict = result.outcome === "conflicts";
+      this.host.emit({
+        type: "checkout.jj.integrate_base.response",
+        payload: {
+          cwd,
+          requestId,
+          ...result,
+          success: !conflict,
+          error: conflict
+            ? {
+                code: "MERGE_CONFLICT",
+                message: `Integration has conflicts in retained commit ${result.integrationCommitId}. Resolve that change on the host, then reopen integration. The base was not advanced.`,
+              }
+            : null,
+        },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.jj.integrate_base.response",
+        payload: {
+          cwd,
+          requestId,
+          success: false,
+          changeId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.source.changeId : null,
+          commitId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.source.commitId : null,
+          baseCommitId:
+            error instanceof JjIntegrationApprovalRequiredError ? error.base.commitId : null,
+          bookmark: null,
+          error: toCheckoutError(error),
+        },
+      });
+    }
+  }
+
+  async handleCheckoutFetchRebaseRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.jj.fetch_rebase.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchFetchAndRebase(
+        cwd,
+        {
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "pull", { invalidateForge: true });
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.jj.fetch_rebase.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.jj.fetch_rebase.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutEditChangeRequest(
+    msg: Extract<SessionInboundMessage, { type: "checkout.edit_change.request" }>,
+  ): Promise<void> {
+    const { cwd, requestId } = msg;
+    try {
+      const result = await dispatchEditChange(
+        cwd,
+        {
+          changeId: msg.changeId,
+          expectedChangeId: msg.expectedChangeId,
+          acknowledgeRewrites: msg.acknowledgeRewrites,
+        },
+        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
+      );
+      await this.gitMutation.notifyGitMutation(cwd, "new-change");
+      this.scheduleDiffRefresh(cwd);
+      this.host.emit({
+        type: "checkout.edit_change.response",
+        payload: { cwd, success: true, ...result, error: null, requestId },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.edit_change.response",
+        payload: {
+          cwd,
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
           error: toCheckoutError(error),
           requestId,
         },
@@ -807,7 +1048,7 @@ export class CheckoutSession {
         baseRef = baseRef.slice("origin/".length);
       }
 
-      const mutatedCwd = await mergeToBase(
+      const mutatedCwd = await dispatchMergeToBase(
         cwd,
         {
           baseRef,
@@ -856,7 +1097,7 @@ export class CheckoutSession {
         }
       }
 
-      await mergeFromBase(
+      await dispatchMergeFromBase(
         cwd,
         {
           baseRef: msg.baseRef,
@@ -895,7 +1136,10 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await pullCurrentBranch(cwd);
+      await dispatchPullCurrentBranch(cwd, undefined, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "pull", { invalidateForge: true });
       this.scheduleDiffRefresh(cwd);
 
@@ -927,7 +1171,10 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      await pushCurrentBranch(cwd);
+      await dispatchPushCurrentBranch(cwd, undefined, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      });
       await this.gitMutation.notifyGitMutation(cwd, "push", { invalidateForge: true });
       this.host.emit({
         type: "checkout_push_response",
@@ -957,6 +1204,7 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
+      const isJj = (await resolveEffectiveBackend(cwd)) === "jj";
       let title = msg.title?.trim() ?? "";
       let body = msg.body?.trim() ?? "";
 
@@ -966,17 +1214,21 @@ export class CheckoutSession {
         if (!body) body = generated.body;
       }
 
-      const { service } = await this.requireForgeService(cwd);
-      const result = await createPullRequest(
-        cwd,
-        {
-          title,
-          body,
-          base: msg.baseRef,
-        },
-        service,
-        { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot },
-      );
+      const { service, repository } = await this.requireForgeService(cwd);
+      const context = { paseoHome: this.paseoHome, worktreesRoot: this.worktreesRoot };
+      const options = { title, body, base: msg.baseRef };
+      if (isJj && !repository)
+        throw new ForgeRepositoryContextError(
+          "Explicit forge repository context is required for native PR creation.",
+        );
+      const result = isJj
+        ? await jjCreatePullRequest(
+            cwd,
+            { ...options, expectedChangeId: msg.expectedChangeId, repository },
+            service,
+            context,
+          )
+        : await createPullRequest(cwd, options, service, context);
       await this.gitMutation.notifyGitMutation(cwd, "create-pr", { invalidateForge: true });
 
       this.host.emit({
@@ -1009,16 +1261,16 @@ export class CheckoutSession {
     const { cwd, requestId } = msg;
 
     try {
-      const pullRequest = await this.resolveCurrentPullRequest(cwd, "merge", {
-        force: true,
-        includeForge: true,
-        reason: "merge-pr-validation",
-      });
-      const { service } = await this.requireForgeService(cwd);
+      const { pullRequest, service, repository } = await this.resolvePullRequestCommand(
+        cwd,
+        "merge",
+        msg.expectedPullRequest,
+      );
       await service.mergePullRequest({
         cwd,
         prNumber: pullRequest.number,
         mergeMethod: msg.mergeMethod,
+        ...(repository ? { repository } : {}),
         status: pullRequest,
       });
       await this.gitMutation.notifyGitMutation(cwd, "merge-pr", { invalidateForge: true });
@@ -1060,12 +1312,11 @@ export class CheckoutSession {
         : "checkout.github.set_auto_merge.response";
 
     try {
-      const pullRequest = await this.resolveCurrentPullRequest(cwd, "auto-merge", {
-        force: true,
-        includeForge: true,
-        reason: "auto-merge-validation",
-      });
-      const { service } = await this.requireForgeService(cwd);
+      const { pullRequest, service, repository } = await this.resolvePullRequestCommand(
+        cwd,
+        "auto-merge",
+        msg.type === "checkout.forge.set_auto_merge.request" ? msg.expectedPullRequest : undefined,
+      );
       if (msg.enabled) {
         const mergeMethod = msg.mergeMethod;
         if (!mergeMethod) {
@@ -1074,6 +1325,7 @@ export class CheckoutSession {
         await service.enablePullRequestAutoMerge({
           cwd,
           prNumber: pullRequest.number,
+          ...(repository ? { repository } : {}),
           mergeMethod,
           status: pullRequest,
         });
@@ -1084,6 +1336,7 @@ export class CheckoutSession {
         await service.disablePullRequestAutoMerge({
           cwd,
           prNumber: pullRequest.number,
+          ...(repository ? { repository } : {}),
           status: pullRequest,
         });
       }
@@ -1119,17 +1372,43 @@ export class CheckoutSession {
     }
   }
 
-  private async resolveCurrentPullRequest(
+  private async resolvePullRequestCommand(
     cwd: string,
     operation: "merge" | "auto-merge",
-    options?: WorkspaceGitSnapshotOptions,
-  ): Promise<CurrentWorkspacePullRequest> {
-    const snapshot = await this.workspaceGitService.getSnapshot(cwd, options);
+    expected?: CheckoutPrIdentity,
+  ) {
+    const native = (await resolveEffectiveBackend(cwd)) === "jj";
+    const snapshot = await this.workspaceGitService.getSnapshot(cwd, {
+      force: true,
+      includeForge: true,
+      reason: operation === "merge" ? "merge-pr-validation" : "auto-merge-validation",
+    });
+    if (native && snapshot.forge.error) throw new Error(snapshot.forge.error.message);
     const pullRequest = snapshot.forge.pullRequest;
-    if (!pullRequest || typeof pullRequest.number !== "number") {
+    if (!pullRequest || typeof pullRequest.number !== "number")
       throw new Error(`Unable to determine current change request number for ${operation}`);
+    const { service, repository } = await this.requireForgeService(cwd);
+    if (native) {
+      if (!expected || !repository || !snapshot.forge.repository)
+        throw new ForgeRepositoryContextError(
+          "Reopen this action from refreshed PR status so its exact repository and number are captured.",
+        );
+      const sameTarget = (target: Pick<ForgeRepositoryContext, "host" | "targetRepository">) =>
+        target.host === expected.host && target.targetRepository === expected.targetRepository;
+      if (
+        pullRequest.number !== expected.number ||
+        !sameTarget(snapshot.forge.repository) ||
+        !sameTarget(repository)
+      )
+        throw new ForgeRepositoryContextError(
+          "The selected pull request changed since this action opened. Dismiss it and refresh PR status before trying again.",
+        );
     }
-    return { ...pullRequest, number: pullRequest.number };
+    return {
+      pullRequest: { ...pullRequest, number: pullRequest.number },
+      service,
+      repository: native ? repository : undefined,
+    };
   }
 
   async handleCheckoutPrStatusRequest(
@@ -1188,62 +1467,63 @@ export class CheckoutSession {
       return;
     }
 
-    const resolvedForge = await this.resolveForgeService(cwd);
-    if (!resolvedForge) {
-      this.host.emit({
-        type: "pull_request_timeline_response",
-        payload: {
-          cwd,
-          prNumber,
-          items: [],
-          truncated: false,
-          error: {
-            kind: "unknown",
-            message: "No supported forge remote is configured for this workspace",
-          },
-          requestId,
-          githubFeaturesEnabled: false,
-          authState: "no_remote",
-        },
-      });
-      return;
-    }
-    const { forge, service } = resolvedForge;
-
-    // A throwing auth probe (authProbeCanThrow) yields the precise kind; a
-    // false return can't distinguish cli_missing from unauthenticated, so
-    // authState is omitted rather than guessed.
-    let featuresEnabled: boolean;
-    let probeAuthState: ForgeAuthState | undefined;
     try {
-      featuresEnabled = await service.isAuthenticated({ cwd });
-    } catch (error) {
-      featuresEnabled = false;
-      probeAuthState = forgeAuthStateFromError(error);
-    }
-    if (!featuresEnabled) {
-      this.host.emit({
-        type: "pull_request_timeline_response",
-        payload: {
-          cwd,
-          prNumber,
-          items: [],
-          truncated: false,
-          error: {
-            kind: "unknown",
-            message: `${getForgeDefinitionOrNeutral(forge).displayName} CLI is unavailable or not authenticated`,
+      const resolvedForge = await this.resolveForgeService(cwd);
+      if (!resolvedForge) {
+        this.host.emit({
+          type: "pull_request_timeline_response",
+          payload: {
+            cwd,
+            prNumber,
+            items: [],
+            truncated: false,
+            error: {
+              kind: "unknown",
+              message: "No supported forge remote is configured for this workspace",
+            },
+            requestId,
+            githubFeaturesEnabled: false,
+            authState: "no_remote",
           },
-          requestId,
-          githubFeaturesEnabled: false,
-          ...(probeAuthState ? { authState: probeAuthState } : {}),
-        },
-      });
-      return;
-    }
+        });
+        return;
+      }
+      const { forge, service, repository } = resolvedForge;
 
-    try {
+      // A throwing auth probe (authProbeCanThrow) yields the precise kind; a
+      // false return can't distinguish cli_missing from unauthenticated, so
+      // authState is omitted rather than guessed.
+      let featuresEnabled: boolean;
+      let probeAuthState: ForgeAuthState | undefined;
+      try {
+        featuresEnabled = await service.isAuthenticated({ cwd, repository });
+      } catch (error) {
+        featuresEnabled = false;
+        probeAuthState = forgeAuthStateFromError(error);
+      }
+      if (!featuresEnabled) {
+        this.host.emit({
+          type: "pull_request_timeline_response",
+          payload: {
+            cwd,
+            prNumber,
+            items: [],
+            truncated: false,
+            error: {
+              kind: "unknown",
+              message: `${getForgeDefinitionOrNeutral(forge).displayName} CLI is unavailable or not authenticated`,
+            },
+            requestId,
+            githubFeaturesEnabled: false,
+            ...(probeAuthState ? { authState: probeAuthState } : {}),
+          },
+        });
+        return;
+      }
+
       const timeline = await service.getPullRequestTimeline({
         cwd,
+        repository,
         prNumber,
         repoOwner,
         repoName,
@@ -1313,9 +1593,10 @@ export class CheckoutSession {
           "Check details request must address a check by checkRunId or workflowRunId",
         );
       }
-      const { service } = await this.requireForgeService(cwd);
+      const { service, repository } = await this.requireForgeService(cwd);
       const details = await service.getCheckDetails({
         cwd,
+        repository,
         repoOwner,
         repoName,
         checkRunId,
@@ -1356,13 +1637,15 @@ export class CheckoutSession {
 
     try {
       const resolvedCwd = expandTilde(cwd);
+
       // COMPAT(githubSearchRpc): the legacy github_search RPC is GitHub by
       // definition; forge.search.* shipped in v0.2.0-beta.1 and resolves the
       // cwd's forge. Remove after 2027-01-17 once the supported client floor
       // is >= v0.2.0.
       const resolvedForge =
-        msg.type === "github_search_request"
-          ? { forge: "github", service: this.github }
+        msg.type === "github_search_request" &&
+        (await resolveEffectiveBackend(resolvedCwd)) !== "jj"
+          ? { forge: "github", service: this.github, repository: undefined }
           : await this.resolveForgeService(resolvedCwd);
       if (!resolvedForge) {
         if (msg.type === "github_search_request") {
@@ -1393,6 +1676,7 @@ export class CheckoutSession {
       const { forge, service } = resolvedForge;
       const result = await service.searchIssuesAndPrs({
         cwd: resolvedCwd,
+        repository: resolvedForge.repository,
         query,
         limit,
         kinds,

@@ -5,6 +5,7 @@ import { GitBranch } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import type { Theme } from "@/styles/theme";
+import { Button } from "@/components/ui/button";
 import { Combobox, ComboboxItem, type ComboboxProps } from "@/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
@@ -18,6 +19,10 @@ interface BranchSwitcherProps {
   workspaceId: string;
   workspaceDirectory: string | null;
   isGitCheckout: boolean;
+  /** Backend of the checkout; stash affordances are skipped on jj. */
+  vcs?: "git" | "jj" | null;
+  /** jj: change ID of the current working-copy change (switch precondition, not a cross-process lock). */
+  currentChangeId?: string | null;
   testID?: string;
 }
 
@@ -32,6 +37,8 @@ export function BranchSwitcher({
   workspaceId,
   workspaceDirectory,
   isGitCheckout,
+  vcs = null,
+  currentChangeId,
   testID = "workspace-header-branch-switcher",
 }: BranchSwitcherProps) {
   const { t } = useTranslation();
@@ -41,13 +48,25 @@ export function BranchSwitcher({
   const toast = useToast();
   const queryClient = useQueryClient();
 
-  const { branchOptions, isOpen, setIsOpen, handleBranchSelect } = useBranchSwitcher({
+  const {
+    branchOptions,
+    branchLoadMessage,
+    resumeLookupError,
+    isRetryingResumeLookup,
+    retryResumeLookup,
+    isOpen,
+    isSwitching,
+    setIsOpen,
+    handleBranchSelect,
+  } = useBranchSwitcher({
     client,
     normalizedServerId: serverId,
     normalizedWorkspaceId: workspaceId,
     workspaceDirectory,
     currentBranchName,
     isGitCheckout,
+    vcs,
+    currentChangeId,
     isConnected,
     toast,
     queryClient,
@@ -73,7 +92,25 @@ export function BranchSwitcher({
     [branchLeadingSlot],
   );
 
-  if (!currentBranchName) {
+  const label = currentBranchName ?? t("branchSwitcher.title");
+  const resumeErrorFooter = useMemo(
+    () =>
+      resumeLookupError ? (
+        <View style={styles.resumeError} testID="jj-resume-lookup-error">
+          <Text style={styles.resumeErrorText}>{resumeLookupError}</Text>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isSwitching || isRetryingResumeLookup}
+            onPress={retryResumeLookup}
+          >
+            {t(isRetryingResumeLookup ? "common.loading" : "common.actions.retry")}
+          </Button>
+        </View>
+      ) : null,
+    [isRetryingResumeLookup, isSwitching, resumeLookupError, retryResumeLookup, t],
+  );
+  if (!currentBranchName && vcs !== "jj") {
     return null;
   }
 
@@ -83,12 +120,13 @@ export function BranchSwitcher({
         <TooltipTrigger asChild>
           <ToolbarLabelSelectTrigger
             testID={testID}
-            label={currentBranchName}
+            label={isSwitching ? t("workspace.git.actions.jj.saving") : label}
+            disabled={isSwitching}
             open={isOpen}
             onPress={handleOpen}
             accessibilityRole="button"
             accessibilityLabel={t("branchSwitcher.currentBranch", {
-              branchName: currentBranchName,
+              branchName: label,
             })}
           />
         </TooltipTrigger>
@@ -98,12 +136,12 @@ export function BranchSwitcher({
       </Tooltip>
       <Combobox
         options={branchOptions}
-        value={currentBranchName}
+        value={currentBranchName ?? ""}
         onSelect={handleBranchSelect}
         searchable
         placeholder={t("branchSwitcher.placeholder")}
         searchPlaceholder={t("branchSwitcher.searchPlaceholder")}
-        emptyText={t("branchSwitcher.empty")}
+        emptyText={branchLoadMessage ?? t("branchSwitcher.empty")}
         title={t("branchSwitcher.title")}
         open={isOpen}
         onOpenChange={setIsOpen}
@@ -112,6 +150,7 @@ export function BranchSwitcher({
         desktopPreventInitialFlash
         desktopMinWidth={280}
         renderOption={renderBranchOption}
+        footer={resumeErrorFooter}
       />
     </View>
   );
@@ -124,6 +163,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   tooltipText: {
     color: theme.colors.popoverForeground,
+    fontSize: theme.fontSize.sm,
+  },
+  resumeError: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border,
+    gap: 4,
+  },
+  resumeErrorText: {
+    color: theme.colors.destructive,
     fontSize: theme.fontSize.sm,
   },
 }));

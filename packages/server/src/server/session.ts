@@ -162,6 +162,7 @@ import {
 } from "./workspace-registry-model.js";
 import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 import {
+  clearWorkspaceRecoveryReference,
   resolveProjectDisplayName,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
@@ -211,7 +212,9 @@ import {
   archiveWorkspaceContents,
 } from "./workspace-archive-service.js";
 import type { ServiceProxySubsystem } from "./service-proxy.js";
-import { renameCurrentBranch as renameCurrentBranchDefault } from "../utils/checkout-git.js";
+import { dispatchRenameCurrentBranch } from "../utils/checkout-dispatch.js";
+
+const renameCurrentBranchDefault = dispatchRenameCurrentBranch;
 import {
   createGitMutationService,
   type GitMutationService,
@@ -229,7 +232,7 @@ import {
   matchesAgentUpdatesFilter,
   type AgentUpdatesService,
 } from "./session/agent-updates/agent-updates-service.js";
-import { expandTilde } from "../utils/path.js";
+import { expandTilde, createRealpathAwarePathMatcher } from "../utils/path.js";
 import {
   searchDirectoryEntries,
   WORKSPACE_SEARCH_HIDDEN_DIRECTORIES,
@@ -270,7 +273,11 @@ import {
   handleWorkspaceSetupStatusRequest as handleWorkspaceSetupStatusRequestMessage,
   handleWorkspaceSetupRunRequest as handleWorkspaceSetupRunRequestMessage,
 } from "./worktree-session.js";
-import { archiveByScope, type ActiveWorkspaceRef } from "./workspace-archive-service.js";
+import {
+  archiveByScope,
+  createWorkspaceArchiveAuthorityPorts,
+  type ActiveWorkspaceRef,
+} from "./workspace-archive-service.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { SessionAuthorization, type DaemonPermission } from "./authorization/index.js";
 
@@ -967,6 +974,8 @@ export class Session {
     });
     this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
+      paseoHome: this.paseoHome,
+      worktreesRoot: this.worktreesRoot,
       lifecycle: this.pluginRuntime,
       serverId,
       workspaceRegistry: this.workspaceRegistry,
@@ -984,6 +993,18 @@ export class Session {
       unarchiveWorkspace: async (workspace) => {
         await this.workspaceProvisioning.ensureWorkspaceRecordUnarchived(workspace);
       },
+      reportOrphan: (orphanPath) =>
+        this.sessionLogger.warn(
+          { orphanPath },
+          "Preserved surviving jj workspace directory during recovery",
+        ),
+      reportRetainedPin: (recoveryBookmark, error) =>
+        this.sessionLogger.warn(
+          { recoveryBookmark, err: error },
+          "Retained jj recovery reference after successful restore",
+        ),
+      clearRecoveryPin: (workspaceId, expectedPin, expected) =>
+        clearWorkspaceRecoveryReference(this.workspaceRegistry, workspaceId, expectedPin, expected),
     });
     this.checkoutSession = new CheckoutSession({
       host: {
@@ -991,7 +1012,11 @@ export class Session {
         emitWorkspaceUpdateForCwd: (cwd) => this.emitWorkspaceUpdateForCwd(cwd),
         handleWorkspaceGitBranchSnapshot: (cwd, branchName) =>
           this.workspaceGitObserver.handleBranchSnapshot(cwd, branchName),
-        renameCurrentBranch: (cwd, branch) => this.renameCurrentBranch(cwd, branch),
+        renameCurrentBranch: (cwd, branch) =>
+          this.renameCurrentBranch(cwd, branch, {
+            paseoHome: this.paseoHome,
+            worktreesRoot: this.worktreesRoot,
+          }),
       },
       gitMutation: this.gitMutation,
       workspaceGitService: this.workspaceGitService,
@@ -1199,6 +1224,7 @@ export class Session {
         this.createPaseoWorktreeWorkflow(input, workflowOptions),
       archiveAgentForClose: (agentId) => this.archiveAgentForClose(agentId),
       findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
+      ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
       listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
       archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
       emit: (message) => this.emit(message),
@@ -3120,6 +3146,16 @@ export class Session {
         return this.checkoutSession.handleCheckoutSwitchBranchRequest(msg);
       case "checkout.rename_branch.request":
         return this.checkoutSession.handleCheckoutRenameBranchRequest(msg);
+      case "checkout.new_change.request":
+        return this.checkoutSession.handleCheckoutNewChangeRequest(msg);
+      case "checkout.jj.integrate_base.request":
+        return this.checkoutSession.handleCheckoutIntegrateBaseRequest(msg);
+      case "checkout.jj.fetch_rebase.request":
+        return this.checkoutSession.handleCheckoutFetchRebaseRequest(msg);
+      case "checkout.edit_change.request":
+        return this.checkoutSession.handleCheckoutEditChangeRequest(msg);
+      case "checkout.describe_change.request":
+        return this.checkoutSession.handleCheckoutDescribeChangeRequest(msg);
       case "checkout_commit_request":
         return this.checkoutSession.handleCheckoutCommitRequest(msg);
       case "checkout_merge_request":
@@ -5413,8 +5449,11 @@ export class Session {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
+        ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
         listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
         archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
+        findWorkspaceIdsForBackingPath: (backingPath) =>
+          this.findWorkspaceIdsForBackingPath(backingPath),
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
           this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
@@ -5869,6 +5908,8 @@ export class Session {
       aheadBehind: snapshot.git.aheadBehind,
       aheadOfOrigin: snapshot.git.aheadOfOrigin,
       behindOfOrigin: snapshot.git.behindOfOrigin,
+      vcs: snapshot.git.vcs,
+      changeId: snapshot.git.changeId ?? null,
     };
   }
 
@@ -5990,6 +6031,21 @@ export class Session {
   private async findWorkspaceIdForCwd(cwd: string): Promise<string | null> {
     const workspaces = await this.workspaceRegistry.list();
     return resolveWorkspaceIdForPath(cwd, workspaces);
+  }
+
+  /**
+   * Every registry record (any archive state) whose BACKING CHECKOUT is the
+   * given worktree path — the jj archive flow persists recovery authority for
+   * each of them, so earlier-archived sibling records stay restorable.
+   */
+  private async findWorkspaceIdsForBackingPath(backingPath: string): Promise<string[]> {
+    const workspaces = await this.workspaceRegistry.list();
+    const matchesBacking = createRealpathAwarePathMatcher(backingPath);
+    return workspaces
+      .filter(
+        (record) => typeof record.worktreeRoot === "string" && matchesBacking(record.worktreeRoot),
+      )
+      .map((record) => record.workspaceId);
   }
 
   private matchesWorkspaceFilter(input: {
@@ -6159,6 +6215,7 @@ export class Session {
   ): Promise<CreatePaseoWorktreeResult> {
     const result = await createPaseoWorktree(input, {
       lifecycle: this.pluginRuntime,
+      logger: this.sessionLogger,
       github: this.github,
       ...(options?.resolveDefaultBranch
         ? { resolveDefaultBranch: options.resolveDefaultBranch }
@@ -6189,6 +6246,9 @@ export class Session {
         worktreeRoot: workspace.worktreeRoot,
         isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
         mainRepoRoot: workspace.mainRepoRoot,
+        jjWorkspaceManagement: workspace.jjWorkspaceManagement,
+        jjWorkspaceId: workspace.jjWorkspaceId,
+        recoveryBookmark: workspace.recoveryBookmark,
       }));
   }
 
@@ -7725,6 +7785,7 @@ export class Session {
           agentStorage: this.agentStorage,
           findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
           getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
+          ...createWorkspaceArchiveAuthorityPorts(this.workspaceRegistry),
           listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
           archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>

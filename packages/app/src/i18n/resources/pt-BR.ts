@@ -808,6 +808,28 @@ export const ptBR: TranslationResources = {
           pending: "Fazendo commit...",
           success: "Commit concluído",
         },
+        integrateBase: {
+          pending: "Integrando na base…",
+          approve: "Aprovar integração",
+          detail:
+            "Integre a alteração selecionada em {{base}}. A cópia de trabalho selecionada e as revisões dos outros espaços permanecem inalteradas.",
+          integrated: "A base agora contém o trabalho selecionado.",
+          noop: "A base já contém o trabalho selecionado.",
+        },
+        fetchRebase: {
+          label: "Buscar e rebasear",
+          pending: "Buscando e rebaseando…",
+          detail: "Buscar todos os remotos e rebasear todas as branches mutáveis sobre trunk.",
+          rebased:
+            "Todos os remotos foram buscados e os trabalhos mutáveis rebaseados sobre trunk.",
+          unchanged: "Todos os remotos foram buscados. Os trabalhos mutáveis já estão sobre trunk.",
+          conflicts: "Rebase com conflitos. Resolva os conflitos no host antes de continuar.",
+        },
+        fetch: {
+          label: "Buscar",
+          pending: "Buscando...",
+          success: "Buscado",
+        },
         pull: {
           label: "Pull",
           pending: "Fazendo pull...",
@@ -825,6 +847,12 @@ export const ptBR: TranslationResources = {
         },
         viewPr: "Ver PR",
         createPr: {
+          form: {
+            title: "Título",
+            body: "Descrição",
+            base: "Marcador base (opcional)",
+            automatic: "Gerar automaticamente",
+          },
           label: "Criar PR",
           pending: "Criando PR...",
           success: "PR criada",
@@ -847,6 +875,16 @@ export const ptBR: TranslationResources = {
           pending: "Arquivando...",
           success: "Arquivado",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "Nova mudança",
+          pending: "Iniciando nova mudança...",
+          success: "Nova mudança iniciada",
+        },
         mergePr: {
           squash: "Merge",
           merge: "Merge",
@@ -861,6 +899,7 @@ export const ptBR: TranslationResources = {
         },
         viewPr_mr: "Ver MR",
         autoMerge: {
+          disable: "Desativar mesclagem automática",
           enableSquash: "Merge automático",
           enableMerge: "Merge automático",
           enableRebase: "Merge automático",
@@ -927,6 +966,7 @@ export const ptBR: TranslationResources = {
         },
         toasts: {
           failedCommit: "Falha ao fazer commit",
+          failedNewChange: "Falha ao iniciar uma nova mudança",
           failedPull: "Falha ao fazer pull",
           failedPush: "Falha ao fazer push",
           failedPullAndPush: "Falha ao fazer pull e push",
@@ -1395,6 +1435,7 @@ export const ptBR: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Alteração atual",
       startingRef: "Ref inicial",
       intoBase: "em {{baseRef}}",
       searching: "Buscando...",
@@ -1642,6 +1683,15 @@ export const ptBR: TranslationResources = {
     restore: "Restaurar",
     later: "Depois",
     stashRestored: "Alterações em stash restauradas",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "Buscando workspace...",

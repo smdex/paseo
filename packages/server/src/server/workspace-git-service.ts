@@ -14,34 +14,51 @@ import {
   type CheckoutSnapshotFacts,
   type CheckoutDiffCompare,
   type CheckoutDiffResult,
-  getCheckoutDiff,
-  getCheckoutRefDerivedState,
-  getCheckoutSnapshotFacts,
-  getCheckoutShortstat,
-  getCheckoutStatus,
-  getCheckoutWorktreeState,
-  getPullRequestStatus,
   forgeAuthStateFromError,
   hasOriginRemote,
-  listBranchSuggestions,
-  resolveRepositoryDefaultBranch,
-  resolveBranchCheckout,
-  resolveAbsoluteGitDir,
 } from "../utils/checkout-git.js";
+import {
+  dispatchGetCheckoutDiff,
+  dispatchGetCheckoutRefDerivedState,
+  dispatchGetCheckoutSnapshotFacts,
+  dispatchGetCheckoutShortstat,
+  dispatchGetCheckoutStatus,
+  dispatchGetCheckoutWorktreeState,
+  dispatchGetPullRequestStatus,
+  dispatchHasLocalBranch,
+  dispatchListBranchSuggestions,
+  dispatchListPaseoWorktrees,
+  dispatchResolveAbsoluteGitDir,
+  dispatchResolveBranchCheckout,
+  dispatchResolveCheckoutWatchRoot,
+  dispatchResolveRepositoryDefaultBranch,
+  dispatchRunStashList,
+  resolveEffectiveBackend,
+} from "../utils/checkout-dispatch.js";
+import { jjPull, getJjForgeRepositoryContext } from "../utils/checkout-jj.js";
+import { runJjCommand, runWithJjCommandPriority } from "../utils/run-jj-command.js";
+import {
+  detectVcsBackend,
+  isJjDispatchEnabled,
+  isJjFeatureAvailable,
+  resolveJjRepoIdentity,
+  type JjRepoIdentity,
+} from "../utils/vcs-backend.js";
 import type {
   ForgeAuthState,
   ForgeService,
+  ForgeRepositoryContext,
   ForgeSpecificStatusFacts,
   PullRequestCheck,
   PullRequestMergeable,
 } from "../services/forge-service.js";
 import { createForgeService } from "../services/forge-registry.js";
+import { requireForgeRepositoryContext } from "../services/forge-cli-command.js";
 import {
   createForgeResolver,
   type ForgeResolution,
   type ForgeResolver,
 } from "../services/forge-resolver.js";
-import { parseGitRevParsePath } from "../utils/git-rev-parse-path.js";
 import { isPathInsideRoot, looksLikeDefiniteWindowsPath } from "../utils/path.js";
 import {
   createRunGitCommand,
@@ -50,7 +67,7 @@ import {
 } from "../utils/run-git-command.js";
 import { GitObservationPaths } from "./git-observation-paths.js";
 import { branchNameFromRef } from "../utils/worktree-metadata.js";
-import { listPaseoWorktrees, type PaseoWorktreeInfo } from "../utils/worktree.js";
+import { type PaseoWorktreeInfo } from "../utils/worktree.js";
 import { READ_ONLY_GIT_ENV } from "./checkout-git-utils.js";
 import { classifyGitMetadataPath, getPrunedGitMetadataPaths } from "./git-metadata-event-rules.js";
 import {
@@ -75,6 +92,7 @@ import { createWatcherLivenessCanary } from "./watcher-liveness-canary.js";
 
 const WORKSPACE_GIT_WATCH_DEBOUNCE_MS = 1_000;
 export const BACKGROUND_GIT_FETCH_INTERVAL_MS = 180_000;
+
 const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
@@ -166,8 +184,19 @@ export interface WorkspaceGitRuntimeSnapshot {
     behindOfOrigin: number | null;
     hasRemote: boolean;
     diffStat: { additions: number; deletions: number } | null;
+    /** Backend discriminator ("jj" only on jj repos; unset means git). */
+    vcs?: "git" | "jj";
+    /** jj change id of the working-copy commit (jj only). */
+    changeId?: string | null;
+    jjDescription?: string;
+    jjSnapshotRefusedPaths?: string[];
+    defaultWorkspaceBase?: Extract<
+      Awaited<ReturnType<typeof dispatchGetCheckoutStatus>>,
+      { isGit: true }
+    >["defaultWorkspaceBase"];
   };
   forge: {
+    repository?: Pick<ForgeRepositoryContext, "host" | "targetRepository">;
     featuresEnabled: boolean;
     authState: ForgeAuthState;
     /**
@@ -360,24 +389,24 @@ type WorkspaceGitRefreshState =
 
 interface WorkspaceGitServiceDependencies {
   subscribe: SubscribeToFileChanges;
-  getCheckoutSnapshotFacts: typeof getCheckoutSnapshotFacts;
-  getCheckoutRefDerivedState: typeof getCheckoutRefDerivedState;
-  getCheckoutStatus: typeof getCheckoutStatus;
-  getCheckoutShortstat: typeof getCheckoutShortstat;
-  getCheckoutWorktreeState: typeof getCheckoutWorktreeState;
-  getCheckoutDiff: typeof getCheckoutDiff;
-  getPullRequestStatus: typeof getPullRequestStatus;
-  resolveBranchCheckout: typeof resolveBranchCheckout;
-  resolveRepositoryDefaultBranch: typeof resolveRepositoryDefaultBranch;
-  listBranchSuggestions: typeof listBranchSuggestions;
-  listPaseoWorktrees: typeof listPaseoWorktrees;
+  getCheckoutSnapshotFacts: typeof dispatchGetCheckoutSnapshotFacts;
+  getCheckoutRefDerivedState: typeof dispatchGetCheckoutRefDerivedState;
+  getCheckoutStatus: typeof dispatchGetCheckoutStatus;
+  getCheckoutShortstat: typeof dispatchGetCheckoutShortstat;
+  getCheckoutWorktreeState: typeof dispatchGetCheckoutWorktreeState;
+  getCheckoutDiff: typeof dispatchGetCheckoutDiff;
+  getPullRequestStatus: typeof dispatchGetPullRequestStatus;
+  resolveBranchCheckout: typeof dispatchResolveBranchCheckout;
+  resolveRepositoryDefaultBranch: typeof dispatchResolveRepositoryDefaultBranch;
+  listBranchSuggestions: typeof dispatchListBranchSuggestions;
+  listPaseoWorktrees: typeof dispatchListPaseoWorktrees;
   /**
    * Adapter instances to bind by forge id instead of building from the registry
    * — the injection seam for the daemon's shared GitHub adapter and for test
    * fakes. Any forge not listed here is built (and cached once) by the registry.
    */
   forgeOverrides?: Record<string, ForgeService>;
-  resolveAbsoluteGitDir: (cwd: string) => Promise<string | null>;
+  resolveAbsoluteGitDir: typeof dispatchResolveAbsoluteGitDir;
   hasOriginRemote: (cwd: string) => Promise<boolean>;
   runGitFetch: (
     cwd: string,
@@ -385,6 +414,18 @@ interface WorkspaceGitServiceDependencies {
     runGitCommand: RunGitCommand,
   ) => Promise<WorkspaceGitFetchResult>;
   runGitCommand: typeof runGitCommand;
+  runJjFetch: typeof jjPull;
+  /**
+   * jj repo identity for observation routing, gated by the same dispatch
+   * enablement as the rest of the jj surface. Null for git checkouts and
+   * whenever jj dispatch is disabled.
+   */
+  resolveJjRepoIdentity: (cwd: string) => Promise<JjRepoIdentity | null>;
+  /**
+   * Best-effort head jj operation id for the publication fence. Null keeps
+   * the fence fail-open (refresh).
+   */
+  readJjHeadOpId: (cwd: string) => Promise<string | null>;
   getWorkspaceGitSelfHealPhaseMs: typeof getWorkspaceGitObservationReensurePhaseMs;
   createWatcherLivenessCanary: typeof createWatcherLivenessCanary;
   workspaceFolderExists: (cwd: string) => Promise<boolean>;
@@ -425,6 +466,7 @@ interface WorkspaceGitTarget {
   observationReensureTimer: NodeJS.Timeout | null;
   forgePrStatusPollSubscription: { unsubscribe: () => void } | null;
   forgePrStatusPollKey: string | null;
+  forgePrStatusPollGeneration: number;
   refreshState: WorkspaceGitRefreshState;
   latestGit: WorkspaceGitRuntimeSnapshot["git"] | null;
   latestGitLoadedAtMs: number | null;
@@ -433,10 +475,27 @@ interface WorkspaceGitTarget {
   latestSnapshot: WorkspaceGitRuntimeSnapshot | null;
   latestSnapshotLoadedAtMs: number | null;
   latestFacts: CheckoutSnapshotFacts | null;
+  jjForgeResolution?: ForgeResolution | null;
+  jjForgeError?: Error;
   factsPromise: Promise<CheckoutSnapshotFacts> | null;
   latestFingerprint: string | null;
   lastShellOutAtMs: number | null;
+  /**
+   * Repository metadata anchor: the git common dir for git checkouts, the jj
+   * shared store for jj checkouts (workspaces of one repo share it).
+   */
   repoGitRoot: string | null;
+  /** Effective backend this workspace is observed with. */
+  vcs: "git" | "jj";
+  /** Colocated jj only: the shared `.git` dir to watch beside the store. */
+  colocatedJjGitDir: string | null;
+  /**
+   * jj publication fence: head op id captured just before the last published
+   * git facts were read. A store event whose head op id equals this value was
+   * already published; anything else (external op, or an own op whose facts
+   * were not published) must refresh.
+   */
+  lastPublishedJjOpId: string | null;
   observationSetupPromise: Promise<void> | null;
   observationSetupComplete: boolean;
   folderMissing: boolean;
@@ -447,6 +506,14 @@ interface WorkspaceGitTarget {
 interface RepoGitTarget {
   paths: GitObservationPaths;
   repoGitRoot: string;
+  /** Effective backend whose metadata lives under repoGitRoot. */
+  vcs: "git" | "jj";
+  /**
+   * Colocated jj only: the shared `.git` dir watched in addition to the jj
+   * store, so external git commands in a colocated repo still refresh.
+   */
+  colocatedGitDir: string | null;
+  secondarySubscription: FileObserverSubscription | null;
   cwd: string;
   workspaceKeys: Set<string>;
   subscription: FileObserverSubscription | null;
@@ -456,6 +523,7 @@ interface RepoGitTarget {
   recovery: WatchRecoveryState;
   intervalId: NodeJS.Timeout | null;
   fetchInFlight: boolean;
+  jjFetchController: AbortController | null;
   bufferedFetchMetadataEvents: FileChange[];
   recentFetchRemoteRefChanges: Map<
     string,
@@ -550,6 +618,7 @@ interface WorkspaceGitAuxiliaryReadCacheEntry<T> {
 }
 
 interface WorkspaceForgePrStatusPollTarget {
+  repository?: ForgeRepositoryContext;
   headRef: string;
   headSha?: string;
   headRepositoryOwner?: string;
@@ -560,21 +629,24 @@ function buildDefaultWorkspaceGitServiceDeps(
 ): WorkspaceGitServiceDependencies {
   return {
     subscribe,
-    getCheckoutSnapshotFacts,
-    getCheckoutRefDerivedState,
-    getCheckoutStatus,
-    getCheckoutShortstat,
-    getCheckoutWorktreeState,
-    getCheckoutDiff,
-    getPullRequestStatus,
-    resolveBranchCheckout,
-    resolveRepositoryDefaultBranch,
-    listBranchSuggestions,
-    listPaseoWorktrees,
-    resolveAbsoluteGitDir,
+    getCheckoutSnapshotFacts: dispatchGetCheckoutSnapshotFacts,
+    getCheckoutRefDerivedState: dispatchGetCheckoutRefDerivedState,
+    getCheckoutStatus: dispatchGetCheckoutStatus,
+    getCheckoutShortstat: dispatchGetCheckoutShortstat,
+    getCheckoutWorktreeState: dispatchGetCheckoutWorktreeState,
+    getCheckoutDiff: dispatchGetCheckoutDiff,
+    getPullRequestStatus: dispatchGetPullRequestStatus,
+    resolveBranchCheckout: dispatchResolveBranchCheckout,
+    resolveRepositoryDefaultBranch: dispatchResolveRepositoryDefaultBranch,
+    listBranchSuggestions: dispatchListBranchSuggestions,
+    listPaseoWorktrees: dispatchListPaseoWorktrees,
+    resolveAbsoluteGitDir: dispatchResolveAbsoluteGitDir,
     hasOriginRemote,
     runGitFetch: fetchWorkspaceGitRemote,
     runGitCommand,
+    runJjFetch: jjPull,
+    resolveJjRepoIdentity: resolveDispatchedJjRepoIdentity,
+    readJjHeadOpId: readJjHeadOpIdViaCli,
     getWorkspaceGitSelfHealPhaseMs: getWorkspaceGitObservationReensurePhaseMs,
     createWatcherLivenessCanary,
     workspaceFolderExists,
@@ -599,6 +671,38 @@ function resolveWorkspaceGitServiceDeps(
   return { ...buildDefaultWorkspaceGitServiceDeps(subscribe), ...deps };
 }
 
+/** Dispatch+runtime-gated jj identity probe: null whenever the jj surface is off. */
+async function resolveDispatchedJjRepoIdentity(cwd: string): Promise<JjRepoIdentity | null> {
+  // The warmed feature gate tracks the runtime probe, so observation never
+  // binds a target to the jj store while dispatch would refuse the runtime.
+  return isJjDispatchEnabled() && isJjFeatureAvailable() ? resolveJjRepoIdentity(cwd) : null;
+}
+
+/** Flat head-operation probe for the jj publication fence; null = unknown. */
+async function readJjHeadOpIdViaCli(cwd: string): Promise<string | null> {
+  try {
+    const result = await runJjCommand(
+      ["op", "log", "-n", "1", "--no-graph", "--ignore-working-copy", "-T", 'id ++ "\\n"'],
+      { cwd },
+    );
+    const id = result.stdout.trim();
+    return id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+interface JjHeadOpProbe {
+  result: string | null;
+  /** True when an event arrived after the probe started; its result cannot prove the head. */
+  superseded: boolean;
+}
+
+interface JjHeadOpProbeEntry {
+  promise: Promise<JjHeadOpProbe>;
+  superseded: boolean;
+}
+
 export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly logger: pino.Logger;
   private readonly paseoHome: string;
@@ -621,6 +725,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly snapshotUpdatedListeners = new Set<WorkspaceGitSnapshotUpdatedListener>();
   private readonly workspaceTargets = new Map<string, WorkspaceGitTarget>();
   private readonly repoTargets = new Map<string, RepoGitTarget>();
+  private readonly pendingJjFetches = new Set<Promise<void>>();
+  /** In-flight jj head-op probes keyed by shared store path (fence coalescing). */
+  private readonly jjHeadOpIdProbes = new Map<string, JjHeadOpProbeEntry>();
   private readonly workingTreeWatchTargets = new Map<string, WorkingTreeWatchTarget>();
   private readonly workingTreeWatchSetups = new Map<string, Promise<WorkingTreeWatchTarget>>();
   private readonly workingTreeWatchResolutions = new Map<string, Promise<WorkingTreeWatchTarget>>();
@@ -661,11 +768,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       options.deps,
     );
     this.forgeResolver = createForgeResolver({
+      paseoHome: this.paseoHome,
       createService: (forge) => this.deps.forgeOverrides?.[forge] ?? createForgeService(forge),
     });
   }
 
-  resolveForge(cwd: string): Promise<ForgeResolution | null> {
+  async resolveForge(cwd: string): Promise<ForgeResolution | null> {
     this.assertNotDisposed();
     return this.forgeResolver.resolve(resolve(cwd));
   }
@@ -884,30 +992,31 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.assertNotDisposed();
     const normalizedCwd = resolve(cwd);
     const normalizedBranch = branch.trim();
-    const ref = `refs/heads/${normalizedBranch}`;
-    const key = JSON.stringify(["local-branch", normalizedCwd, ref]);
-    return this.readAuxiliaryCache(this.localBranchCache, key, options, async () => {
-      const result = await this.deps.runGitCommand(["rev-parse", "--verify", "--quiet", ref], {
-        cwd: normalizedCwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-        acceptExitCodes: [0, 1],
-      });
-      return result.exitCode === 0;
-    });
+    const key = JSON.stringify(["local-branch", normalizedCwd, normalizedBranch]);
+    return this.readAuxiliaryCache(this.localBranchCache, key, options, () =>
+      dispatchHasLocalBranch(normalizedCwd, normalizedBranch, this.deps.runGitCommand),
+    );
   }
 
-  suggestBranchesForCwd(
+  async suggestBranchesForCwd(
     cwd: string,
     options?: WorkspaceGitBranchSuggestionsOptions,
     readOptions?: WorkspaceGitReadOptions,
   ): Promise<WorkspaceGitBranchSuggestion[]> {
     this.assertNotDisposed();
     const normalizedCwd = resolve(cwd);
+    // Captured jj targets and saved-WIP offers must follow the latest selection.
+    if ((await resolveEffectiveBackend(normalizedCwd)) === "jj") {
+      readOptions = { force: true, reason: "jj-branch-selection" };
+    }
     const query = options?.query ?? "";
     const limit = options?.limit;
     const key = JSON.stringify(["branch-suggestions", normalizedCwd, query, limit ?? null]);
     return this.readAuxiliaryCache(this.branchSuggestionsCache, key, readOptions, () =>
-      this.deps.listBranchSuggestions(normalizedCwd, options),
+      this.deps.listBranchSuggestions(normalizedCwd, options, {
+        paseoHome: this.paseoHome,
+        worktreesRoot: this.worktreesRoot,
+      }),
     );
   }
 
@@ -921,10 +1030,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const paseoOnly = options?.paseoOnly !== false;
     const key = JSON.stringify(["stashes", normalizedCwd, paseoOnly]);
     return this.readAuxiliaryCache(this.stashListCache, key, readOptions, async () => {
-      const { stdout } = await this.deps.runGitCommand(["stash", "list", "--format=%gd%x00%s"], {
-        cwd: normalizedCwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-      });
+      const stdout = await dispatchRunStashList(normalizedCwd, this.deps.runGitCommand);
       return parseWorkspaceGitStashList(stdout, { paseoOnly });
     });
   }
@@ -1083,10 +1189,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
     this.workspaceTargets.clear();
 
+    const fetches = Array.from(this.pendingJjFetches);
     for (const target of this.repoTargets.values()) {
       this.closeRepoTarget(target);
     }
     this.repoTargets.clear();
+    this.jjHeadOpIdProbes.clear();
 
     for (const target of this.workingTreeWatchTargets.values()) {
       this.closeWorkingTreeWatchTarget(target);
@@ -1101,6 +1209,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.disposePromise = Promise.all([
       this.fileObserver.close(),
       Promise.allSettled(this.pendingRefreshes),
+      ...fetches,
     ]).then(() => undefined);
     return this.disposePromise;
   }
@@ -1254,6 +1363,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       observationReensureTimer: null,
       forgePrStatusPollSubscription: null,
       forgePrStatusPollKey: null,
+      forgePrStatusPollGeneration: 0,
       refreshState: { status: "idle" },
       latestGit: null,
       latestGitLoadedAtMs: null,
@@ -1266,6 +1376,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       latestFingerprint: null,
       lastShellOutAtMs: null,
       repoGitRoot: null,
+      vcs: "git",
+      colocatedJjGitDir: null,
+      lastPublishedJjOpId: null,
       observationSetupPromise: null,
       observationSetupComplete: false,
       folderMissing: false,
@@ -1324,6 +1437,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async setupWorkspaceObservation(target: WorkspaceGitTarget): Promise<void> {
+    await resolveEffectiveBackend(target.cwd);
     const facts = await this.getFactsForObservation(target);
     if (!this.isActiveObservedWorkspaceTarget(target)) {
       return;
@@ -1348,20 +1462,69 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
     await this.promoteWorkingTreeWatchTarget(workingTreeTarget, facts.worktreeRoot);
+    await this.bindWorkspaceRepoTarget(target, facts);
+    if (this.isActiveObservedWorkspaceTarget(target)) {
+      target.observationSetupComplete = true;
+    }
+  }
+
+  private async bindWorkspaceRepoTarget(
+    target: WorkspaceGitTarget,
+    facts: CheckoutSnapshotFacts,
+  ): Promise<void> {
+    if (!this.isActiveObservedWorkspaceTarget(target)) return;
+    const backend = await resolveEffectiveBackend(target.cwd);
+    if (!facts.isGit || !facts.absoluteGitDir) {
+      this.removeWorkspaceRepoLink(target);
+      return;
+    }
+    const jjIdentity = await this.deps.resolveJjRepoIdentity(target.cwd);
+    if ((backend === "jj") !== (jjIdentity !== null)) {
+      throw new Error("Repository backend changed while binding observation");
+    }
     const gitDir = facts.absoluteGitDir;
     const gitDirPaths = target.gitDirPaths?.matches(gitDir)
       ? target.gitDirPaths
       : await GitObservationPaths.create(gitDir);
     if (!this.isActiveObservedWorkspaceTarget(target)) return;
     target.gitDirPaths = gitDirPaths;
-    const repoGitRoot = facts.gitCommonDir ?? (await this.resolveWorkspaceGitRefsRoot(gitDir));
+    let repoGitRoot = facts.gitCommonDir ?? (await this.resolveWorkspaceGitRefsRoot(gitDir));
+    let colocatedGitDir: string | null = null;
+    // jj checkouts anchor repository observation on the shared store: op-log,
+    // bookmark, and commit writes land there for every workspace of the repo,
+    // and it is the one identity secondary workspaces share. Colocated repos
+    // additionally keep the `.git` dir under observation (see
+    // startColocatedGitMetadataObservation).
+    const vcs = jjIdentity ? "jj" : "git";
+    if (jjIdentity) {
+      repoGitRoot = jjIdentity.sharedStorePath;
+      colocatedGitDir = jjIdentity.colocated ? (facts.gitCommonDir ?? null) : null;
+    }
     if (!this.isActiveObservedWorkspaceTarget(target)) {
       return;
     }
+    const oldRepoTarget = target.repoGitRoot ? this.repoTargets.get(target.repoGitRoot) : undefined;
+    if (target.repoGitRoot !== repoGitRoot || oldRepoTarget?.vcs !== vcs) {
+      this.removeWorkspaceRepoLink(target);
+      this.refreshRepoSiblings(target, oldRepoTarget);
+    }
+    target.vcs = vcs;
     target.repoGitRoot = repoGitRoot;
+    target.colocatedJjGitDir = colocatedGitDir;
     await this.ensureRepoTarget(target);
-    if (this.isActiveObservedWorkspaceTarget(target)) {
-      target.observationSetupComplete = true;
+  }
+
+  private refreshRepoSiblings(
+    target: WorkspaceGitTarget,
+    previous: RepoGitTarget | undefined,
+  ): void {
+    for (const cwd of previous?.workspaceKeys ?? []) {
+      if (cwd === target.cwd) continue;
+      this.scheduleWorkspaceRefresh(cwd, {
+        force: true,
+        scope: "structure",
+        reason: "repo-binding-change",
+      });
     }
   }
 
@@ -1419,7 +1582,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.assertNotDisposed();
     const target: WorkingTreeWatchTarget = {
       paths,
-      acceptsEvent: paths.createEventFilter([join(watchPath, ".git"), ...ignoredDirectories]),
+      acceptsEvent: paths.createEventFilter([
+        join(watchPath, ".git"),
+        join(watchPath, ".jj"),
+        ...ignoredDirectories,
+      ]),
       cwd,
       watchPath,
       repoRoot,
@@ -1542,9 +1709,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   // Shared by startWorkingTreeSubscription and
   // replaceWorkingTreeIgnoredDirectories's applied-vs-desired gate so both
-  // compute the same resolved ignore list.
+  // compute the same resolved ignore list. `.jj` rides alongside `.git`:
+  // for git checkouts the entry simply never matches, while jj checkouts get
+  // their working-copy churn (working_copy.lock, tree_state, snapshots) kept
+  // out of the working-tree watch — jj state flows through the store watch.
   private workingTreeIgnoreList(target: WorkingTreeWatchTarget): string[] {
-    return [join(target.watchPath, ".git"), ...target.ignoredDirectories];
+    return [
+      join(target.watchPath, ".git"),
+      join(target.watchPath, ".jj"),
+      ...target.ignoredDirectories,
+    ];
   }
 
   private async startWorkingTreeSubscription(
@@ -1926,8 +2100,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return false;
     }
     this.removeDeletedKnownDirectories(target, events);
-    const gitDir = join(target.watchPath, ".git");
-    // Event paths have already been mapped into this subscription's established namespace.
+    const metadataDirs = [join(target.watchPath, ".git"), join(target.watchPath, ".jj")];
     const matchesWatchPath = target.paths.matches;
     // One new directory is enough: the scheduled Git query inventories every
     // ignored directory that exists by then. Stop before a large event batch
@@ -1947,7 +2120,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       if (!isPathInsideRoot(target.watchPath, directory)) {
         continue;
       }
-      if (isPathInsideRoot(gitDir, directory)) {
+      if (metadataDirs.some((metadataDir) => isPathInsideRoot(metadataDir, directory))) {
         continue;
       }
       let ignored = false;
@@ -2271,11 +2444,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private async resolveCheckoutWatchRoot(cwd: string): Promise<string | null> {
     try {
-      const { stdout } = await this.deps.runGitCommand(["rev-parse", "--show-toplevel"], {
-        cwd,
-        envOverlay: READ_ONLY_GIT_ENV,
-      });
-      return parseGitRevParsePath(stdout);
+      return await dispatchResolveCheckoutWatchRoot(cwd, this.deps.runGitCommand);
     } catch {
       return null;
     }
@@ -2316,6 +2485,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const repoTarget: RepoGitTarget = {
       paths,
       repoGitRoot,
+      vcs: workspaceTarget.vcs,
+      colocatedGitDir: workspaceTarget.colocatedJjGitDir,
+      secondarySubscription: null,
       cwd: workspaceTarget.cwd,
       workspaceKeys: new Set([workspaceTarget.cwd]),
       subscription: null,
@@ -2325,6 +2497,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       recovery: { attemptCount: 0, timer: null, establishedAt: null },
       intervalId: null,
       fetchInFlight: false,
+      jjFetchController: null,
       bufferedFetchMetadataEvents: [],
       recentFetchRemoteRefChanges: new Map(),
       knownRemoteRefs: null,
@@ -2335,7 +2508,20 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (repoTarget.closed || this.repoTargets.get(repoGitRoot) !== repoTarget) {
       return;
     }
+    // Colocated jj repos keep the `.git` dir under observation beside the
+    // store so external git commands (hybrid colocated workflows) still
+    // refresh. Best-effort: the store watch already covers every jj op.
+    if (repoTarget.vcs === "jj" && repoTarget.colocatedGitDir) {
+      void this.startColocatedGitMetadataObservation(repoTarget);
+    }
 
+    if (repoTarget.vcs === "jj") {
+      repoTarget.intervalId = setInterval(() => {
+        void this.runRepoFetch(repoTarget);
+      }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
+      void this.runRepoFetch(repoTarget);
+      return;
+    }
     const fetchWorkspaceTarget = Array.from(repoTarget.workspaceKeys)
       .map((workspaceKey) => this.workspaceTargets.get(workspaceKey))
       .find(
@@ -2368,9 +2554,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options?: { replaceFallback?: boolean },
   ): Promise<boolean> {
     const paths = target.paths;
-    const ignore = getPrunedGitMetadataPaths("common").map((path) =>
-      join(target.repoGitRoot, path),
-    );
+    const ignore =
+      target.vcs === "jj"
+        ? []
+        : getPrunedGitMetadataPaths("common").map((path) => join(target.repoGitRoot, path));
     const matchesRepoGitRoot = paths.matches;
     const canary = this.deps.createWatcherLivenessCanary(target.repoGitRoot);
     let openedSubscription: FileObserverSubscription | null = null;
@@ -2417,6 +2604,17 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
               ignore.every((ignoredPath) => !isPathInsideRoot(ignoredPath, event.path)),
           );
           if (relevantEvents.length > 0) {
+            // jj store events: every op (snapshot, describe, bookmark move,
+            // ...) writes op-log/op-store files here. Route through the jj
+            // router + publication fence instead of git-relative metadata
+            // classification, which would ignore these paths.
+            if (target.vcs === "jj") {
+              const jjEvents = relevantEvents.filter((event) => !event.path.endsWith(".lock"));
+              if (jjEvents.length > 0) {
+                void this.scheduleJjStoreMetadataRefresh(target);
+              }
+              return;
+            }
             const immediateEvents = target.fetchInFlight
               ? relevantEvents.filter((event) => {
                   if (this.isFetchRemoteMetadataEvent(target, event)) {
@@ -2525,15 +2723,141 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private routeRepoMetadataEvents(
     target: RepoGitTarget,
     events: FileChange[],
+    paths: GitObservationPaths = target.paths,
   ): Map<string, RepoMetadataWorkspaceRefresh> | null {
     const refreshes = new Map<string, RepoMetadataWorkspaceRefresh>();
-    const matchesRepoGitRoot = target.paths.matches;
+    const matchesRepoGitRoot = paths.matches;
 
     for (const event of events) {
-      if (!this.routeRepoMetadataEvent(target, event, matchesRepoGitRoot, refreshes)) return null;
+      if (!this.routeRepoMetadataEvent(target, event, matchesRepoGitRoot, paths, refreshes))
+        return null;
     }
 
     return refreshes;
+  }
+
+  /**
+   * jj store watch events: any non-lock write under the shared store is an
+   * operation landing (snapshot, describe, bookmark move, workspace update).
+   * Unlike git metadata there is no per-path classification — refresh every
+   * linked workspace, gated by the publication fence below.
+   */
+  private async scheduleJjStoreMetadataRefresh(target: RepoGitTarget): Promise<void> {
+    if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
+      return;
+    }
+    const headProbe = await this.readRepoJjHeadOpId(target);
+    const headOpId = headProbe.superseded ? null : headProbe.result;
+    if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
+      return;
+    }
+    const refreshes = new Map<string, RepoMetadataWorkspaceRefresh>();
+    for (const workspaceKey of target.workspaceKeys) {
+      const workspaceTarget = this.workspaceTargets.get(workspaceKey);
+      // Publication fence: suppress only when the head operation is exactly
+      // the one the workspace's published snapshot was read at AND no event
+      // arrived after this probe started (a superseded probe cannot prove the
+      // head is still its result). Any external operation, or an own
+      // operation whose facts were never published, keeps this workspace
+      // refreshing — the miss direction is one extra refresh, never a lost
+      // one.
+      if (headOpId !== null && workspaceTarget?.lastPublishedJjOpId === headOpId) {
+        continue;
+      }
+      refreshes.set(workspaceKey, {
+        refreshBase: true,
+        // Any operation can rewrite the change graph (describe, rebase,
+        // bookmark move), so store ops always warrant a structural refresh —
+        // a "refs"-only scope would skip the facts read entirely.
+        structural: true,
+        movedRemoteRefs: new Set<string>(),
+        queueIfBusy: true,
+      });
+    }
+    if (refreshes.size > 0) {
+      this.scheduleRepoMetadataRefresh(target, "jj-store-metadata-watch", true, refreshes);
+    }
+  }
+
+  /** Head-op probe coalesced per shared store so event bursts share one run. */
+  private readRepoJjHeadOpId(target: RepoGitTarget): Promise<JjHeadOpProbe> {
+    const existing = this.jjHeadOpIdProbes.get(target.repoGitRoot);
+    if (existing) {
+      // Publication-fence soundness (review fix 8): sharing an in-flight
+      // probe whose result predates THIS event could suppress a refresh for
+      // an external operation that landed after the probe started. Mark the
+      // shared probe superseded; consumers then skip suppression.
+      existing.superseded = true;
+      return existing.promise;
+    }
+    const entry: JjHeadOpProbeEntry = {
+      superseded: false,
+      promise: this.deps
+        .readJjHeadOpId(target.cwd)
+        .then((result): JjHeadOpProbe => ({ result, superseded: entry.superseded }))
+        .finally(() => {
+          if (this.jjHeadOpIdProbes.get(target.repoGitRoot)?.promise === entry.promise) {
+            this.jjHeadOpIdProbes.delete(target.repoGitRoot);
+          }
+        }),
+    };
+    this.jjHeadOpIdProbes.set(target.repoGitRoot, entry);
+    return entry.promise;
+  }
+
+  /**
+   * Colocated jj: watch the shared `.git` dir with the ordinary git metadata
+   * rules so external git commands in hybrid workflows still refresh. Events
+   * are classified relative to the `.git` dir, not the store. Best-effort:
+   * failures log and leave store-only coverage; no degraded polling, no
+   * canary — the primary store watch already covers every jj operation.
+   */
+  private async startColocatedGitMetadataObservation(target: RepoGitTarget): Promise<void> {
+    const gitDir = target.colocatedGitDir;
+    if (!gitDir || target.secondarySubscription || target.closed) {
+      return;
+    }
+    const ignore = getPrunedGitMetadataPaths("common").map((path) => join(gitDir, path));
+    const paths = await GitObservationPaths.create(gitDir);
+    if (target.closed || this.disposed || this.repoTargets.get(target.repoGitRoot) !== target)
+      return;
+    const matchesGitDir = paths.matches;
+    try {
+      const subscription = await this.subscribeWithDeadline(
+        gitDir,
+        (error, events) => {
+          if (error || target.closed || this.disposed) {
+            return;
+          }
+          const relevantEvents = events.filter((event) => !matchesGitDir(event.path));
+          if (relevantEvents.length === 0) {
+            return;
+          }
+          const routedRefreshes = this.routeRepoMetadataEvents(target, relevantEvents, paths);
+          if (routedRefreshes === null || routedRefreshes.size === 0) {
+            return;
+          }
+          this.scheduleRepoMetadataRefresh(
+            target,
+            "git-metadata-watch",
+            [...routedRefreshes.values()].some((refresh) => refresh.structural),
+            routedRefreshes,
+          );
+        },
+        { ignore },
+        () => {},
+      );
+      if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
+        await this.unsubscribeWatcherSubscription(subscription, gitDir);
+        return;
+      }
+      target.secondarySubscription = subscription;
+    } catch (error) {
+      this.logger.warn(
+        { err: error, gitDir, repoGitRoot: target.repoGitRoot },
+        "Colocated git metadata watcher unavailable; store watch only",
+      );
+    }
   }
 
   private refreshWorkingTreeIgnoresFromRepoMetadataEvents(
@@ -2584,11 +2908,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target: RepoGitTarget,
     event: FileChange,
     matchesRepoGitRoot: (candidate: string) => boolean,
+    paths: GitObservationPaths,
     refreshes: Map<string, RepoMetadataWorkspaceRefresh>,
   ): boolean {
     if (this.routePrivateGitDirEvent(target, event, matchesRepoGitRoot, refreshes)) return true;
 
-    const commonRelativePath = target.paths.relative(event.path);
+    const commonRelativePath = paths.relative(event.path);
     const effect = classifyGitMetadataPath("common", commonRelativePath ?? "");
     switch (effect.kind) {
       case "ignore":
@@ -2941,26 +3266,28 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     const git = target.latestGit;
-    if (!git?.remoteUrl) {
+    if (!git || (git.vcs !== "jj" && !git.remoteUrl)) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
 
-    const resolution = this.forgeResolver.resolveFromRemoteUrl(git.remoteUrl);
+    const resolution =
+      git.vcs === "jj"
+        ? target.jjForgeResolution
+        : this.forgeResolver.resolveFromRemoteUrl(git.remoteUrl);
     if (!resolution) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
 
     const pollTarget = this.resolveForgePrStatusPollTarget(target);
-    const remoteUrl = git.remoteUrl;
     if (!pollTarget) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
     const pollKey = buildWorkspaceForgePrStatusPollKey({
       forge: resolution.forge,
-      remoteUrl,
+      remoteUrl: git.vcs === "jj" ? null : git.remoteUrl,
       target: pollTarget,
     });
     const previousPollKey = target.forgePrStatusPollKey;
@@ -2971,16 +3298,23 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     this.stopForgePrStatusPollForTarget(target);
     target.forgePrStatusPollKey = pollKey;
+    const generation = target.forgePrStatusPollGeneration;
     if (resolution.service.retainCurrentPullRequestStatusPoll) {
       target.forgePrStatusPollSubscription = resolution.service.retainCurrentPullRequestStatusPoll({
         cwd: target.cwd,
+        repository: pollTarget.repository,
         headRef: pollTarget.headRef,
         ...(pollTarget.headSha ? { headSha: pollTarget.headSha } : {}),
         ...(pollTarget.headRepositoryOwner
           ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
           : {}),
         onStatus: (status) => {
-          if (!this.isActiveObservedWorkspaceTarget(target)) {
+          if (
+            !this.isActiveObservedWorkspaceTarget(target) ||
+            target.forgePrStatusPollGeneration !== generation ||
+            target.forgePrStatusPollKey !== pollKey ||
+            this.getForgePrStatusPollKey(target) !== pollKey
+          ) {
             return;
           }
           this.rememberForgePrStatusSnapshot(
@@ -3011,6 +3345,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       service: resolution.service,
       pollTarget,
       pollImmediately,
+      pollKey,
+      generation,
     });
   }
 
@@ -3020,12 +3356,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     service,
     pollTarget,
     pollImmediately,
+    pollKey,
+    generation,
   }: {
     target: WorkspaceGitTarget;
     forge: string;
     service: ForgeService;
     pollTarget: WorkspaceForgePrStatusPollTarget;
     pollImmediately: boolean;
+    pollKey: string;
+    generation: number;
   }): { unsubscribe: () => void } {
     let closed = false;
     let timer: NodeJS.Timeout | null = null;
@@ -3044,20 +3384,31 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     };
 
     const poll = async () => {
-      if (closed || !this.isActiveObservedWorkspaceTarget(target)) {
+      if (
+        closed ||
+        !this.isActiveObservedWorkspaceTarget(target) ||
+        target.forgePrStatusPollGeneration !== generation ||
+        this.getForgePrStatusPollKey(target) !== pollKey
+      ) {
         return;
       }
       try {
         const status = await service.getCurrentPullRequestStatus({
           cwd: target.cwd,
           headRef: pollTarget.headRef,
+          repository: pollTarget.repository,
           ...(pollTarget.headSha ? { headSha: pollTarget.headSha } : {}),
           ...(pollTarget.headRepositoryOwner
             ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
             : {}),
           reason: "self-heal-forge-pr-status",
         });
-        if (!closed && this.isActiveObservedWorkspaceTarget(target)) {
+        if (
+          !closed &&
+          this.isActiveObservedWorkspaceTarget(target) &&
+          target.forgePrStatusPollGeneration === generation &&
+          this.getForgePrStatusPollKey(target) === pollKey
+        ) {
           latestStatus = status;
           consecutiveErrors = 0;
           this.rememberForgePrStatusSnapshot(target, buildForgeSnapshotFromStatus(status, forge));
@@ -3101,6 +3452,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target: WorkspaceGitTarget,
   ): WorkspaceForgePrStatusPollTarget | null {
     const git = target.latestGit;
+    if (git?.vcs === "jj") {
+      const repository = target.jjForgeResolution?.repository;
+      return repository?.headRef && repository.headSha
+        ? { headRef: repository.headRef, headSha: repository.headSha ?? undefined, repository }
+        : null;
+    }
     if (!git?.currentBranch) {
       return null;
     }
@@ -3120,9 +3477,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private stopForgePrStatusPollForTarget(target: WorkspaceGitTarget): void {
-    target.forgePrStatusPollSubscription?.unsubscribe();
+    const subscription = target.forgePrStatusPollSubscription;
+    target.forgePrStatusPollGeneration += 1;
     target.forgePrStatusPollSubscription = null;
     target.forgePrStatusPollKey = null;
+    subscription?.unsubscribe();
   }
 
   /**
@@ -3148,6 +3507,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     previous: Set<string> = new Set(),
   ): Promise<{ ignored: Set<string>; failed: boolean }> {
     const ignored = new Set<string>();
+    // Never ask Git about jj's working tree (including colocated repos).
+    const backend = await resolveEffectiveBackend(rootPath);
+    if (backend === "jj") {
+      return this.loadJjIgnoredDirs(rootPath);
+    }
     try {
       const result = await this.deps.runGitCommand(
         ["ls-files", "-o", "-i", "--directory", "--exclude-standard"],
@@ -3172,6 +3536,43 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     return { ignored, failed: false };
+  }
+
+  private async loadJjIgnoredDirs(
+    rootPath: string,
+  ): Promise<{ ignored: Set<string>; failed: boolean }> {
+    const ignored = new Set<string>();
+    try {
+      const text = await readFile(join(rootPath, ".gitignore"), "utf8");
+      const rules = text.split("\n").map((line) => line.replace(/\r$/, ""));
+      // shortcut: only literal directory rules are proven here. An unsupported
+      // negation could reinclude a candidate; keep everything observable then.
+      if (rules.some((line) => line.startsWith("!") && !/^!?\/?[\w.-]+\/$/.test(line))) {
+        return { ignored, failed: false };
+      }
+      const candidates = new Set<string>();
+      for (const line of rules) {
+        if (!/^!?\/?[\w.-]+\/$/.test(line)) continue;
+        const name = line.replace(/^!/, "").replace(/^\//, "").replace(/\/$/, "");
+        if (name === "." || name === "..") continue;
+        if (line.startsWith("!")) candidates.delete(name);
+        else candidates.add(name);
+      }
+      if (candidates.size === 0) return { ignored, failed: false };
+      const files = await runJjCommand(["file", "list"], { cwd: rootPath });
+      if (files.truncated) return { ignored, failed: true };
+      const tracked = files.stdout.split("\n");
+      for (const name of candidates) {
+        if (!tracked.some((path) => path === name || path.startsWith(`${name}/`))) {
+          ignored.add(join(rootPath, name));
+        }
+      }
+      return { ignored, failed: false };
+    } catch {
+      // Missing/unreadable effective policy must remain observable, not retain
+      // a stale exclusion that can hide future unignored files.
+      return { ignored, failed: true };
+    }
   }
 
   private async refreshWorkspaceTarget(
@@ -3344,11 +3745,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       }
       try {
         const runRefreshGitCommand = createRunGitCommand(`workspace-refresh:${request.reason}`);
-        const admittedSnapshot = await this.workspaceRefreshLimit(() => {
+        const admittedSnapshot = await this.workspaceRefreshLimit(async () => {
           if (
             target.closed ||
-            target.folderMissing ||
-            this.workspaceTargets.get(target.cwd) !== target
+            this.workspaceTargets.get(target.cwd) !== target ||
+            (await this.suspendWorkspaceIfFolderMissing(target))
           ) {
             return null;
           }
@@ -3521,6 +3922,18 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     const cwd = target.cwd;
     const previousForgePrStatusPollKey = this.getForgePrStatusPollKey(target);
+    // jj publication fence: capture the head op id BEFORE reading facts. The
+    // read commands themselves land operations (snapshots), so a post-read
+    // probe could attribute an external op to this publication. Pre-read, any
+    // op that lands during the read differs from the stored id and keeps the
+    // workspace refreshing — the miss direction is one extra refresh. The
+    // identity probe (cheap fs walk) decides jj-ness here because observation
+    // setup — which sets target.vcs — races the initial refresh.
+    const jjFenceIdentity = await this.deps.resolveJjRepoIdentity(cwd);
+    if (jjFenceIdentity) {
+      target.vcs = "jj";
+    }
+    const jjFence = jjFenceIdentity ? await this.deps.readJjHeadOpId(cwd).catch(() => null) : null;
     const baseContext: CheckoutContext = {
       paseoHome: this.paseoHome,
       worktreesRoot: this.worktreesRoot,
@@ -3528,9 +3941,30 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       runGitCommand: runRefreshGitCommand,
     };
     const facts = await this.loadCheckoutFacts(target, baseContext);
+    await this.bindWorkspaceRepoTarget(target, facts);
     const context: CheckoutContext = { ...baseContext, facts };
     const checkoutStatus = await this.deps.getCheckoutStatus(cwd, context);
+    let jjForgeResolution: ForgeResolution | null = null;
+    let jjForgeError: Error | undefined;
+    if (checkoutStatus.isGit && checkoutStatus.vcs === "jj") {
+      try {
+        const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
+          paseoHome: this.paseoHome,
+        });
+        const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
+        if (resolution) {
+          const resolvedRepository = { ...repository, host: resolution.host };
+          await requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
+          jjForgeResolution = { ...resolution, repository: resolvedRepository };
+        }
+      } catch (error) {
+        jjForgeError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
     if (!checkoutStatus.isGit) {
+      target.jjForgeResolution = jjForgeResolution;
+      target.jjForgeError = jjForgeError;
+      this.stopForgePrStatusPollForTarget(target);
       target.latestGit = buildNotGitSnapshot(cwd).git;
       const loadedAtMs = this.deps.now().getTime();
       target.latestGitLoadedAtMs = loadedAtMs;
@@ -3539,15 +3973,18 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return facts;
     }
 
-    const refreshWorktree = request.refreshWorktree || target.latestGit === null;
+    const previousGit = target.latestGit;
+    const refreshWorktree = request.refreshWorktree || previousGit === null;
     const diffStat = refreshWorktree
       ? await this.deps
           .getCheckoutShortstat(cwd, context, {
             force: request.force || target.latestGit !== null,
           })
           .catch(() => null)
-      : (target.latestGit?.diffStat ?? null);
+      : previousGit.diffStat;
 
+    target.jjForgeResolution = jjForgeResolution;
+    target.jjForgeError = jjForgeError;
     target.latestGit = {
       isGit: true,
       repoRoot: checkoutStatus.repoRoot,
@@ -3566,13 +4003,23 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       behindOfOrigin: checkoutStatus.behindOfOrigin,
       hasRemote: checkoutStatus.hasRemote,
       diffStat,
+      vcs: checkoutStatus.vcs,
+      changeId: checkoutStatus.changeId ?? null,
+      jjDescription: checkoutStatus.jjDescription,
+      jjSnapshotRefusedPaths: checkoutStatus.jjSnapshotRefusedPaths,
+      defaultWorkspaceBase: checkoutStatus.defaultWorkspaceBase,
     };
     const loadedAtMs = this.deps.now().getTime();
     target.latestGitLoadedAtMs = loadedAtMs;
+    if (jjFence !== null) {
+      target.lastPublishedJjOpId = jjFence;
+    }
 
     if (previousForgePrStatusPollKey !== this.getForgePrStatusPollKey(target)) {
       target.latestForge = buildForgeUnavailableSnapshot();
       target.latestForgeLoadedAtMs = target.latestGitLoadedAtMs;
+      // Rotate authority before the replacement provider read can suspend.
+      this.updateForgePrStatusPollForTarget(target);
     }
     return facts;
   }
@@ -3584,7 +4031,17 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     runRefreshGitCommand: RunGitCommand,
   ): Promise<void> {
     const remoteUrl = target.latestGit?.remoteUrl ?? null;
-    const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
+    const resolution =
+      target.latestGit?.vcs === "jj"
+        ? target.jjForgeResolution
+        : await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
+    if (target.jjForgeError) {
+      target.latestForge = buildForgeSnapshot("no_remote", null, {
+        message: target.jjForgeError.message,
+      });
+      target.latestForgeLoadedAtMs = this.deps.now().getTime();
+      return;
+    }
     // Every forge gates on the resolver alone: a cloud host matches synchronously
     // and a self-hosted/Enterprise host is recognized by the adapter probe (which
     // this async resolution populates), so GitHub Enterprise is no longer gated
@@ -3597,12 +4054,15 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const forgeService: ForgeService = resolution.service;
     const forceForge = request.force && request.includeForge;
     if (forceForge) {
-      forgeService.invalidate({ cwd: target.cwd });
+      forgeService.invalidate({ cwd: target.cwd, repository: resolution.repository });
     }
 
+    const pollKey = this.getForgePrStatusPollKey(target);
+    const generation = target.forgePrStatusPollGeneration;
     const forgeSnapshot = await loadForgeSnapshot({
       cwd: target.cwd,
       forgeService,
+      repository: resolution.repository,
       now: this.deps.now(),
       deps: this.deps,
       force: forceForge,
@@ -3610,6 +4070,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       facts,
       runGitCommand: runRefreshGitCommand,
     });
+    if (
+      target.closed ||
+      target.forgePrStatusPollGeneration !== generation ||
+      this.getForgePrStatusPollKey(target) !== pollKey
+    )
+      return;
     // Carry the resolved forge (probe-aware) so the wire projection labels
     // self-managed GitLab hosts correctly instead of falling back to "github".
     target.latestForge = { ...forgeSnapshot, forge: resolution.forge };
@@ -3624,17 +4090,30 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     return {
       cwd: target.cwd,
       git: target.latestGit,
-      forge: target.latestForge ?? buildForgeUnavailableSnapshot(),
+      forge: {
+        ...(target.latestForge ?? buildForgeUnavailableSnapshot()),
+        ...(target.jjForgeResolution?.repository
+          ? {
+              repository: {
+                host: target.jjForgeResolution.repository.host,
+                targetRepository: target.jjForgeResolution.repository.targetRepository,
+              },
+            }
+          : {}),
+      },
     };
   }
 
   private getForgePrStatusPollKey(target: WorkspaceGitTarget): string | null {
     const git = target.latestGit;
-    if (!git?.currentBranch || !git.remoteUrl) {
+    if (!git || (git.vcs !== "jj" && (!git.currentBranch || !git.remoteUrl))) {
       return null;
     }
 
-    const resolution = this.forgeResolver.resolveFromRemoteUrl(git.remoteUrl);
+    const resolution =
+      git.vcs === "jj"
+        ? target.jjForgeResolution
+        : this.forgeResolver.resolveFromRemoteUrl(git.remoteUrl);
     if (!resolution) {
       return null;
     }
@@ -3646,7 +4125,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     return buildWorkspaceForgePrStatusPollKey({
       forge: resolution.forge,
-      remoteUrl: git.remoteUrl,
+      remoteUrl: git.vcs === "jj" ? null : git.remoteUrl,
       target: pollTarget,
     });
   }
@@ -3700,41 +4179,120 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async runRepoFetch(target: RepoGitTarget): Promise<void> {
-    if (target.fetchInFlight) {
+    if (
+      this.disposed ||
+      target.closed ||
+      this.repoTargets.get(target.repoGitRoot) !== target ||
+      target.fetchInFlight
+    ) {
       return;
     }
-
     target.fetchInFlight = true;
-    this.logger.debug(
-      { repoGitRoot: target.repoGitRoot, cwd: target.cwd },
-      "Running background git fetch",
+    const fetchCwd = target.cwd;
+    try {
+      if (!(await this.isRepoFetchBindingCurrent(target, fetchCwd))) {
+        this.scheduleRepoMetadataRefresh(target, "repo-binding-change", true);
+        return;
+      }
+      if (target.vcs === "jj") await this.runRepoJjFetch(target);
+      else await this.runRepoGitFetch(target, fetchCwd);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, cwd: target.cwd },
+        "Background fetch refused; repository binding unavailable",
+      );
+    } finally {
+      target.fetchInFlight = false;
+    }
+  }
+
+  private async isRepoFetchBindingCurrent(target: RepoGitTarget, cwd: string): Promise<boolean> {
+    if (!(await this.deps.workspaceFolderExists(cwd))) return false;
+    const backend = await resolveEffectiveBackend(cwd);
+    let currentRoot: string | null;
+    if (backend === "jj") {
+      if (target.vcs !== "jj") return false;
+      currentRoot = (await this.deps.resolveJjRepoIdentity(cwd))?.sharedStorePath ?? null;
+    } else {
+      if (target.vcs !== "git") return false;
+      const gitDir = await this.deps.resolveAbsoluteGitDir(cwd);
+      currentRoot = gitDir ? await this.resolveWorkspaceGitRefsRoot(gitDir) : null;
+    }
+    return (
+      !this.disposed &&
+      !target.closed &&
+      this.repoTargets.get(target.repoGitRoot) === target &&
+      target.workspaceKeys.has(cwd) &&
+      currentRoot === target.repoGitRoot &&
+      ((await detectVcsBackend(cwd)) === "jj") === (target.vcs === "jj")
     );
+  }
+
+  private async runRepoJjFetch(target: RepoGitTarget): Promise<void> {
+    const workspace = [...target.workspaceKeys]
+      .map((cwd) => this.workspaceTargets.get(cwd))
+      .find((candidate) => candidate && this.isActiveObservedWorkspaceTarget(candidate));
+    if (!workspace || !workspace.latestFacts?.isGit) return;
+    const hasRemote = workspace.latestGit
+      ? workspace.latestGit.hasRemote
+      : workspace.latestFacts.remoteUrl !== null;
+    if (!hasRemote) return;
+    target.cwd = workspace.cwd;
+    const controller = new AbortController();
+    const fetchCwd = target.cwd;
+    target.jjFetchController = controller;
+    const fetchPromise = runWithJjCommandPriority("normal", async () => {
+      if (!(await this.isRepoFetchBindingCurrent(target, fetchCwd))) return;
+      await this.deps.runJjFetch(fetchCwd, { signal: controller.signal });
+    })
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          this.logger.warn(
+            { err: error, cwd: fetchCwd, sharedStorePath: target.repoGitRoot },
+            "Background jj fetch failed; local observation remains active",
+          );
+        }
+      })
+      .finally(async () => {
+        target.jjFetchController = null;
+        try {
+          await this.scheduleJjStoreMetadataRefresh(target);
+        } finally {
+          this.pendingJjFetches.delete(fetchPromise);
+        }
+      });
+    // Last-subscriber release removes the repo target before the child exits.
+    // Keep its completion owned by the service so disposal still waits for it.
+    this.pendingJjFetches.add(fetchPromise);
+    await fetchPromise;
+  }
+
+  private async runRepoGitFetch(target: RepoGitTarget, cwd: string): Promise<void> {
+    this.logger.debug({ repoGitRoot: target.repoGitRoot, cwd }, "Running background git fetch");
 
     let result: WorkspaceGitFetchResult | null = null;
     const eventsBeforeFetchSnapshot: FileChange[] = [];
     try {
-      try {
-        result = await this.deps.runGitFetch(
-          target.cwd,
-          {
-            onRefSnapshot: (phase) => {
-              const events = target.bufferedFetchMetadataEvents.splice(0);
-              if (phase === "before") {
-                eventsBeforeFetchSnapshot.push(...events);
-              }
-            },
+      result = await this.deps.runGitFetch(
+        cwd,
+        {
+          onRefSnapshot: (phase) => {
+            const events = target.bufferedFetchMetadataEvents.splice(0);
+            if (phase === "before") {
+              eventsBeforeFetchSnapshot.push(...events);
+            }
           },
-          createRunGitCommand("background-fetch"),
-        );
-      } catch (error) {
-        this.logger.warn(
-          { err: error, repoGitRoot: target.repoGitRoot, cwd: target.cwd },
-          "Background git fetch failed",
-        );
-      }
+        },
+        createRunGitCommand("background-fetch"),
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, repoGitRoot: target.repoGitRoot, cwd },
+        "Background git fetch failed",
+      );
+    }
+    if (await this.isRepoFetchBindingCurrent(target, cwd)) {
       this.applyRepoFetchResult(target, result, eventsBeforeFetchSnapshot);
-    } finally {
-      target.fetchInFlight = false;
     }
   }
 
@@ -3826,8 +4384,13 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.removeWorkspaceTarget(target);
   }
 
-  private removeWorkspaceTarget(target: WorkspaceGitTarget): void {
+  private removeWorkspaceRepoLink(target: WorkspaceGitTarget): void {
     this.detachWorkspaceFromRepoTarget(target);
+    target.repoGitRoot = null;
+  }
+
+  private removeWorkspaceTarget(target: WorkspaceGitTarget): void {
+    this.removeWorkspaceRepoLink(target);
     this.closeWorkspaceTarget(target);
     this.workspaceTargets.delete(target.cwd);
   }
@@ -3947,6 +4510,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private closeRepoTarget(target: RepoGitTarget): void {
     target.closed = true;
+    target.jjFetchController?.abort(new WorkspaceGitServiceDisposedError());
     if (target.intervalId) {
       clearInterval(target.intervalId);
       target.intervalId = null;
@@ -3970,6 +4534,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         );
       });
     }
+    if (target.secondarySubscription) {
+      const secondary = target.secondarySubscription;
+      target.secondarySubscription = null;
+      void secondary.unsubscribe().catch((error) => {
+        this.logger.warn(
+          { err: error, gitDir: target.colocatedGitDir },
+          "Failed to stop colocated git metadata watcher",
+        );
+      });
+    }
     target.workspaceKeys.clear();
   }
 }
@@ -3977,6 +4551,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 async function loadForgeSnapshot(options: {
   cwd: string;
   forgeService: ForgeService | null;
+  repository?: ForgeRepositoryContext;
   now: Date;
   deps: Pick<WorkspaceGitServiceDependencies, "getPullRequestStatus">;
   force?: boolean;
@@ -3995,13 +4570,28 @@ async function loadForgeSnapshot(options: {
   // outcome and would just be a wasted CLI spawn on every refresh.
   if (forgeService.authProbeCanThrow) {
     try {
-      await forgeService.isAuthenticated({ cwd: options.cwd });
+      await forgeService.isAuthenticated({ cwd: options.cwd, repository: options.repository });
     } catch (error) {
       return buildForgeSnapshot(forgeAuthStateFromError(error), null, null);
     }
   }
 
   try {
+    if (options.repository) {
+      const repository = options.repository;
+      const status = repository.headRef
+        ? await forgeService.getCurrentPullRequestStatus({
+            cwd: options.cwd,
+            repository,
+            headRef: repository.headRef,
+            headSha: repository.headSha ?? undefined,
+            ...(options.force
+              ? { force: true as const, reason: options.reason ?? "" }
+              : { reason: options.reason }),
+          })
+        : null;
+      return buildForgeSnapshot("authenticated", status, null);
+    }
     const result = await options.deps.getPullRequestStatus(
       options.cwd,
       forgeService,
@@ -4130,7 +4720,7 @@ function buildWorkspaceForgePrStatusPollKey({
   target,
 }: {
   forge: string;
-  remoteUrl: string;
+  remoteUrl: string | null;
   target: WorkspaceForgePrStatusPollTarget;
 }): string {
   return JSON.stringify([
@@ -4139,6 +4729,7 @@ function buildWorkspaceForgePrStatusPollKey({
     target.headRef,
     target.headSha ?? null,
     target.headRepositoryOwner ?? null,
+    target.repository ?? null,
   ]);
 }
 

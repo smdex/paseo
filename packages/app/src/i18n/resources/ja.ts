@@ -808,6 +808,29 @@ export const ja: TranslationResources = {
           pending: "コミット中...",
           success: "コミットしました",
         },
+        integrateBase: {
+          pending: "ベースに統合中…",
+          approve: "統合を承認",
+          detail:
+            "選択した変更を {{base}} に統合します。選択した作業コピーと他のワークスペースのリビジョンは変わりません。",
+          integrated: "選択した作業がベースに含まれるようになりました。",
+          noop: "選択した作業はすでにベースに含まれています。",
+        },
+        fetchRebase: {
+          label: "取得してリベース",
+          pending: "取得してリベース中…",
+          detail:
+            "すべてのリモートから取得し、変更可能なすべてのブランチを trunk 上にリベースします。",
+          rebased: "すべてのリモートから取得し、変更可能な作業を trunk 上にリベースしました。",
+          unchanged:
+            "すべてのリモートから取得しました。変更可能な作業はすでに trunk 上にあります。",
+          conflicts: "リベースで競合が発生しました。続行する前にホストで競合を解決してください。",
+        },
+        fetch: {
+          label: "フェッチ",
+          pending: "フェッチ中...",
+          success: "フェッチ済み",
+        },
         pull: {
           label: "プル",
           pending: "プル中...",
@@ -825,6 +848,12 @@ export const ja: TranslationResources = {
         },
         viewPr: "PRを表示",
         createPr: {
+          form: {
+            title: "タイトル",
+            body: "説明",
+            base: "ベースのブックマーク（任意）",
+            automatic: "自動生成",
+          },
           label: "PRを作成",
           pending: "PRを作成中...",
           success: "PRが作成されました",
@@ -847,6 +876,16 @@ export const ja: TranslationResources = {
           pending: "アーカイブ中...",
           success: "アーカイブしました",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "新しいチェンジ",
+          pending: "新しいチェンジを開始中...",
+          success: "新しいチェンジを開始しました",
+        },
         mergePr: {
           squash: "PRをマージ（スカッシュ）",
           merge: "PRをマージ（マージ）",
@@ -861,6 +900,7 @@ export const ja: TranslationResources = {
         },
         viewPr_mr: "MRを表示",
         autoMerge: {
+          disable: "自動マージを無効にする",
           enableSquash: "自動マージ（スカッシュ）",
           enableMerge: "自動マージ（マージ）",
           enableRebase: "自動マージ（リベース）",
@@ -917,6 +957,7 @@ export const ja: TranslationResources = {
         },
         toasts: {
           failedCommit: "コミットに失敗しました",
+          failedNewChange: "新しいチェンジの開始に失敗しました",
           failedPull: "プルに失敗しました",
           failedPush: "プッシュに失敗しました",
           failedPullAndPush: "プル＆プッシュに失敗しました",
@@ -1383,6 +1424,7 @@ export const ja: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "現在の変更",
       startingRef: "開始Ref",
       intoBase: "{{baseRef}}に",
       searching: "検索中...",
@@ -1628,6 +1670,15 @@ export const ja: TranslationResources = {
     restore: "復元",
     later: "後で",
     stashRestored: "スタッシュした変更を復元しました",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "ワークスペースを検索中...",

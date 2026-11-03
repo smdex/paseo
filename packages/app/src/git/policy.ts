@@ -21,6 +21,7 @@ export type GitActionId =
   | "disable-pr-auto-merge"
   | "merge-branch"
   | "merge-from-base"
+  | "new-change"
   | "archive-workspace";
 
 export interface GitAction {
@@ -35,6 +36,7 @@ export interface GitAction {
   /** When true, a menu separator should be rendered before this item. */
   startsGroup: boolean;
   handler: () => void;
+  closeOnSelect?: boolean;
 }
 
 export interface GitActions {
@@ -69,6 +71,7 @@ export interface BuildGitActionsInput {
   isPaseoOwnedWorktree: boolean;
   isOnBaseBranch: boolean;
   hasUncommittedChanges: boolean;
+  hasDescribedJjChange?: boolean;
   baseRefAvailable: boolean;
   baseRefLabel: string;
   aheadCount: number;
@@ -77,6 +80,8 @@ export interface BuildGitActionsInput {
   behindOfOrigin: number | null;
   shouldPromoteArchive: boolean;
   shipDefault: "merge" | "pr";
+  /** True on jj checkouts; gates the jj-only "new change" action. */
+  isJj: boolean;
   runtime: Record<GitActionId, GitActionRuntimeState>;
 }
 
@@ -197,9 +202,21 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
 
   allActions.set("commit", {
     id: "commit",
-    label: i18n.t("workspace.git.actions.commit.label"),
-    pendingLabel: i18n.t("workspace.git.actions.commit.pending"),
-    successLabel: i18n.t("workspace.git.actions.commit.success"),
+    label: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.label"
+        : "workspace.git.actions.commit.label",
+    ),
+    pendingLabel: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.pending"
+        : "workspace.git.actions.commit.pending",
+    ),
+    successLabel: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.finishChange.success"
+        : "workspace.git.actions.commit.success",
+    ),
     disabled: input.runtime.commit.disabled,
     status: input.runtime.commit.status,
     icon: input.runtime.commit.icon,
@@ -209,9 +226,15 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
 
   allActions.set("pull", {
     id: "pull",
-    label: i18n.t("workspace.git.actions.pull.label"),
-    pendingLabel: i18n.t("workspace.git.actions.pull.pending"),
-    successLabel: i18n.t("workspace.git.actions.pull.success"),
+    label: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.label" : "workspace.git.actions.pull.label",
+    ),
+    pendingLabel: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.pending" : "workspace.git.actions.pull.pending",
+    ),
+    successLabel: i18n.t(
+      input.isJj ? "workspace.git.actions.fetch.success" : "workspace.git.actions.pull.success",
+    ),
     disabled: input.runtime.pull.disabled,
     status: input.runtime.pull.status,
     unavailableMessage: input.runtime.pull.disabled ? undefined : getPullUnavailableMessage(input),
@@ -264,6 +287,7 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
       : getMergeBranchUnavailableMessage(input),
     icon: input.runtime["merge-branch"].icon,
     startsGroup: false,
+    closeOnSelect: input.isJj,
     handler: input.runtime["merge-branch"].handler,
   });
 
@@ -282,6 +306,19 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
     handler: input.runtime["merge-from-base"].handler,
   });
 
+  allActions.set("new-change", {
+    id: "new-change",
+    closeOnSelect: true,
+    label: i18n.t("workspace.git.actions.newChange.label"),
+    pendingLabel: i18n.t("workspace.git.actions.newChange.pending"),
+    successLabel: i18n.t("workspace.git.actions.newChange.success"),
+    disabled: input.runtime["new-change"].disabled,
+    status: input.runtime["new-change"].status,
+    icon: input.runtime["new-change"].icon,
+    startsGroup: true,
+    handler: input.runtime["new-change"].handler,
+  });
+
   allActions.set("archive-workspace", {
     id: "archive-workspace",
     label: i18n.t("workspace.git.actions.archive.label"),
@@ -297,9 +334,16 @@ export function buildGitActions(input: BuildGitActionsInput): GitActions {
   const primaryActionId = getPrimaryActionId(input);
   const primary = primaryActionId ? (allActions.get(primaryActionId) ?? null) : null;
 
-  const secondaryIds = [...REMOTE_ACTION_IDS];
+  const secondaryIds = input.isJj
+    ? REMOTE_ACTION_IDS.filter((id) => id !== "pull-and-push")
+    : [...REMOTE_ACTION_IDS];
   if (!input.isOnBaseBranch) {
     secondaryIds.push(...getFeatureActionIds(input));
+  } else if (input.isJj) {
+    secondaryIds.push("merge-branch");
+  }
+  if (input.isJj) {
+    secondaryIds.push("new-change");
   }
   secondaryIds.push("archive-workspace");
 
@@ -324,24 +368,26 @@ export function actionsWithoutPrimary(gitActions: GitActions): GitAction[] {
   );
 }
 
+function canFinishChange(input: BuildGitActionsInput): boolean {
+  return input.hasUncommittedChanges || Boolean(input.isJj && input.hasDescribedJjChange);
+}
+
 function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shouldPromoteArchive) {
     return "archive-workspace";
   }
-  if (input.hasUncommittedChanges) {
+  if (canFinishChange(input)) {
     return "commit";
   }
-  if (canPull(input)) {
+  if (!input.isJj && canPull(input)) {
     return "pull";
   }
   if (canPush(input)) {
     return "push";
   }
-  if (canMergePr(input)) {
-    return getDefaultDirectPullRequestMergeActionId(input);
-  }
-  if (canEnablePrAutoMerge(input)) {
-    return getDefaultEnablePullRequestAutoMergeActionId(input);
+  const prMergePrimary = getPrMergePrimaryActionId(input);
+  if (prMergePrimary) {
+    return prMergePrimary;
   }
   if (hasEnabledPrAutoMerge(input)) {
     return "pr";
@@ -349,12 +395,8 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shipDefault === "pr" && canUsePullRequestActionAsShipDefault(input)) {
     return "pr";
   }
-  if (!input.isOnBaseBranch && input.aheadCount > 0) {
-    return "merge-branch";
-  }
-  if (!input.isOnBaseBranch && canMergeFromBase(input)) {
-    return "merge-from-base";
-  }
+  if ((input.isJj || !input.isOnBaseBranch) && input.aheadCount > 0) return "merge-branch";
+  if (!input.isJj && !input.isOnBaseBranch && canMergeFromBase(input)) return "merge-from-base";
   if (input.githubFeaturesEnabled && input.hasPullRequest && input.pullRequestUrl) {
     return "pr";
   }
@@ -368,6 +410,17 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   return null;
 }
 
+/** PR-merge promotion preserves provider eligibility for both backends. */
+function getPrMergePrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
+  if (canMergePr(input)) {
+    return getDefaultDirectPullRequestMergeActionId(input);
+  }
+  if (canEnablePrAutoMerge(input)) {
+    return getDefaultEnablePullRequestAutoMergeActionId(input);
+  }
+  return null;
+}
+
 function getPullRequestActionIds(filter: {
   roles: readonly PullRequestActionRole[];
   input: BuildGitActionsInput;
@@ -378,6 +431,13 @@ function getPullRequestActionIds(filter: {
 }
 
 function getFeatureActionIds(input: BuildGitActionsInput): GitActionId[] {
+  // Native PR actions operate on the published request; local integration is separate.
+  if (input.isJj) {
+    return [
+      "merge-branch",
+      ...getPullRequestActionIds({ roles: ["status", "direct", "auto"], input }),
+    ];
+  }
   return [
     "merge-from-base",
     "merge-branch",
@@ -407,6 +467,7 @@ function buildPrAction(input: BuildGitActionsInput): GitAction {
   if (input.hasPullRequest && input.pullRequestUrl) {
     return {
       id: "pr",
+      closeOnSelect: true,
       label: i18n.t("workspace.git.actions.viewPr"),
       pendingLabel: i18n.t("workspace.git.actions.viewPr"),
       successLabel: i18n.t("workspace.git.actions.viewPr"),
@@ -427,6 +488,7 @@ function buildPrAction(input: BuildGitActionsInput): GitAction {
 
   return {
     id: "pr",
+    closeOnSelect: input.isJj,
     label: i18n.t("workspace.git.actions.createPr.label"),
     pendingLabel: i18n.t("workspace.git.actions.createPr.pending"),
     successLabel: i18n.t("workspace.git.actions.createPr.success"),
@@ -448,6 +510,7 @@ function buildDirectPullRequestMergeAction(
   const runtime = input.runtime[model.id];
   const unavailableMessage = getMergePrUnavailableMessage(input);
   return {
+    closeOnSelect: input.isJj,
     id: model.id,
     label: getDirectPullRequestMergeActionLabel(model.id),
     pendingLabel: i18n.t("workspace.git.actions.mergePr.pending"),
@@ -467,6 +530,7 @@ function buildEnablePullRequestAutoMergeAction(
 ): GitAction {
   const runtime = input.runtime[model.id];
   return {
+    closeOnSelect: input.isJj,
     id: model.id,
     label: getEnablePullRequestAutoMergeActionLabel(model.id),
     pendingLabel: i18n.t("workspace.git.actions.autoMerge.enabling"),
@@ -486,8 +550,13 @@ function buildDisablePullRequestAutoMergeAction(input: BuildGitActionsInput): Gi
       ? undefined
       : i18n.t("workspace.git.actions.unavailable.autoMergeCannotDisable");
   return {
+    closeOnSelect: input.isJj,
     id: "disable-pr-auto-merge",
-    label: i18n.t("workspace.git.actions.autoMerge.enabled"),
+    label: i18n.t(
+      input.isJj
+        ? "workspace.git.actions.autoMerge.disable"
+        : "workspace.git.actions.autoMerge.enabled",
+    ),
     pendingLabel: i18n.t("workspace.git.actions.autoMerge.disabling"),
     successLabel: i18n.t("workspace.git.actions.autoMerge.disabled"),
     disabled: runtime.disabled || input.mergeCapability?.canDisableAutoMerge !== true,
@@ -522,7 +591,10 @@ function getEnablePullRequestAutoMergeActionLabel(id: PullRequestAutoMergeEnable
 }
 
 function canPull(input: BuildGitActionsInput): boolean {
-  return input.hasRemote && !input.hasUncommittedChanges && (input.behindOfOrigin ?? 0) > 0;
+  return (
+    input.hasRemote &&
+    (input.isJj || (!input.hasUncommittedChanges && (input.behindOfOrigin ?? 0) > 0))
+  );
 }
 
 function canPush(input: BuildGitActionsInput): boolean {
@@ -566,8 +638,7 @@ function canMergePr(input: BuildGitActionsInput): boolean {
     !input.pullRequestIsDraft &&
     !input.pullRequestIsMerged &&
     input.pullRequestMergeable !== "CONFLICTING" &&
-    input.aheadCount > 0 &&
-    !input.hasUncommittedChanges;
+    (input.isJj || (input.aheadCount > 0 && !input.hasUncommittedChanges));
 
   if (!canMergeFromPullRequestStatus) {
     return false;
@@ -621,6 +692,7 @@ function getPullUnavailableMessage(input: BuildGitActionsInput): string | undefi
   if (!input.hasRemote) {
     return i18n.t("workspace.git.actions.unavailable.pullNoRemote");
   }
+  if (input.isJj) return undefined;
   if (input.hasUncommittedChanges) {
     return i18n.t("workspace.git.actions.unavailable.pullDirty");
   }
@@ -685,7 +757,7 @@ function getMergeBranchUnavailableMessage(input: BuildGitActionsInput): string |
   if (!input.baseRefAvailable) {
     return i18n.t("workspace.git.actions.unavailable.mergeNoBase");
   }
-  if (input.hasUncommittedChanges) {
+  if (!input.isJj && input.hasUncommittedChanges) {
     return i18n.t("workspace.git.actions.unavailable.mergeDirty");
   }
   if (input.aheadCount === 0) {

@@ -812,6 +812,29 @@ export const es: TranslationResources = {
           pending: "Comprometiéndose...",
           success: "Comprometido",
         },
+        integrateBase: {
+          pending: "Integrando en la base…",
+          approve: "Aprobar integración",
+          detail:
+            "Integra el cambio seleccionado en {{base}}. La copia de trabajo seleccionada y las revisiones de los demás espacios no cambian.",
+          integrated: "La base ahora contiene el trabajo seleccionado.",
+          noop: "La base ya contiene el trabajo seleccionado.",
+        },
+        fetchRebase: {
+          label: "Obtener y rebasar",
+          pending: "Obteniendo y rebasando…",
+          detail: "Obtener todos los remotos y rebasar todas las ramas mutables sobre trunk.",
+          rebased:
+            "Se obtuvieron todos los remotos y se rebasaron los cambios mutables sobre trunk.",
+          unchanged: "Se obtuvieron todos los remotos. Los cambios mutables ya están sobre trunk.",
+          conflicts:
+            "Rebase con conflictos. Resuelve los conflictos en el host antes de continuar.",
+        },
+        fetch: {
+          label: "Obtener",
+          pending: "Obteniendo...",
+          success: "Obtenido",
+        },
         pull: {
           label: "Jalar",
           pending: "Tracción...",
@@ -829,6 +852,12 @@ export const es: TranslationResources = {
         },
         viewPr: "VerPR",
         createPr: {
+          form: {
+            title: "Título",
+            body: "Descripción",
+            base: "Marcador base (opcional)",
+            automatic: "Generar automáticamente",
+          },
           label: "CrearPR",
           pending: "CreandoPR...",
           success: "PRcreado",
@@ -851,6 +880,16 @@ export const es: TranslationResources = {
           pending: "Archivando...",
           success: "Archivado",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "Nuevo cambio",
+          pending: "Iniciando nuevo cambio...",
+          success: "Nuevo cambio iniciado",
+        },
         mergePr: {
           squash: "Fusionar PR (squash)",
           merge: "Fusionar PR (merge)",
@@ -865,6 +904,7 @@ export const es: TranslationResources = {
         },
         viewPr_mr: "Ver MR",
         autoMerge: {
+          disable: "Desactivar la fusión automática",
           enableSquash: "Fusión automática (squash)",
           enableMerge: "Fusión automática (merge)",
           enableRebase: "Fusión automática (rebase)",
@@ -937,6 +977,7 @@ export const es: TranslationResources = {
         },
         toasts: {
           failedCommit: "No se pudo comprometer",
+          failedNewChange: "No se pudo iniciar un nuevo cambio",
           failedPull: "No se pudo tirar",
           failedPush: "No se pudo empujar",
           failedPullAndPush: "No se pudo tirar y empujar",
@@ -1405,6 +1446,7 @@ export const es: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "Cambio actual",
       startingRef: "Árbitro inicial",
       intoBase: "en {{baseRef}}",
       searching: "Búsqueda...",
@@ -1657,6 +1699,15 @@ export const es: TranslationResources = {
     restore: "Restaurar",
     later: "Más tarde",
     stashRestored: "Se restauraron los cambios ocultos",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "Buscando espacio de trabajo...",

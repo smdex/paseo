@@ -1,15 +1,17 @@
-import type { PluginWorktreeCreateRequest } from "@getpaseo/plugin/server";
-import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
+import type { Logger } from "pino";
 import { createNameId } from "mnemonic-id";
 
-import type { ForgeService } from "../services/forge-service.js";
+import type { ForgeService, ForgeRepositoryContext } from "../services/forge-service.js";
 import {
   createWorktree,
-  resolveDefaultWorktreePath,
   slugify,
   validateBranchSlug,
   type CreatedWorktree,
 } from "../utils/worktree.js";
+import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
+import { getJjStatus } from "../utils/checkout-jj.js";
+import { createJjWorktree, JjWorkspaceSourceError } from "../utils/worktree-jj.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
 import {
   resolveWorktreeCreationIntent,
   type ResolveWorktreeCreationIntentInput,
@@ -18,7 +20,7 @@ import {
 } from "./resolve-worktree-creation-intent.js";
 import type { ChangeRequestCheckoutSource, FirstAgentContext } from "@getpaseo/protocol/messages";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
-import { runGitCommand, runWithGitCommandPriority } from "../utils/run-git-command.js";
+import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 
 export interface CreateWorktreeCoreInput {
   cwd: string;
@@ -31,16 +33,18 @@ export interface CreateWorktreeCoreInput {
   firstAgentContext?: FirstAgentContext;
   paseoHome?: string;
   worktreesRoot?: string;
+  runSetup?: boolean;
 }
 
 export interface CreateWorktreeCoreDeps {
-  lifecycle?: Pick<PluginLifecycle, "before">;
+  logger?: Pick<Logger, "warn">;
   github: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
     "resolveRepoRoot" | "resolveDefaultBranch" | "resolveForge"
   >;
   resolveDefaultBranch?: (repoRoot: string) => Promise<string>;
+  onJjWorktreeCreated?: (result: CreateWorktreeCoreResult) => Promise<void>;
 }
 
 export interface CreateWorktreeCoreResult {
@@ -61,6 +65,7 @@ async function createWorktreeCoreWithPriority(
   input: CreateWorktreeCoreInput,
   deps: CreateWorktreeCoreDeps,
 ): Promise<CreateWorktreeCoreResult> {
+  const backend = await resolveEffectiveBackend(input.cwd);
   const repoRoot = await resolveWorktreeRepoRoot(input, deps.workspaceGitService);
   const requestedWorktreeSlug = input.worktreeSlug
     ? normalizeWorktreeSlug(input.worktreeSlug)
@@ -93,12 +98,13 @@ async function createWorktreeCoreWithPriority(
     };
   }
 
-  const forge = await resolveForge(repoRoot, deps, intentInput);
-  let intent = await resolveWorktreeCreationIntent(intentInput, repoRoot, {
-    forge: forge.forge,
-    forgeService: forge.service,
-    resolveDefaultBranch: (root) => resolveDefaultBranch(root, deps),
-  });
+  const { intent, forgeRepository } = await resolveCreationSource(
+    input,
+    deps,
+    intentInput,
+    repoRoot,
+    backend,
+  );
   let normalizedSlug: string;
 
   switch (intent.kind) {
@@ -118,36 +124,20 @@ async function createWorktreeCoreWithPriority(
     }
   }
 
-  const defaultPath = await resolveDefaultWorktreePath({
-    cwd: repoRoot,
-    paseoHome: input.paseoHome,
-    worktreesRoot: input.worktreesRoot,
-    worktreeSlug: normalizedSlug,
-  });
-  const { stdout: sourceRoot } = await runGitCommand(["rev-parse", "--show-toplevel"], {
-    cwd: input.cwd,
-  });
-  const sourceCheckout = sourceRoot.trim();
-  const request = describeCreationRequest(intent, {
-    repoRoot,
-    sourceCheckout,
-    slug: normalizedSlug,
-    path: defaultPath,
-  });
-  const transformed = deps.lifecycle
-    ? await deps.lifecycle.before("worktree.create.before", request)
-    : request;
-  normalizedSlug = validateWorktreeSlug(transformed.slug);
-  intent = creationIntentFromRequest(transformed, intent);
-
+  const onJjWorktreeCreated = deps.onJjWorktreeCreated;
   return {
-    worktree: await createWorktree({
-      cwd: repoRoot,
+    worktree: await createWorktreeForBackend({
+      cwd: backend === "jj" ? input.cwd : repoRoot,
       worktreeSlug: normalizedSlug,
-      worktreePath: transformed.path,
       source: intent,
+      forgeRepository,
+      runSetup: input.runSetup ?? true,
       paseoHome: input.paseoHome,
       worktreesRoot: input.worktreesRoot,
+      logger: deps.logger,
+      onCreated: onJjWorktreeCreated
+        ? (worktree) => onJjWorktreeCreated({ worktree, intent, repoRoot, created: true })
+        : undefined,
     }),
     intent,
     repoRoot,
@@ -155,66 +145,69 @@ async function createWorktreeCoreWithPriority(
   };
 }
 
-function describeCreationRequest(
-  intent: WorktreeCreationIntent,
-  placement: Pick<PluginWorktreeCreateRequest, "repoRoot" | "sourceCheckout" | "slug" | "path">,
-): PluginWorktreeCreateRequest {
-  if (intent.kind === "branch-off")
-    return {
-      ...placement,
-      kind: intent.kind,
-      branch: intent.branchName,
-      baseRef: intent.baseBranch,
-    };
-  if (intent.kind === "checkout-branch")
-    return { ...placement, kind: intent.kind, branch: intent.branchName };
-  const { localBranchName, baseRefName, ...facts } = intent;
-  return {
-    ...placement,
-    ...facts,
-    branch: localBranchName ?? intent.headRef,
-    baseRef: baseRefName,
-  };
+async function resolveCreationSource(
+  input: CreateWorktreeCoreInput,
+  deps: CreateWorktreeCoreDeps,
+  intentInput: ResolveWorktreeCreationIntentInput,
+  repoRoot: string,
+  backend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
+): Promise<{ intent: WorktreeCreationIntent; forgeRepository?: ForgeRepositoryContext }> {
+  const nativePr =
+    backend === "jj" && (input.checkoutSource !== undefined || input.githubPrNumber !== undefined);
+  let forge: { forge: string; service: ForgeService; repository?: ForgeRepositoryContext };
+  let intent: WorktreeCreationIntent;
+  try {
+    forge =
+      backend === "jj" && !nativePr
+        ? { forge: "github", service: deps.github }
+        : await resolveForge(backend === "jj" ? input.cwd : repoRoot, deps, intentInput);
+    if (nativePr && !forge.repository)
+      throw new Error("Select an unambiguous jj forge repository before opening a pull request");
+    intent = await resolveWorktreeCreationIntent(
+      nativePr ? { ...intentInput, refName: undefined } : intentInput,
+      repoRoot,
+      {
+        forge: forge.forge,
+        forgeService: forge.service,
+        repository: forge.repository,
+        resolveDefaultBranch: (root) => resolveDefaultBranch(input, deps, root),
+      },
+    );
+  } catch (error) {
+    if (nativePr) throw new JjWorkspaceSourceError(error);
+    throw error;
+  }
+  return { intent, forgeRepository: forge.repository };
 }
 
-function creationIntentFromRequest(
-  request: PluginWorktreeCreateRequest,
-  original: WorktreeCreationIntent,
-): WorktreeCreationIntent {
-  if (request.kind === "branch-off") {
-    return { kind: request.kind, branchName: request.branch, baseBranch: request.baseRef };
+/**
+ * Backend routing for worktree creation: jj repositories get jj workspaces
+ * with the same creation intent and registry lifecycle as Git worktrees.
+ */
+async function createWorktreeForBackend(input: {
+  cwd: string;
+  worktreeSlug: string;
+  source: Parameters<typeof createWorktree>[0]["source"];
+  forgeRepository?: ForgeRepositoryContext;
+  runSetup: boolean;
+  onCreated?: (worktree: CreatedWorktree) => Promise<void>;
+  logger?: Pick<Logger, "warn">;
+  paseoHome?: string;
+  worktreesRoot?: string;
+}): Promise<CreatedWorktree> {
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    const identity = await resolveJjRepoIdentity(input.cwd);
+    if (!identity) throw new Error("Unable to resolve jj repository identity");
+    return createJjWorktree({ ...input, cwd: identity.workspaceRoot });
   }
-  if (request.kind === "checkout-branch") {
-    return {
-      kind: request.kind,
-      branchName: request.branch,
-    };
-  }
-  const {
-    repoRoot: _repoRoot,
-    sourceCheckout: _checkout,
-    slug: _slug,
-    path: _path,
-    branch,
-    baseRef,
-    ...facts
-  } = request;
-  const keepLocalBranchName =
-    branch !== request.headRef ||
-    ((original.kind === "checkout-change-request" || original.kind === "checkout-github-pr") &&
-      original.localBranchName !== undefined);
-  return {
-    ...facts,
-    ...(keepLocalBranchName ? { localBranchName: branch } : {}),
-    baseRefName: baseRef,
-  };
+  return createWorktree(input);
 }
 
 async function resolveForge(
   repoRoot: string,
   deps: CreateWorktreeCoreDeps,
   intentInput: ResolveWorktreeCreationIntentInput,
-): Promise<{ forge: string; service: ForgeService }> {
+): Promise<{ forge: string; service: ForgeService; repository?: ForgeRepositoryContext }> {
   const resolution = await deps.workspaceGitService?.resolveForge(repoRoot);
   if (!resolution) {
     if (intentInput.checkoutSource?.forge && intentInput.checkoutSource.forge !== "github") {
@@ -223,30 +216,48 @@ async function resolveForge(
     // No recognized remote: fall back to GitHub, the wire-default forge.
     return { forge: "github", service: deps.github };
   }
-  return { forge: resolution.forge, service: resolution.service };
+  return {
+    forge: resolution.forge,
+    service: resolution.service,
+    repository: resolution.repository,
+  };
 }
 
 async function resolveDefaultBranch(
-  repoRoot: string,
+  input: CreateWorktreeCoreInput,
   deps: CreateWorktreeCoreDeps,
+  repoRoot: string,
 ): Promise<string> {
-  const baseBranch = deps.resolveDefaultBranch
-    ? await deps.resolveDefaultBranch(repoRoot)
-    : await deps.workspaceGitService?.resolveDefaultBranch(repoRoot);
-  if (!baseBranch) {
-    throw new Error("Unable to resolve repository default branch");
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    const status = await getJjStatus(input.cwd, {
+      paseoHome: input.paseoHome,
+      worktreesRoot: input.worktreesRoot,
+    });
+    if (!status.isGit || !status.defaultWorkspaceBase)
+      throw new Error("Unable to resolve jj workspace base");
+    return status.defaultWorkspaceBase.refName;
   }
+  const baseBranchPromise = deps.resolveDefaultBranch
+    ? deps.resolveDefaultBranch(repoRoot)
+    : deps.workspaceGitService?.resolveDefaultBranch(repoRoot);
+  const baseBranch = await baseBranchPromise?.catch(() => null);
+  if (!baseBranch) throw new Error("Unable to resolve repository default branch");
   return baseBranch;
 }
 
 export async function resolveWorktreeRepoRoot(
-  input: Pick<CreateWorktreeCoreInput, "cwd" | "paseoHome">,
+  input: CreateWorktreeCoreInput,
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">,
 ): Promise<string> {
   if (!workspaceGitService) {
     throw new Error("Create worktree requires WorkspaceGitService");
   }
 
+  if ((await resolveEffectiveBackend(input.cwd)) === "jj") {
+    const identity = await resolveJjRepoIdentity(input.cwd);
+    if (!identity) throw new Error("Unable to resolve jj repository identity");
+    return identity.primaryRoot;
+  }
   return workspaceGitService.resolveRepoRoot(input.cwd);
 }
 

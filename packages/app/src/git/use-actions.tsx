@@ -1,3 +1,6 @@
+import type { JjPrMutationIntent } from "@/git/jj-pr-mutation-form-model";
+import { openCheckoutActionForm } from "@/git/action-forms-store";
+import { confirmDialog } from "@/utils/confirm-dialog";
 import { useState, useCallback, useEffect, useMemo, type ReactElement } from "react";
 import { Info } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
@@ -198,6 +201,7 @@ interface UseGitActionsInput {
     merge: ReactElement;
     mergeFromBase: ReactElement;
     archive: ReactElement;
+    newChange: ReactElement;
   };
 }
 
@@ -312,6 +316,10 @@ function useWorkspaceScreenArchiveController({
   };
 }
 
+function hasJjDescription(status: ReturnType<typeof useCheckoutStatusQuery>["status"]): boolean {
+  return status?.vcs === "jj" && Boolean(status.jjDescription?.trim());
+}
+
 export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): UseGitActionsResult {
   const { t } = useTranslation();
   const toast = useToast();
@@ -325,6 +333,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const notGit = status !== null && !status.isGit && !status.error;
   const baseRef = gitStatus?.baseRef ?? undefined;
 
+  const isJj = gitStatus?.vcs === "jj";
+  const hasDescribedJjChange = hasJjDescription(gitStatus);
   const hasUncommittedChanges = Boolean(gitStatus?.isDirty);
 
   const {
@@ -442,6 +452,9 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   const mergeFromBaseStatus = useCheckoutGitActionsStore((s) =>
     s.getStatus({ serverId, cwd, actionId: "merge-from-base" }),
   );
+  const newChangeStatus = useCheckoutGitActionsStore((s) =>
+    s.getStatus({ serverId, cwd, actionId: "new-change" }),
+  );
 
   const runCommit = useCheckoutGitActionsStore((s) => s.commit);
   const runPull = useCheckoutGitActionsStore((s) => s.pull);
@@ -457,6 +470,11 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     (s) =>
       s.sessions[serverId]?.serverInfo?.features?.checkoutForgeSetAutoMerge === true ||
       s.sessions[serverId]?.serverInfo?.features?.checkoutGithubSetAutoMerge === true,
+  );
+  // jj RPCs require the advertised daemon capability — vcs data alone could
+  // come from a newer daemon mismatch (review should-fix 1).
+  const checkoutJjEnabled = useSessionStore(
+    (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutJjCheckpoint === true,
   );
 
   const toastActionError = useCallback(
@@ -476,15 +494,50 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
 
   // Handlers
   const handleCommit = useCallback(() => {
-    void runCommit({ serverId, cwd })
-      .then(() => {
-        toastActionSuccess(t("workspace.git.actions.commit.success"));
+    const native = isJj;
+    const expectedChangeId = native ? (gitStatus?.changeId ?? undefined) : undefined;
+    const approval = native
+      ? confirmDialog({
+          title: t("workspace.git.actions.finishChange.label"),
+          message: t("workspace.git.actions.jj.rewriteWarning"),
+        })
+      : Promise.resolve(true);
+    void approval
+      .then(async (approved) => {
+        if (!approved) return false;
+        await runCommit({ serverId, cwd, expectedChangeId, acknowledgeRewrites: native });
+        return true;
+      })
+      .then((completed) => {
+        if (!completed) return;
+        toastActionSuccess(
+          t(
+            isJj
+              ? "workspace.git.actions.finishChange.success"
+              : "workspace.git.actions.commit.success",
+          ),
+        );
         return;
       })
       .catch((err) => {
         toastActionError(err, t("workspace.git.actions.toasts.failedCommit"));
       });
-  }, [cwd, runCommit, serverId, t, toastActionError, toastActionSuccess]);
+  }, [cwd, runCommit, serverId, t, toastActionError, toastActionSuccess, gitStatus, isJj]);
+
+  const handleNewChange = useCallback(() => {
+    const expectedChangeId = gitStatus?.changeId ?? undefined;
+    if (!isJj || !expectedChangeId) return;
+    openCheckoutActionForm({
+      kind: "change",
+      snapshot: {
+        serverId,
+        cwd,
+        changeId: expectedChangeId,
+        description: "",
+        mode: "new",
+      },
+    });
+  }, [cwd, serverId, gitStatus, isJj]);
 
   const handlePull = useCallback(() => {
     void runPull({ serverId, cwd })
@@ -521,6 +574,15 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
 
   const handleCreatePr = useCallback(() => {
     void persistShipDefault("pr");
+    if (isJj) {
+      if (!gitStatus?.changeId) return;
+      openCheckoutActionForm({
+        kind: "create-pr",
+        forge,
+        snapshot: { serverId, cwd, changeId: gitStatus.changeId, bookmark: branchLabel },
+      });
+      return;
+    }
     void runCreatePr({ serverId, cwd })
       .then(() => {
         toastActionSuccess(t("workspace.git.actions.createPr.success", forgeVocabulary(forge)));
@@ -530,6 +592,9 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         toastActionError(err, t("workspace.git.actions.toasts.failedCreatePr"));
       });
   }, [
+    isJj,
+    gitStatus,
+    branchLabel,
     cwd,
     forge,
     persistShipDefault,
@@ -540,9 +605,32 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     toastActionSuccess,
   ]);
 
+  const openPrMutation = useCallback(
+    (intent: JjPrMutationIntent) => {
+      openCheckoutActionForm({
+        kind: "mutate-pr",
+        forge,
+        snapshot: {
+          serverId,
+          cwd,
+          intent,
+          identity:
+            prStatus?.repository && typeof prStatus.number === "number"
+              ? { ...prStatus.repository, number: prStatus.number }
+              : null,
+        },
+      });
+    },
+    [serverId, cwd, forge, prStatus],
+  );
+
   const handleMergePr = useCallback(
     (method: CheckoutPrMergeMethod) => {
       void persistShipDefault("pr");
+      if (isJj) {
+        openPrMutation({ kind: "merge", method });
+        return;
+      }
       void runMergePr({ serverId, cwd, method })
         .then(() => {
           setPostShipArchiveSuggested(true);
@@ -553,12 +641,27 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
           toastActionError(err, t("workspace.git.actions.toasts.failedMergePr"));
         });
     },
-    [cwd, forge, persistShipDefault, runMergePr, serverId, t, toastActionError, toastActionSuccess],
+    [
+      isJj,
+      openPrMutation,
+      cwd,
+      forge,
+      persistShipDefault,
+      runMergePr,
+      serverId,
+      t,
+      toastActionError,
+      toastActionSuccess,
+    ],
   );
 
   const handleEnablePrAutoMerge = useCallback(
     (method: CheckoutPrMergeMethod) => {
       void persistShipDefault("pr");
+      if (isJj) {
+        openPrMutation({ kind: "enable-auto-merge", method });
+        return;
+      }
       void runEnablePrAutoMerge({ serverId, cwd, method })
         .then(() => {
           toastActionSuccess(t("workspace.git.actions.autoMerge.enabled"));
@@ -569,6 +672,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
         });
     },
     [
+      isJj,
+      openPrMutation,
       cwd,
       persistShipDefault,
       runEnablePrAutoMerge,
@@ -580,6 +685,10 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
   );
 
   const handleDisablePrAutoMerge = useCallback(() => {
+    if (isJj) {
+      openPrMutation({ kind: "disable-auto-merge" });
+      return;
+    }
     void runDisablePrAutoMerge({ serverId, cwd })
       .then(() => {
         toastActionSuccess(t("workspace.git.actions.autoMerge.disabled"));
@@ -588,7 +697,16 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       .catch((err) => {
         toastActionError(err, t("workspace.git.actions.toasts.failedDisableAutoMerge"));
       });
-  }, [cwd, runDisablePrAutoMerge, serverId, t, toastActionError, toastActionSuccess]);
+  }, [
+    isJj,
+    openPrMutation,
+    cwd,
+    runDisablePrAutoMerge,
+    serverId,
+    t,
+    toastActionError,
+    toastActionSuccess,
+  ]);
 
   const handleMergeBranch = useCallback(() => {
     if (!baseRef) {
@@ -596,6 +714,21 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       return;
     }
     void persistShipDefault("merge");
+    if (isJj) {
+      if (!gitStatus?.changeId) return;
+      openCheckoutActionForm({
+        kind: "change",
+        snapshot: {
+          serverId,
+          cwd,
+          changeId: gitStatus.changeId,
+          description: gitStatus.jjDescription ?? "",
+          mode: "integrate",
+          baseRef,
+        },
+      });
+      return;
+    }
     void runMergeBranch({ serverId, cwd, baseRef })
       .then(() => {
         setPostShipArchiveSuggested(true);
@@ -609,6 +742,8 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     baseRef,
     cwd,
     persistShipDefault,
+    gitStatus,
+    isJj,
     runMergeBranch,
     serverId,
     t,
@@ -704,9 +839,11 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
       behindOfOrigin,
       shouldPromoteArchive,
       shipDefault,
+      isJj: isJj,
+      hasDescribedJjChange,
       runtime: {
         commit: {
-          disabled: isActionDisabled(actionsDisabled, commitStatus),
+          disabled: isActionDisabled(actionsDisabled, commitStatus) || (isJj && !checkoutJjEnabled),
           status: commitStatus,
           icon: icons.commit,
           handler: handleCommit,
@@ -795,6 +932,13 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
           icon: icons.archive,
           handler: handleArchiveWorkspace,
         },
+        "new-change": {
+          disabled:
+            !checkoutJjEnabled || !isJj || isActionDisabled(actionsDisabled, newChangeStatus),
+          status: newChangeStatus,
+          icon: icons.newChange,
+          handler: handleNewChange,
+        },
       },
     };
   }, [
@@ -836,6 +980,10 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     disablePrAutoMergeStatus,
     mergeStatus,
     mergeFromBaseStatus,
+    newChangeStatus,
+    checkoutJjEnabled,
+    isJj,
+    hasDescribedJjChange,
     archiveController.canArchive,
     archiveController.isArchiving,
     handleCommit,
@@ -849,6 +997,7 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     handleMergeBranch,
     handleMergeFromBase,
     handleArchiveWorkspace,
+    handleNewChange,
     icons,
     prIcon,
     baseRef,
@@ -858,11 +1007,12 @@ export function useGitActions({ serverId, cwd, icons }: UseGitActionsInput): Use
     () =>
       translateGitActions(buildGitActions(gitActionsInput), {
         baseRefLabel,
+        isJj: isJj,
         hasPullRequest,
         forge,
         t,
       }),
-    [gitActionsInput, baseRefLabel, hasPullRequest, forge, t],
+    [gitActionsInput, baseRefLabel, hasPullRequest, forge, t, isJj],
   );
 
   return { gitActions, branchLabel, isGit };
@@ -872,6 +1022,7 @@ function translateGitActions(
   actions: GitActions,
   input: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
@@ -888,17 +1039,25 @@ function translateGitAction(
   action: GitAction,
   {
     baseRefLabel,
+    isJj,
     hasPullRequest,
     forge,
     t,
   }: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
   },
 ): GitAction {
-  const labels = getTranslatedGitActionLabels(action, { baseRefLabel, hasPullRequest, forge, t });
+  const labels = getTranslatedGitActionLabels(action, {
+    baseRefLabel,
+    isJj,
+    hasPullRequest,
+    forge,
+    t,
+  });
   return {
     ...action,
     ...labels,
@@ -909,15 +1068,26 @@ function translateGitAction(
   };
 }
 
+function translatedCommitLabels(isJj: boolean, t: (key: string) => string) {
+  const prefix = isJj ? "workspace.git.actions.finishChange" : "workspace.git.actions.commit";
+  return {
+    label: t(`${prefix}.label`),
+    pendingLabel: t(`${prefix}.pending`),
+    successLabel: t(`${prefix}.success`),
+  };
+}
+
 function getTranslatedGitActionLabels(
   action: GitAction,
   {
     baseRefLabel,
+    isJj,
     hasPullRequest,
     forge,
     t,
   }: {
     baseRefLabel: string;
+    isJj: boolean;
     hasPullRequest: boolean;
     forge: Forge;
     t: (key: string, options?: Record<string, unknown>) => string;
@@ -925,11 +1095,7 @@ function getTranslatedGitActionLabels(
 ): Pick<GitAction, "label" | "pendingLabel" | "successLabel"> {
   switch (action.id) {
     case "commit":
-      return {
-        label: t("workspace.git.actions.commit.label"),
-        pendingLabel: t("workspace.git.actions.commit.pending"),
-        successLabel: t("workspace.git.actions.commit.success"),
-      };
+      return translatedCommitLabels(isJj, t);
     case "pull":
       return {
         label: t("workspace.git.actions.pull.label"),
@@ -947,6 +1113,12 @@ function getTranslatedGitActionLabels(
         label: t("workspace.git.actions.pullAndPush.label"),
         pendingLabel: t("workspace.git.actions.pullAndPush.pending"),
         successLabel: t("workspace.git.actions.pullAndPush.success"),
+      };
+    case "new-change":
+      return {
+        label: t("workspace.git.actions.newChange.label"),
+        pendingLabel: t("workspace.git.actions.newChange.pending"),
+        successLabel: t("workspace.git.actions.newChange.success"),
       };
     case "pr":
       return hasPullRequest
@@ -998,7 +1170,11 @@ function getTranslatedGitActionLabels(
       };
     case "disable-pr-auto-merge":
       return {
-        label: t("workspace.git.actions.autoMerge.enabled"),
+        label: t(
+          isJj
+            ? "workspace.git.actions.autoMerge.disable"
+            : "workspace.git.actions.autoMerge.enabled",
+        ),
         pendingLabel: t("workspace.git.actions.autoMerge.disabling"),
         successLabel: t("workspace.git.actions.autoMerge.disabled"),
       };

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { PullRequestCommandStatus, PullRequestTimelineItem } from "./forge-service.js";
+import type {
+  ForgeRepositoryContext,
+  PullRequestCommandStatus,
+  PullRequestTimelineItem,
+} from "./forge-service.js";
 import {
   type CreateGiteaServiceOptions,
   createGiteaService,
@@ -430,6 +434,307 @@ function giteaMergeStatus(
 }
 
 describe("createGiteaService", () => {
+  it("selects the configured host login and explicit target for fork reads, checks, timeline and search", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitea.one.invalid",
+      sourceRepository: "fork/repo",
+      targetRepository: "parent/repo",
+      headRef: STATUS_PR_VIEW.head,
+      headSha: STATUS_PR_VIEW.headSha,
+      remoteHeadSha: STATUS_PR_VIEW.headSha,
+    };
+    let source = repository.sourceRepository;
+    let sha = repository.headSha ?? "";
+    let state: "open" | "closed" = "open";
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "login")
+          return ok(
+            JSON.stringify([
+              { name: "one", url: `https://${repository.host}` },
+              { name: "two", url: "https://gitea.two.invalid" },
+            ]),
+          );
+        const target = argValue(args, "--login") === "one" ? "parent/repo" : "other/repo";
+        if (args[0] === "api" && args[1].includes("/pulls?")) {
+          if (!args[1].includes("page=1&")) return ok("[]");
+          const candidate = currentPullRequestApi({
+            number: 5,
+            state,
+            headRef: STATUS_PR_VIEW.head,
+            headSha: sha,
+          });
+          return ok(
+            JSON.stringify([
+              {
+                ...candidate,
+                html_url: `https://${repository.host}/${target}/pulls/5`,
+                head: { ...candidate.head, repo: { ...candidate.head.repo, full_name: source } },
+                base: { ...candidate.base, repo: { ...candidate.base.repo, full_name: target } },
+              },
+            ]),
+          );
+        }
+        if (args[0] === "pr" && args[1] === "5")
+          return ok(JSON.stringify({ ...STATUS_PR_VIEW, state, headSha: sha }));
+        if (args[0] === "api" && args[1].endsWith("/status"))
+          return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+        if (args[0] === "api" && args[1].includes("/actions/"))
+          return ok(JSON.stringify({ workflow_runs: [] }));
+        return ok("[]");
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("implicit Git remote");
+        },
+        resolveCurrentBranch: async () => {
+          throw new Error("implicit Git branch");
+        },
+      },
+    );
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(5);
+    const other = { ...repository, host: "gitea.two.invalid", targetRepository: "other/repo" };
+    expect(
+      (await service.getCurrentPullRequestStatus({ ...input, repository: other }))?.number,
+    ).toBe(5);
+    for (const context of [repository, other]) {
+      await service.searchIssuesAndPrs({ cwd: input.cwd, repository: context, query: "feature" });
+      const read = calls.at(-1) ?? [];
+      expect(argValue(read, "--repo")).toBe(context.targetRepository);
+      expect(argValue(read, "--login")).toBe(context === repository ? "one" : "two");
+    }
+    await service.getPullRequestTimeline?.({
+      cwd: input.cwd,
+      repository,
+      repoOwner: "parent",
+      repoName: "repo",
+      prNumber: 5,
+    });
+    expect(calls.some((args) => args[1].startsWith("repos/parent/repo/issues/5/comments"))).toBe(
+      true,
+    );
+    const details = await service.getCheckDetails?.({
+      cwd: input.cwd,
+      repository,
+      repoOwner: "parent",
+      repoName: "repo",
+      checkRunId: 1,
+    });
+    expect(details?.checkRunId).toBe(1);
+    expect(
+      calls.some((args) => args[1] === `repos/parent/repo/commits/${repository.headSha}/status`),
+    ).toBe(true);
+    source = "another/repo";
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    source = repository.sourceRepository;
+    sha = "2".repeat(40);
+    expect(await service.getCurrentPullRequestStatus(input)).toMatchObject({
+      number: 5,
+      state: "open",
+    });
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
+        force: true,
+        reason: "terminal-head-proof",
+      }),
+    ).toMatchObject({ number: 5, state: "open" });
+    sha = repository.headSha ?? "";
+    state = "closed";
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
+      }),
+    ).toBeNull();
+    expect(
+      (
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        })
+      )?.state,
+    ).toBe("closed");
+    await expect(
+      service.getCheckDetails?.({
+        cwd: input.cwd,
+        repository,
+        repoOwner: "wrong",
+        repoName: "repo",
+        checkRunId: 1,
+      }),
+    ).rejects.toThrow("differs from the explicit target");
+  });
+  it.each([
+    {
+      name: "unique match on a full first page",
+      firstLength: 50,
+      firstMatching: true,
+      second: "empty",
+      expected: 5,
+      lastPage: 2,
+    },
+    {
+      name: "unique match on a later page",
+      firstLength: 50,
+      firstMatching: false,
+      second: "match",
+      expected: 5,
+      lastPage: 3,
+    },
+    {
+      name: "server-capped short page before a later match",
+      firstLength: 1,
+      firstMatching: false,
+      second: "match",
+      expected: 5,
+      lastPage: 3,
+    },
+    {
+      name: "duplicate exact matches across pages",
+      firstLength: 50,
+      firstMatching: true,
+      second: "match",
+      expected: null,
+      lastPage: 2,
+    },
+    {
+      name: "repeated row cannot prove exhaustion",
+      firstLength: 50,
+      firstMatching: true,
+      second: "repeat",
+      expected: null,
+      lastPage: 2,
+    },
+    {
+      name: "failed later page cannot prove exhaustion",
+      firstLength: 50,
+      firstMatching: true,
+      second: "error",
+      expected: null,
+      lastPage: 2,
+    },
+    {
+      name: "fresh nonmatching pages cannot exceed the lookup budget",
+      firstLength: 1,
+      firstMatching: false,
+      second: "endless",
+      expected: null,
+      lastPage: 4,
+    },
+    {
+      name: "a candidate cannot be accepted without exhaustion within the budget",
+      firstLength: 1,
+      firstMatching: true,
+      second: "endless",
+      expected: null,
+      lastPage: 4,
+    },
+    {
+      name: "blank later response cannot prove exhaustion",
+      firstLength: 50,
+      firstMatching: true,
+      second: "blank",
+      expected: null,
+      lastPage: 2,
+    },
+  ])("exhausts explicit Gitea-family lookup: $name", async (fixture) => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitea.one.invalid",
+      targetRepository: "parent/repo",
+      sourceRepository: "fork/repo",
+      headRef: STATUS_PR_VIEW.head,
+      headSha: STATUS_PR_VIEW.headSha,
+      remoteHeadSha: STATUS_PR_VIEW.headSha,
+    };
+    const candidate = (number: number, matching = true) => {
+      const pr = currentPullRequestApi({
+        number,
+        state: "open",
+        headRef: repository.headRef ?? "",
+        headSha: repository.headSha ?? "",
+      });
+      return {
+        ...pr,
+        head: {
+          ...pr.head,
+          repo: {
+            ...pr.head.repo,
+            full_name: matching ? repository.sourceRepository : "same-name/repo",
+          },
+        },
+        base: { ...pr.base, repo: { ...pr.base.repo, full_name: repository.targetRepository } },
+      };
+    };
+    const firstPage = Array.from({ length: fixture.firstLength }, (_, index) =>
+      index === 0 && fixture.firstMatching ? candidate(5) : candidate(100 + index, false),
+    );
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "login")
+          return ok(JSON.stringify([{ name: "one", url: `https://${repository.host}` }]));
+        if (args[0] === "api" && args[1].includes("/pulls?")) {
+          expect(argValue(args, "--login")).toBe("one");
+          expect(args[1]).toContain(`repos/${repository.targetRepository}/pulls?`);
+          if (args[1].includes("page=1&")) return ok(JSON.stringify(firstPage));
+          if (fixture.second === "endless") {
+            const page = Number(
+              new URL(args[1], "https://fixture.invalid").searchParams.get("page"),
+            );
+            if (page > fixture.lastPage) throw new Error("runner ceiling reached");
+            return ok(JSON.stringify([candidate(1000 + page, false)]));
+          }
+          if (args[1].includes("page=2&")) {
+            if (fixture.second === "error") throw new Error("pagination incomplete");
+            if (fixture.second === "blank") return ok("");
+            if (fixture.second === "repeat") return ok(JSON.stringify([candidate(5)]));
+            if (fixture.second === "match")
+              return ok(JSON.stringify([candidate(fixture.firstMatching ? 6 : 5)]));
+          }
+          return ok("[]");
+        }
+        if (args[0] === "pr" && args[1] === "5") return ok(JSON.stringify(STATUS_PR_VIEW));
+        if (args[0] === "api" && args[1].endsWith("/status"))
+          return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+        if (args[0] === "api" && args[1].includes("/actions/"))
+          return ok(JSON.stringify({ workflow_runs: [] }));
+        throw new Error(`unexpected call: ${args.join(" ")}`);
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("implicit Git remote");
+        },
+        resolveCurrentBranch: async () => {
+          throw new Error("implicit Git branch");
+        },
+      },
+    );
+    const result = service.getCurrentPullRequestStatus({
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    });
+    if (fixture.second === "endless") {
+      await expect(result).rejects.toThrow("Gitea PR lookup incomplete");
+    } else if (fixture.second === "error" || fixture.second === "blank") {
+      await expect(result).rejects.toThrow();
+    } else {
+      expect((await result)?.number ?? null).toBe(fixture.expected);
+    }
+    const pages = calls.filter((args) => args[0] === "api" && args[1].includes("/pulls?"));
+    expect(pages).toHaveLength(fixture.lastPage);
+    expect(pages.at(-1)?.[1]).toContain(`page=${fixture.lastPage}&`);
+  });
   it("maps a tea pr list item to the neutral current PR status by head branch", async () => {
     const { service, calls } = makeService((args) => {
       if (args[0] === "pr" && args[1] === "list")
@@ -3241,4 +3546,93 @@ describe("detectGiteaFamilySoftware", () => {
     });
     expect(software).toBe("gitea");
   });
+});
+
+it("creates a native fork PR with the exact source owner, target and host login", async () => {
+  const { service, calls } = makeService((args) => {
+    if (args[0] === "login") return ok(JSON.stringify(LOGINS));
+    return ok("https://gitea.com/upstream/project/pulls/22");
+  });
+  const repository: ForgeRepositoryContext = {
+    host: "gitea.com",
+    targetRepository: "upstream/project",
+    sourceRepository: "contributor/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "a".repeat(40),
+  };
+  expect(
+    await service.createPullRequest({
+      cwd: "/native",
+      repository,
+      title: "Native",
+      body: "Body",
+      head: "feature",
+      base: "main",
+    }),
+  ).toEqual({ url: "https://gitea.com/upstream/project/pulls/22", number: 22 });
+  expect(calls).toEqual([
+    ["login", "list", "-o", "json"],
+    [
+      "pr",
+      "create",
+      "--title",
+      "Native",
+      "--description",
+      "Body",
+      "--head",
+      "contributor:feature",
+      "--base",
+      "main",
+      "--login",
+      "gitea.com",
+      "--repo",
+      "upstream/project",
+    ],
+  ]);
+});
+
+it("merges a native Gitea PR on the explicit host and target while auto-merge stays unsupported", async () => {
+  const { service, calls } = makeService((args) =>
+    ok(
+      args[0] === "login"
+        ? JSON.stringify([
+            { name: "private", url: "https://tea.private", ssh_host: "tea.private", user: "me" },
+          ])
+        : "",
+    ),
+  );
+  const repository: ForgeRepositoryContext = {
+    host: "tea.private",
+    targetRepository: "upstream/project",
+    sourceRepository: "fork/project",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "b".repeat(40),
+  };
+  await expect(
+    service.mergePullRequest({
+      cwd: "/native",
+      repository,
+      prNumber: 5,
+      mergeMethod: "squash",
+      status: giteaMergeStatus(),
+    }),
+  ).resolves.toEqual({ success: true });
+  expect(calls).toEqual([
+    ["login", "list", "-o", "json"],
+    ["pr", "merge", "5", "--style", "squash", "--login", "private", "--repo", "upstream/project"],
+  ]);
+  expect(() =>
+    service.enablePullRequestAutoMerge({
+      cwd: "/native",
+      repository,
+      prNumber: 5,
+      mergeMethod: "squash",
+    }),
+  ).toThrow(/not supported/);
+  expect(() =>
+    service.disablePullRequestAutoMerge({ cwd: "/native", repository, prNumber: 5 }),
+  ).toThrow(/not supported/);
+  expect(calls).toHaveLength(2);
 });

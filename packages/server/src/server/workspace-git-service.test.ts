@@ -1,13 +1,17 @@
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { createTestLogger } from "../test-utils/test-logger.js";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import { getJjChangeMeta } from "../utils/checkout-jj.js";
+import { importJjCheckpoint, writeJjCheckpoint } from "../utils/jj-checkpoint.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path, { join } from "node:path";
 import type pino from "pino";
-import type { ForgeService } from "../services/forge-service.js";
+import type { CurrentPullRequestStatus, ForgeService } from "../services/forge-service.js";
 import type {
   CheckoutSnapshotFacts,
   CheckoutStatusGit,
@@ -55,6 +59,10 @@ function createSnapshot(
       isDirty: false,
       baseRef: "main",
       aheadBehind: { ahead: 0, behind: 0 },
+      upstreamRef: null,
+      changeId: null,
+      vcs: undefined,
+      defaultWorkspaceBase: undefined,
       aheadOfOrigin: 0,
       behindOfOrigin: 0,
       hasRemote: true,
@@ -62,6 +70,7 @@ function createSnapshot(
     },
     forge: {
       featuresEnabled: true,
+      authState: "authenticated",
       pullRequest: {
         url: "https://github.com/acme/repo/pull/123",
         title: "Update feature",
@@ -145,6 +154,7 @@ function createCheckoutStatus(
     isDirty: false,
     baseRef: "main",
     aheadBehind: { ahead: 0, behind: 0 },
+    upstreamRef: null,
     aheadOfOrigin: 0,
     behindOfOrigin: 0,
     hasRemote: true,
@@ -260,6 +270,7 @@ interface CreateServiceTestOptions {
   subscribe?: ReturnType<typeof vi.fn>;
   getCheckoutStatus?: ReturnType<typeof vi.fn>;
   getCheckoutSnapshotFacts?: (cwd: string) => Promise<CheckoutSnapshotFacts>;
+  getCheckoutRefDerivedState?: ReturnType<typeof vi.fn>;
   getCheckoutShortstat?: ReturnType<typeof vi.fn>;
   getCheckoutWorktreeState?: ReturnType<typeof vi.fn>;
   getPullRequestStatus?: ReturnType<typeof vi.fn>;
@@ -386,6 +397,10 @@ function createFolderBackedGit(options?: FolderBackedGitOptions) {
       getCheckoutWorktreeState,
       runGitCommand,
       runGitFetch,
+      resolveAbsoluteGitDir: vi.fn(async (cwd: string) => {
+        const facts = (options?.facts ?? createCheckoutSnapshotFacts)(cwd);
+        return facts.isGit ? (facts.gitCommonDir ?? null) : null;
+      }),
       workspaceFolderExists: async (cwd: string) => existsSync(cwd),
       now: () => new Date(),
     },
@@ -454,6 +469,7 @@ async function waitForObservationToSettle(
     expect(metrics.repositoryWorkspaceLinkCount).toBe(repositoryWorkspaceLinkCount);
     expect(metrics.workspaceObservationSetupInFlightCount).toBe(0);
     expect(metrics.workspaceRefreshInFlightCount).toBe(0);
+    expect(metrics.fetchInFlightCount).toBe(0);
   });
 }
 
@@ -603,7 +619,8 @@ describe("WorkspaceGitServiceImpl", () => {
 
       retiredRead.resolve(createPullRequestStatusResult());
       const retired = await oldRefresh;
-      expect(retired.forge.pullRequest).toMatchObject({ state: "open", isMerged: false });
+      // The fork also discards the retired read itself, not only its store publication.
+      expect(retired.forge.pullRequest).toBeNull();
       expect(store.get(REPO_CWD)).toBe(latest);
       expect(published).toEqual([latest]);
     } finally {
@@ -932,8 +949,11 @@ describe("WorkspaceGitServiceImpl", () => {
     );
     const lateSubscriptions = watcherGates.map(() => createAsyncSubscription());
     const lateUnsubscribes = lateSubscriptions.map(({ unsubscribe }) => unsubscribe);
-    const subscribe = vi.fn(
-      () => watcherGates[subscribe.mock.calls.length - 1]?.promise ?? Promise.reject(),
+    let watcherIndex = 0;
+    const subscribe = vi.fn((directory: string) =>
+      cwds.includes(directory)
+        ? (watcherGates[watcherIndex++]?.promise ?? Promise.reject())
+        : Promise.resolve(createAsyncSubscription()),
     );
     const runGitCommand = vi.fn(async (_args: string[], options: { cwd: string }) => ({
       stdout: `${options.cwd}\n`,
@@ -956,7 +976,7 @@ describe("WorkspaceGitServiceImpl", () => {
             cwds.length - WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
         });
         // Admission precedes asynchronous path setup; dispose only once watchers are pending.
-        expect(subscribe).toHaveBeenCalledTimes(WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY);
+        expect(watcherIndex).toBe(WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY);
       },
       { timeout: 10_000 },
     );
@@ -978,7 +998,7 @@ describe("WorkspaceGitServiceImpl", () => {
         workspaceObservationSetupAdmissionPendingCount: 0,
       });
     });
-    expect(subscribe).toHaveBeenCalledTimes(WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY);
+    expect(watcherIndex).toBe(WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY);
 
     watcherGates.forEach((gate, index) => gate.resolve(lateSubscriptions[index]!));
     refreshGates.forEach((gate, cwd) => gate.resolve(createCheckoutStatus(cwd)));
@@ -1098,7 +1118,9 @@ describe("WorkspaceGitServiceImpl", () => {
     );
 
     expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(0);
+    expect(service.getMetrics().workspaceTargetCount).toBe(1);
+    // The shared fetch validates its repository binding once before admission.
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(1);
 
     subscription.unsubscribe();
     service.dispose();
@@ -1144,12 +1166,14 @@ describe("WorkspaceGitServiceImpl", () => {
       expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
     });
 
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(0);
+    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(1);
     expect(hasOriginRemote).toHaveBeenCalledTimes(0);
     expect(runGitFetch).toHaveBeenCalledTimes(1);
 
     firstFetch.resolve();
-    await flushPromises();
+    await vi.waitFor(() => {
+      expect(service.getMetrics().fetchInFlightCount).toBe(0);
+    });
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => {
       expect(getCheckoutSnapshotFacts).toHaveBeenCalledTimes(2);
@@ -1157,9 +1181,9 @@ describe("WorkspaceGitServiceImpl", () => {
     });
 
     await vi.advanceTimersByTimeAsync(180_000);
-    await flushPromises();
-
-    expect(runGitFetch).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(runGitFetch).toHaveBeenCalledTimes(2);
+    });
 
     first.unsubscribe();
     second.unsubscribe();
@@ -1525,7 +1549,7 @@ describe("WorkspaceGitServiceImpl", () => {
     expect(subscription.repoRoot).toBe(REPO_CWD);
     expect(subscribe).toHaveBeenCalledTimes(1);
     expect(subscribe).toHaveBeenCalledWith(REPO_CWD, expect.any(Function), {
-      ignore: [join(REPO_CWD, ".git")],
+      ignore: [join(REPO_CWD, ".git"), join(REPO_CWD, ".jj")],
     });
 
     subscription.unsubscribe();
@@ -1590,7 +1614,7 @@ describe("WorkspaceGitServiceImpl", () => {
 
     expect(subscription.repoRoot).toBeNull();
     expect(subscribe).toHaveBeenCalledWith(plainCwd, expect.any(Function), {
-      ignore: [join(plainCwd, ".git")],
+      ignore: [join(plainCwd, ".git"), join(plainCwd, ".jj")],
     });
     expect(vi.getTimerCount()).toBe(1);
 
@@ -1789,7 +1813,13 @@ describe("WorkspaceGitServiceImpl with workspace folders that no longer exist", 
         expect(git.gitCommandsIn(deletedWorktree)).toBe(deletedWorktreeCommands);
 
         const fetchesBefore = git.deps.runGitFetch.mock.calls.length;
-        await vi.advanceTimersByTimeAsync(2 * BACKGROUND_GIT_FETCH_INTERVAL_MS);
+        for (let tick = 1; tick <= 2; tick += 1) {
+          await vi.advanceTimersByTimeAsync(BACKGROUND_GIT_FETCH_INTERVAL_MS);
+          await settle(() => {
+            expect(git.deps.runGitFetch).toHaveBeenCalledTimes(fetchesBefore + tick);
+            expect(service.getMetrics().fetchInFlightCount).toBe(0);
+          });
+        }
         expect(git.deps.runGitFetch.mock.calls.slice(fetchesBefore).map(([cwd]) => cwd)).toEqual([
           survivingWorktree,
           survivingWorktree,
@@ -1962,17 +1992,20 @@ describe("WorkspaceGitServiceImpl with workspace folders that no longer exist", 
     await service.dispose();
   });
 
-  test("a resumed workspace rebuilds observation from fresh facts, not the non-git facts cached while its folder was gone", async () => {
+  test("a resumed workspace rebuilds observation from fresh facts after caching non-git facts", async () => {
     const workspace = await createTemporaryFolder();
     const git = createFolderBackedGit();
     const service = createService(git.deps);
     const firstSubscription = service.registerWorkspace({ cwd: workspace }, vi.fn());
     await waitForObservationToSettle(service, 1);
-    await rm(workspace, { recursive: true, force: true });
+    git.deps.getCheckoutSnapshotFacts.mockResolvedValueOnce({ isGit: false });
+    git.deps.getCheckoutStatus.mockResolvedValueOnce({ isGit: false });
     service.onWorkspaceStateMayHaveChanged(workspace);
     await vi.advanceTimersByTimeAsync(1_000);
     await waitForRefreshesToSettle(service);
     expect((await service.getSnapshot(workspace)).git.isGit).toBe(false);
+    await rm(workspace, { recursive: true, force: true });
+    await service.getSnapshot(workspace, { force: true, reason: "test-folder-deleted" });
     await advanceThroughDegradedPolls(service);
     await waitForObservationToSettle(service, 0);
 
@@ -2176,3 +2209,175 @@ describe("WorkspaceGitServiceImpl with workspace folders that no longer exist", 
     expect(await workspaceFolderExists(join(file, "nested"))).toBe(false);
   });
 });
+
+test.skipIf(!isJjAvailable())("jj bookmark selections bypass the auxiliary read TTL", async () => {
+  const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+  vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+  const service = new WorkspaceGitServiceImpl({ logger: createTestLogger(), paseoHome: repo.dir });
+  try {
+    expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    const before = await service.suggestBranchesForCwd(repo.repoDir);
+    expect(repo.jj(["bookmark", "set", "main", "-r", "@"]).status).toBe(0);
+    const after = await service.suggestBranchesForCwd(repo.repoDir);
+    const actual = repo.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    expect(after.find((branch) => branch.name === "main")?.localRef).toBe(actual);
+    expect(after.find((branch) => branch.name === "main")?.localRef).not.toBe(
+      before.find((branch) => branch.name === "main")?.localRef,
+    );
+  } finally {
+    await service.dispose();
+    vi.unstubAllEnvs();
+    repo.dispose();
+  }
+});
+
+test.skipIf(!isJjAvailable())(
+  "jj Resume retry reloads repaired checkpoint state and ignores valid empty retained heads",
+  async () => {
+    const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+    const service = new WorkspaceGitServiceImpl({
+      logger: createTestLogger(),
+      paseoHome: repo.dir,
+    });
+    try {
+      expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+      expect(repo.jj(["describe", "-m", "saved empty main"]).status).toBe(0);
+      const emptyMain = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      expect(repo.jj(["new", "main", "-m", "feature base"]).status).toBe(0);
+      expect(repo.jj(["bookmark", "create", "feature"]).status).toBe(0);
+      expect(repo.jj(["new", "-m", "saved feature work"]).status).toBe(0);
+      writeFileSync(join(repo.repoDir, "a.txt"), "saved feature work\n");
+      const feature = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      expect(repo.jj(["new", "main", "-m", "selected main"]).status).toBe(0);
+      const selected = (await getJjChangeMeta(repo.repoDir, "@"))!;
+      const checkpoint = await importJjCheckpoint({
+        backingRoot: repo.repoDir,
+        head: selected,
+        paseoHome: repo.dir,
+      });
+      const savedWip = [
+        { ...emptyMain, bookmark: "main" },
+        { ...feature, bookmark: "feature" },
+      ];
+      await writeJjCheckpoint(
+        { ...checkpoint, savedWip: [savedWip[0]!, { ...savedWip[1]!, changeId: "k".repeat(32) }] },
+        repo.dir,
+      );
+      const failed = await service.suggestBranchesForCwd(repo.repoDir);
+      expect(failed.find((branch) => branch.name === "feature")).toMatchObject({
+        resumeLookupError: expect.stringContaining("could not be resolved"),
+      });
+      await writeJjCheckpoint({ ...checkpoint, savedWip }, repo.dir);
+      const retried = await service.suggestBranchesForCwd(repo.repoDir);
+      expect(retried.find((branch) => branch.name === "feature")?.wipChangeId).toBe(
+        feature.changeId,
+      );
+      expect(retried.find((branch) => branch.name === "main")?.wipChangeId).toBeUndefined();
+      expect(retried.every((branch) => branch.resumeLookupError === undefined)).toBe(true);
+      expect(await getJjChangeMeta(repo.repoDir, "@")).toEqual(selected);
+    } finally {
+      await service.dispose();
+      vi.unstubAllEnvs();
+      repo.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "native jj forge refresh and retained polls use explicit context and dispose on head replacement",
+  async () => {
+    const repo = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    expect(repo.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(
+      repo.jj(["git", "remote", "add", "origin", "https://github.com/acme/repo.git"]).status,
+    ).toBe(0);
+    const forge = createGitHubServiceStub();
+    const unsubscribePoll = vi.fn();
+    const retain = vi.fn(
+      (
+        _input: Parameters<NonNullable<ForgeService["retainCurrentPullRequestStatusPoll"]>>[0],
+        _onUpdate: (status: CurrentPullRequestStatus | null) => void,
+      ) => ({ unsubscribe: unsubscribePoll }),
+    );
+    forge.retainCurrentPullRequestStatusPoll = retain;
+    const lookups: string[] = [];
+    vi.stubEnv("PASEO_JJ_DISPATCH", "1");
+    const service = new WorkspaceGitServiceImpl({
+      logger: createTestLogger(),
+      paseoHome: repo.dir,
+      deps: {
+        forgeOverrides: { github: forge },
+        subscribe: async () => ({ unsubscribe: async () => {}, updateIgnore: async () => {} }),
+        createWatcherLivenessCanary: () => ({
+          path: "",
+          filterEvents: (events) => events,
+          verify: async () => {},
+        }),
+        runJjFetch: async () => {},
+        getPullRequestStatus: async (cwd) => {
+          lookups.push(cwd);
+          throw new Error("forge must not run");
+        },
+      },
+    });
+    const subscription = service.registerWorkspace({ cwd: repo.repoDir }, () => {});
+    try {
+      await expect(service.resolveForge(repo.repoDir)).resolves.toMatchObject({
+        forge: "github",
+        repository: {
+          host: "github.com",
+          sourceRepository: "acme/repo",
+          targetRepository: "acme/repo",
+          headRef: "main",
+        },
+      });
+      const snapshot = await service.getSnapshot(repo.repoDir, {
+        force: true,
+        includeForge: true,
+        reason: "manual-refresh",
+      });
+      expect(snapshot.git.vcs).toBe("jj");
+      expect(snapshot.forge.repository).toEqual({
+        host: "github.com",
+        targetRepository: "acme/repo",
+      });
+      expect(snapshot.forge.featuresEnabled).toBe(true);
+      expect(snapshot.forge.pullRequest).toBeNull();
+      expect(lookups).toEqual([]);
+      expect(retain).toHaveBeenCalled();
+      const initial = retain.mock.calls.at(-1)?.[0];
+      expect(initial?.repository).toMatchObject({
+        host: "github.com",
+        sourceRepository: "acme/repo",
+        targetRepository: "acme/repo",
+        headRef: "main",
+        headSha: snapshot.git.currentBranch ? expect.any(String) : null,
+      });
+      expect(forge.isAuthenticated).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(forge.invalidate).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(forge.getCurrentPullRequestStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: initial?.repository }),
+      );
+      expect(repo.jj(["describe", "-r", "main", "-m", "rewritten head"]).status).toBe(0);
+      await service.getSnapshot(repo.repoDir, {
+        force: true,
+        includeForge: true,
+        reason: "manual-refresh",
+      });
+      const replacement = retain.mock.calls.at(-1)?.[0];
+      expect(replacement?.repository?.headSha).not.toBe(initial?.repository?.headSha);
+      expect(unsubscribePoll).toHaveBeenCalled();
+    } finally {
+      subscription.unsubscribe();
+      await service.dispose();
+      expect(unsubscribePoll).toHaveBeenCalledTimes(retain.mock.calls.length);
+      vi.unstubAllEnvs();
+      repo.dispose();
+    }
+  },
+);

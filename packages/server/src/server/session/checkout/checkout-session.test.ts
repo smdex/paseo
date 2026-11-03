@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import pino from "pino";
 import {
   type CheckoutDiffSubscriber,
@@ -11,9 +11,13 @@ import {
   type CheckoutSessionHost,
 } from "./checkout-session.js";
 import type { GitMutationService } from "../git-mutation/git-mutation-service.js";
-import { createGitHubService } from "../../../services/github-service.js";
+import { createGitHubService, GitHubCommandError } from "../../../services/github-service.js";
 import { ForgeCliMissingError } from "../../../services/forge-cli-command.js";
-import type { ForgeService } from "../../../services/forge-service.js";
+import {
+  ForgeRepositoryContextError,
+  type ForgeRepositoryContext,
+  type ForgeService,
+} from "../../../services/forge-service.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type {
   CheckoutDiffCompareInput,
@@ -29,7 +33,17 @@ import {
 } from "../../test-utils/workspace-git-service-stub.js";
 import { createWorktree, deletePaseoWorktree } from "../../../utils/worktree.js";
 import { expandTilde } from "../../../utils/path.js";
+import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
+
+const itIfJj = it.skipIf(!isJjAvailable());
+const sessionDisposables: Array<() => void> = [];
+
+afterAll(() => {
+  for (const dispose of sessionDisposables.splice(0)) {
+    dispose();
+  }
+});
 
 function isCheckDetailsResponse(msg: SessionOutboundMessage): boolean {
   return msg.type === "checkout.forge.get_check_details.response";
@@ -806,6 +820,470 @@ describe("CheckoutSession", () => {
     });
   });
 
+  describe("new change", () => {
+    it("emits an error response on a non-jj checkout", async () => {
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutNewChangeRequest({
+        type: "checkout.new_change.request",
+        cwd: "/repo",
+        requestId: "nc1",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd: "/repo",
+          success: false,
+          changeId: null,
+          commitId: null,
+          bookmark: null,
+          requestId: "nc1",
+        },
+      });
+    });
+
+    itIfJj("starts a working-copy change on a jj checkout and reports its ids", async () => {
+      const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const { subscriber, refreshedCwds } = createFakeDiffSubscriber({
+        cwd: "",
+        files: [],
+        error: null,
+      });
+      const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+        diff: subscriber,
+      });
+
+      await checkout.handleCheckoutNewChangeRequest({
+        type: "checkout.new_change.request",
+        cwd: fixture.repoDir,
+        requestId: "nc2",
+      });
+
+      expect(gitMutationCalls.notifyGitMutation).toEqual([
+        { cwd: fixture.repoDir, reason: "new-change", options: undefined },
+      ]);
+      expect(refreshedCwds).toEqual([fixture.repoDir]);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.new_change.response",
+        payload: {
+          cwd: fixture.repoDir,
+          success: true,
+          error: null,
+          requestId: "nc2",
+        },
+      });
+      const payload =
+        emitted[0].type === "checkout.new_change.response" ? emitted[0].payload : null;
+      expect(payload?.changeId).toMatch(/^[a-z0-9]+$/);
+      expect(payload?.commitId).toMatch(/^[0-9a-f]+$/);
+    });
+  });
+
+  describe("describe change", () => {
+    it("rejects an empty description", async () => {
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: "/repo",
+        message: "   ",
+        requestId: "dc1",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd: "/repo",
+          success: false,
+          changeId: null,
+          requestId: "dc1",
+        },
+      });
+    });
+
+    itIfJj("describes the working-copy change on a jj checkout", async () => {
+      const fixture = createScratchJjRepo({ files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const { checkout, emitted } = makeCheckoutSession();
+
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: fixture.repoDir,
+        message: "retitled by paseo",
+        requestId: "dc2",
+      });
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          cwd: fixture.repoDir,
+          success: true,
+          error: null,
+          requestId: "dc2",
+        },
+      });
+      const description = fixture.jj(["log", "-r", "@", "--no-graph", "-T", "description"]);
+      expect(description.status).toBe(0);
+      expect(description.stdout.trim()).toBe("retitled by paseo");
+    });
+  });
+
+  describe("jj Refresh routing", () => {
+    itIfJj("refreshes local facts and diffs without resolving forge", async () => {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const calls: string[] = [];
+      const { subscriber, refreshedCwds } = createFakeDiffSubscriber({
+        cwd: "",
+        files: [],
+        error: null,
+      });
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          resolveForge: async () => {
+            throw new Error("forge must not run");
+          },
+          getSnapshot: async (cwd) => {
+            calls.push(cwd);
+            return createNoGitWorkspaceRuntimeSnapshot(cwd);
+          },
+        },
+        diff: subscriber,
+      });
+      await checkout.handleRefreshRequest({
+        type: "checkout.refresh.request",
+        cwd: fixture.repoDir,
+        requestId: "jj-refresh",
+      });
+      expect(calls).toEqual([fixture.repoDir]);
+      expect(refreshedCwds).toEqual([fixture.repoDir]);
+      expect(emitted.at(-1)).toMatchObject({
+        type: "checkout.refresh.response",
+        payload: { success: true, error: null },
+      });
+    });
+  });
+
+  describe("pull request deferral on jj", () => {
+    itIfJj.each([
+      {
+        error: new ForgeRepositoryContextError("Select the intended publication remote."),
+        message: "Select the intended publication remote.",
+      },
+      {
+        error: new GitHubCommandError({
+          args: ["api", "repos/acme/native/pulls"],
+          cwd: "/native",
+          exitCode: 1,
+          stderr: "Choose a valid target branch.",
+        }),
+        message:
+          "GitHub CLI command failed: gh api repos/acme/native/pulls\nChoose a valid target branch.",
+      },
+    ])(
+      "reports native PR publication failure without claiming success: $message",
+      async ({ error, message }) => {
+        const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+        sessionDisposables.push(fixture.dispose);
+        const { checkout, emitted } = makeCheckoutSession({
+          git: {
+            resolveForge: async () => {
+              throw error;
+            },
+          },
+        });
+        await checkout.handleCheckoutPrCreateRequest({
+          type: "checkout_pr_create_request",
+          cwd: fixture.repoDir,
+          title: "Kept title",
+          body: "Kept body",
+          requestId: "native-create",
+        });
+        expect(emitted.at(-1)).toEqual({
+          type: "checkout_pr_create_response",
+          payload: {
+            cwd: fixture.repoDir,
+            url: null,
+            number: null,
+            error: { code: "UNKNOWN", message },
+            requestId: "native-create",
+          },
+        });
+      },
+    );
+  });
+
+  describe("native selected PR commands", () => {
+    function nativeCommandSession(operation: "merge" | "enable" | "disable", failure = false) {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+      sessionDisposables.push(fixture.dispose);
+      const selected = fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])
+        .stdout.trim();
+      const repository: ForgeRepositoryContext = {
+        host: "forge.example",
+        targetRepository: "upstream/project",
+        sourceRepository: "contributor/fork",
+        headRef: "feature",
+        headSha: "a".repeat(40),
+        remoteHeadSha: "b".repeat(40),
+      };
+      const commands: string[][] = [];
+      const service = createGitHubService({
+        runner: async (args, options) => {
+          commands.push(args);
+          if (failure)
+            throw new GitHubCommandError({
+              args,
+              cwd: options.cwd,
+              exitCode: 1,
+              stderr: "Provider refused the captured PR. Refresh eligibility and retry.",
+            });
+          return { stdout: "", stderr: "" };
+        },
+        resolveRepoHost: async () => {
+          throw new Error("no Git discovery");
+        },
+      });
+      const snapshot = createGitSnapshot(fixture.repoDir, "feature");
+      snapshot.git = { ...snapshot.git, vcs: "jj", aheadOfOrigin: 1, isDirty: true };
+      snapshot.forge = {
+        featuresEnabled: true,
+        authState: "authenticated",
+        error: null,
+        repository,
+        pullRequest: {
+          number: 42,
+          url: "https://forge.example/upstream/project/pull/42",
+          title: "Published",
+          state: "open",
+          repoOwner: "upstream",
+          repoName: "project",
+          baseRefName: "main",
+          headRefName: "feature",
+          isMerged: false,
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          forgeSpecific: {
+            forge: "github",
+            mergeStateStatus: operation === "enable" ? "BLOCKED" : "CLEAN",
+            autoMergeRequest:
+              operation === "disable"
+                ? { enabledAt: null, mergeMethod: "SQUASH", enabledBy: null }
+                : null,
+            isMergeQueueEnabled: false,
+            isInMergeQueue: false,
+            repository: {
+              autoMergeAllowed: true,
+              mergeCommitAllowed: true,
+              squashMergeAllowed: true,
+              rebaseMergeAllowed: true,
+              viewerDefaultMergeMethod: "SQUASH",
+            },
+            viewerCanEnableAutoMerge: true,
+            viewerCanDisableAutoMerge: true,
+            viewerCanMergeAsAdmin: false,
+            viewerCanUpdateBranch: false,
+          },
+        },
+      };
+      const reads: unknown[] = [];
+      const session = makeCheckoutSession({
+        git: {
+          getSnapshot: async (_cwd, options) => {
+            reads.push(options);
+            return snapshot;
+          },
+          resolveForge: async () => ({
+            forge: "github",
+            host: repository.host,
+            repository,
+            service,
+          }),
+        },
+      });
+
+      const identity = {
+        host: repository.host,
+        targetRepository: repository.targetRepository,
+        number: 42,
+      };
+      const send = async (captured: typeof identity | null = identity) => {
+        const expectedPullRequest = captured ?? undefined;
+        if (operation === "merge")
+          await session.checkout.handleCheckoutPrMergeRequest({
+            type: "checkout_pr_merge_request",
+            cwd: fixture.repoDir,
+            mergeMethod: "squash",
+            expectedPullRequest,
+            requestId: "native-command",
+          });
+        else
+          await session.checkout.handleCheckoutForgeSetAutoMergeRequest({
+            type: "checkout.forge.set_auto_merge.request",
+            cwd: fixture.repoDir,
+            enabled: operation === "enable",
+            ...(operation === "enable" ? { mergeMethod: "squash" } : {}),
+            expectedPullRequest,
+            requestId: "native-command",
+          });
+      };
+      return {
+        ...session,
+        fixture,
+        selected,
+        repository,
+        snapshot,
+        commands,
+        reads,
+        identity,
+        send,
+      };
+    }
+    itIfJj.each([
+      {
+        operation: "merge",
+        args: ["pr", "merge", "42", "--squash", "--repo", "forge.example/upstream/project"],
+        reason: "merge-pr-validation",
+        response: "checkout_pr_merge_response",
+      },
+      {
+        operation: "enable",
+        args: [
+          "pr",
+          "merge",
+          "42",
+          "--auto",
+          "--squash",
+          "--repo",
+          "forge.example/upstream/project",
+        ],
+        reason: "auto-merge-validation",
+        response: "checkout.forge.set_auto_merge.response",
+      },
+      {
+        operation: "disable",
+        args: ["pr", "merge", "42", "--disable-auto", "--repo", "forge.example/upstream/project"],
+        reason: "auto-merge-validation",
+        response: "checkout.forge.set_auto_merge.response",
+      },
+    ] as const)(
+      "runs native $operation on the captured published PR without pushing local work",
+      async ({ operation, args, reason, response }) => {
+        const session = nativeCommandSession(operation);
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          type: response,
+          payload: {
+            cwd: session.fixture.repoDir,
+            success: true,
+            error: null,
+            requestId: "native-command",
+          },
+        });
+        expect(session.commands).toEqual([args]);
+        expect(session.reads).toEqual([{ force: true, includeForge: true, reason }]);
+        expect(
+          session.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+        ).toBe(session.selected);
+      },
+    );
+    itIfJj.each(["merge", "enable", "disable"] as const)(
+      "preserves actionable native %s provider failure and selection",
+      async (operation) => {
+        const session = nativeCommandSession(operation, true);
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            cwd: session.fixture.repoDir,
+            success: false,
+            error: {
+              message: expect.stringContaining(
+                "Provider refused the captured PR. Refresh eligibility and retry.",
+              ),
+            },
+            requestId: "native-command",
+          },
+        });
+        expect(session.commands).toHaveLength(1);
+        expect(
+          session.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim(),
+        ).toBe(session.selected);
+      },
+    );
+    itIfJj.each(["merge", "enable", "disable"] as const)(
+      "refuses native %s if forced lookup selects a different PR",
+      async (operation) => {
+        const session = nativeCommandSession(operation);
+        if (!session.snapshot.forge.pullRequest) throw new Error("Expected PR fixture");
+        session.snapshot.forge.pullRequest.number = 43;
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: {
+              message:
+                "The selected pull request changed since this action opened. Dismiss it and refresh PR status before trying again.",
+            },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
+    itIfJj.each([
+      { host: "other.example", targetRepository: "upstream/project" },
+      { host: "forge.example", targetRepository: "other/project" },
+    ])("refuses a changed native target $host/$targetRepository", async (target) => {
+      const session = nativeCommandSession("merge");
+      Object.assign(session.repository, target);
+      await session.send();
+      expect(session.emitted.at(-1)).toMatchObject({
+        payload: {
+          success: false,
+          error: { message: expect.stringContaining("selected pull request changed") },
+        },
+      });
+      expect(session.commands).toEqual([]);
+    });
+    itIfJj(
+      "refuses native commands when forced lookup retains a PR alongside an error",
+      async () => {
+        const session = nativeCommandSession("merge");
+        session.snapshot.forge.error = {
+          message: "Cannot refresh provider eligibility. Retry after reconnecting.",
+        };
+        await session.send();
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: { message: "Cannot refresh provider eligibility. Retry after reconnecting." },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
+    itIfJj(
+      "requires exact native selected PR identity even from an older request shape",
+      async () => {
+        const session = nativeCommandSession("merge");
+        await session.send(null);
+        expect(session.emitted.at(-1)).toMatchObject({
+          payload: {
+            success: false,
+            error: { message: expect.stringContaining("exact repository and number") },
+          },
+        });
+        expect(session.commands).toEqual([]);
+      },
+    );
+  });
+
   describe("commit", () => {
     it("fails when no message is supplied and none can be generated", async () => {
       const { checkout, emitted, generatorCalls } = makeCheckoutSession();
@@ -832,6 +1310,50 @@ describe("CheckoutSession", () => {
       ]);
     });
   });
+
+  itIfJj(
+    "Finish preserves a described message without invoking generation and refuses a stale draft",
+    async () => {
+      const fixture = createScratchJjRepo({ colocate: false, files: { "readme.md": "hello\n" } });
+      sessionDisposables.push(fixture.dispose);
+      fixture.jj(["describe", "-m", "My description\n\nDetails"]);
+      const changeId = fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "change_id"])
+        .stdout.trim();
+      const { checkout, emitted, generatorCalls } = makeCheckoutSession({
+        paseoHome: join(fixture.dir, "home"),
+      });
+      await checkout.handleCheckoutCommitRequest({
+        type: "checkout_commit_request",
+        cwd: fixture.repoDir,
+        expectedChangeId: changeId,
+        acknowledgeRewrites: true,
+        requestId: "finish-native",
+      });
+      expect(emitted[0]).toEqual({
+        type: "checkout_commit_response",
+        payload: { cwd: fixture.repoDir, success: true, error: null, requestId: "finish-native" },
+      });
+      expect(generatorCalls.generateCommitMessage).toEqual([]);
+      expect(fixture.jj(["log", "--no-graph", "-r", "@-", "-T", "description"]).stdout.trim()).toBe(
+        "My description\n\nDetails",
+      );
+      await checkout.handleCheckoutDescribeChangeRequest({
+        type: "checkout.describe_change.request",
+        cwd: fixture.repoDir,
+        message: "old draft",
+        expectedChangeId: changeId,
+        requestId: "stale-native",
+      });
+      expect(emitted[1]).toMatchObject({
+        type: "checkout.describe_change.response",
+        payload: {
+          success: false,
+          error: { message: expect.stringContaining("changed since this form opened") },
+        },
+      });
+    },
+  );
 
   describe("merge preflight", () => {
     it("fails when the target is not a git repository", async () => {
@@ -1112,6 +1634,117 @@ describe("CheckoutSession", () => {
   });
 
   describe("timeline routing", () => {
+    it("responds with a read error when explicit repository resolution fails closed", async () => {
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          resolveForge: async () => {
+            throw new ForgeRepositoryContextError("Ambiguous jj remote");
+          },
+        },
+      });
+      await checkout.handlePullRequestTimelineRequest({
+        type: "pull_request_timeline_request",
+        cwd: "/repo",
+        prNumber: 14,
+        repoOwner: "g",
+        repoName: "r",
+        requestId: "explicit-failure",
+      });
+      expect(emitted.at(-1)).toMatchObject({
+        type: "pull_request_timeline_response",
+        payload: { items: [], authState: "error", error: { message: "Ambiguous jj remote" } },
+      });
+    });
+
+    itIfJj(
+      "passes native jj repository identity to timeline, checks, and search reads",
+      async () => {
+        const fixture = createScratchJjRepo({ colocate: false });
+        sessionDisposables.push(fixture.dispose);
+        const repository: ForgeRepositoryContext = {
+          host: "github.com",
+          targetRepository: "parent/repo",
+          sourceRepository: "fork/repo",
+          headRef: "feature",
+          headSha: "1".repeat(40),
+          remoteHeadSha: null,
+        };
+        const reads: Array<ForgeRepositoryContext | undefined> = [];
+        const service: ForgeService = {
+          ...createGitHubService(),
+          async isAuthenticated(input) {
+            reads.push(input.repository);
+            return true;
+          },
+          async getPullRequestTimeline(input) {
+            reads.push(input.repository);
+            return {
+              prNumber: input.prNumber,
+              repoOwner: input.repoOwner,
+              repoName: input.repoName,
+              items: [],
+              truncated: false,
+              error: null,
+            };
+          },
+          async getCheckDetails(input) {
+            reads.push(input.repository);
+            return {
+              checkRunId: 7,
+              name: "check",
+              annotations: [],
+              failedJobs: [],
+              truncated: false,
+            };
+          },
+          async searchIssuesAndPrs(input) {
+            reads.push(input.repository);
+            return {
+              items: [],
+              authState: "authenticated",
+              featuresEnabled: true,
+              githubFeaturesEnabled: true,
+            };
+          },
+        };
+        const { checkout, emitted } = makeCheckoutSession({
+          git: {
+            resolveForge: async () => ({
+              forge: "github",
+              host: repository.host,
+              service,
+              repository,
+            }),
+          },
+        });
+        await checkout.handlePullRequestTimelineRequest({
+          type: "pull_request_timeline_request",
+          cwd: fixture.repoDir,
+          prNumber: 14,
+          repoOwner: "parent",
+          repoName: "repo",
+          requestId: "jj-timeline",
+        });
+        await checkout.handleCheckoutForgeGetCheckDetailsRequest({
+          type: "checkout.forge.get_check_details.request",
+          cwd: fixture.repoDir,
+          checkRunId: 7,
+          repoOwner: "parent",
+          repoName: "repo",
+          requestId: "jj-check",
+        });
+        await checkout.handleForgeSearchRequest({
+          type: "github_search_request",
+          cwd: fixture.repoDir,
+          query: "task",
+          requestId: "jj-search",
+        });
+        expect(reads).toEqual([repository, repository, repository, repository]);
+        expect(emitted).toHaveLength(3);
+        expect(emitted.find(isCheckDetailsResponse)).toMatchObject({ payload: { success: true } });
+      },
+    );
+
     it("routes the timeline request through the resolved GitLab adapter", async () => {
       const gitlabCalls: Array<{ cwd: string; prNumber: number }> = [];
       const gitlabService: Partial<ForgeService> = {
@@ -1809,4 +2442,220 @@ it("creates a PR from a restored exact base using the host metadata and a forge 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+itIfJj(
+  "fetch-and-rebase emits structured approval, native completion and an actionable remote failure",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+    sessionDisposables.push(fixture.dispose);
+    const origin = join(fixture.dir, "origin.git");
+    execFileSync("git", ["init", "--bare", origin], { stdio: "pipe" });
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    expect(fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(fixture.jj(["git", "push", "--bookmark", "main", "--remote", "origin"]).status).toBe(0);
+    writeFileSync(
+      join(fixture.repoDir, ".jj", "repo", "config.toml"),
+      '[revset-aliases]\n"trunk()" = "main@origin"\n',
+    );
+    expect(fixture.jj(["describe", "-m", "selected local work"]).status).toBe(0);
+    const changeId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+      paseoHome: join(fixture.dir, "home"),
+    });
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      requestId: "approval",
+    });
+    expect(emitted[0]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: false,
+        error: { code: "NOT_ALLOWED", reason: "rewrite_approval_required" },
+        requestId: "approval",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([]);
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      acknowledgeRewrites: true,
+      requestId: "approved",
+    });
+    expect(emitted[1]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: true,
+        changeId,
+        outcome: "unchanged",
+        error: null,
+        requestId: "approved",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([
+      { cwd: fixture.repoDir, reason: "pull", options: { invalidateForge: true } },
+    ]);
+    expect(
+      fixture.jj(["git", "remote", "add", "upstream", join(fixture.dir, "missing.git")]).status,
+    ).toBe(0);
+    await checkout.handleCheckoutFetchRebaseRequest({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: fixture.repoDir,
+      expectedChangeId: changeId,
+      acknowledgeRewrites: true,
+      requestId: "failed",
+    });
+    expect(emitted[2]).toMatchObject({
+      type: "checkout.jj.fetch_rebase.response",
+      payload: {
+        success: false,
+        error: { message: expect.stringContaining("missing.git") },
+        requestId: "failed",
+      },
+    });
+    checkout.cleanup();
+  },
+);
+
+itIfJj(
+  "integration captures explicit approval and advances the base with native outcomes",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "base.txt": "base\n" } });
+    sessionDisposables.push(fixture.dispose);
+    expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+    writeFileSync(join(fixture.repoDir, "selected.txt"), "selected\n");
+    const sourceId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+    const sourceCommit = fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    const baseCommit = fixture
+      .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+      .stdout.trim();
+    const { checkout, emitted, gitMutationCalls } = makeCheckoutSession({
+      paseoHome: join(fixture.dir, "home"),
+    });
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      requestId: "capture",
+    });
+    expect(emitted[0]).toMatchObject({
+      type: "checkout.jj.integrate_base.response",
+      payload: {
+        success: false,
+        changeId: sourceId,
+        commitId: sourceCommit,
+        baseCommitId: baseCommit,
+        error: { code: "NOT_ALLOWED", reason: "rewrite_approval_required" },
+        requestId: "capture",
+      },
+    });
+    expect(gitMutationCalls.notifyGitMutation).toEqual([]);
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      baseCommit,
+    );
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      expectedCommitId: sourceCommit,
+      expectedBaseCommitId: baseCommit,
+      acknowledgeRewrites: true,
+      requestId: "approve",
+    });
+    expect(emitted[1]).toMatchObject({
+      type: "checkout.jj.integrate_base.response",
+      payload: {
+        success: true,
+        changeId: sourceId,
+        commitId: sourceCommit,
+        baseCommitId: sourceCommit,
+        outcome: "integrated",
+        error: null,
+        requestId: "approve",
+      },
+    });
+    expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      sourceCommit,
+    );
+    expect(gitMutationCalls.notifyGitMutation).toEqual([
+      { cwd: fixture.repoDir, reason: "merge-to-base", options: { invalidateForge: true } },
+    ]);
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: sourceId,
+      requestId: "noop",
+    });
+    expect(emitted[2]).toMatchObject({ payload: { success: true, outcome: "noop" } });
+    await checkout.handleCheckoutIntegrateBaseRequest({
+      type: "checkout.jj.integrate_base.request",
+      cwd: fixture.repoDir,
+      baseRef: "main",
+      expectedChangeId: "stale-source",
+      requestId: "stale",
+    });
+    expect(emitted[3]).toMatchObject({
+      payload: {
+        success: false,
+        error: { message: expect.stringContaining("selected change changed") },
+      },
+    });
+    checkout.cleanup();
+  },
+);
+
+itIfJj("integration reports retained conflicts as failure without advancing the base", async () => {
+  const fixture = createScratchJjRepo({ colocate: false, files: { "shared.txt": "base\n" } });
+  sessionDisposables.push(fixture.dispose);
+  expect(fixture.jj(["bookmark", "create", "main", "-r", "@-"]).status).toBe(0);
+  writeFileSync(join(fixture.repoDir, "shared.txt"), "selected\n");
+  const sourceId = fixture.jj(["log", "--no-graph", "-r", "@", "-T", "change_id"]).stdout.trim();
+  const sourceCommit = fixture
+    .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+    .stdout.trim();
+  expect(fixture.jj(["new", "-r", "main", "-m", "upstream"]).status).toBe(0);
+  writeFileSync(join(fixture.repoDir, "shared.txt"), "upstream\n");
+  expect(fixture.jj(["bookmark", "set", "main"]).status).toBe(0);
+  const baseCommit = fixture
+    .jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"])
+    .stdout.trim();
+  expect(fixture.jj(["edit", sourceId]).status).toBe(0);
+  const { checkout, emitted } = makeCheckoutSession({ paseoHome: join(fixture.dir, "home") });
+  await checkout.handleCheckoutIntegrateBaseRequest({
+    type: "checkout.jj.integrate_base.request",
+    cwd: fixture.repoDir,
+    baseRef: "main",
+    expectedChangeId: sourceId,
+    expectedCommitId: sourceCommit,
+    expectedBaseCommitId: baseCommit,
+    acknowledgeRewrites: true,
+    requestId: "conflicts",
+  });
+  expect(emitted[0]).toMatchObject({
+    type: "checkout.jj.integrate_base.response",
+    payload: {
+      success: false,
+      changeId: sourceId,
+      commitId: sourceCommit,
+      baseCommitId: baseCommit,
+      outcome: "conflicts",
+      integrationCommitId: expect.any(String),
+      error: { code: "MERGE_CONFLICT", message: expect.stringContaining("base was not advanced") },
+    },
+  });
+  expect(fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+    baseCommit,
+  );
+  expect(fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+    sourceCommit,
+  );
+  checkout.cleanup();
 });

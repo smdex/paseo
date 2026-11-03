@@ -1,3 +1,4 @@
+import { validateWSOutboundMessage } from "./validation/ws-outbound.js";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
@@ -5,13 +6,22 @@ import {
   MutableDaemonConfigPatchSchema,
   UsageReportEntrySchema,
   AgentSnapshotPayloadSchema,
+  AgentTimelineEntryPayloadSchema,
   AgentTimelineItemPayloadSchema,
+  BranchSuggestionsResponseSchema,
+  CheckoutStatusResponseSchema,
+  CheckoutPrCreateRequestSchema,
+  CheckoutPrMergeRequestSchema,
+  CheckoutForgeSetAutoMergeRequestSchema,
+  CheckoutEditChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
+  SessionInboundMessageSchema,
   WSHelloMessageSchema,
-  WorkspaceSetupSnapshotSchema,
   WorkspaceSetupProgressMessageSchema,
-  AgentTimelineEntryPayloadSchema,
+  WorkspaceSetupSnapshotSchema,
 } from "./messages.js";
 
 test("terminal listings accept older rows and retain new per-terminal directories", () => {
@@ -141,6 +151,21 @@ describe("wire schema compatibility", () => {
       version: null,
       features: { agentTurnIdentity: true },
     });
+  });
+
+  test("native PR workspace capability is optional and old feature parsers ignore it", () => {
+    const older = { status: "server_info", serverId: "host", features: { checkoutJj: true } };
+    expect(
+      ServerInfoStatusPayloadSchema.parse(older).features?.checkoutJjPrWorkspace,
+    ).toBeUndefined();
+    const current = { ...older, features: { ...older.features, checkoutJjPrWorkspace: true } };
+    expect(ServerInfoStatusPayloadSchema.parse(current).features?.checkoutJjPrWorkspace).toBe(true);
+    const previous = z.object({
+      status: z.literal("server_info"),
+      serverId: z.string(),
+      features: z.object({ checkoutJj: z.boolean().optional() }).optional(),
+    });
+    expect(previous.parse(current).features).toEqual({ checkoutJj: true });
   });
 
   test("assistant timeline message ids are optional on the wire", () => {
@@ -587,4 +612,256 @@ test("speech config reads remain compatible with clients before features and fut
       features: { voiceMode: { stt: { provider: "future", region: "eu" } } },
     }).features?.voiceMode?.stt,
   ).toEqual({ provider: "future", region: "eu" });
+});
+
+test("exact workspace refs and default bases remain optional across checkout wire versions", () => {
+  const oldStatus = {
+    type: "checkout_status_response",
+    payload: {
+      cwd: "/repo",
+      isGit: true,
+      isPaseoOwnedWorktree: false,
+      repoRoot: "/repo",
+      mainRepoRoot: null,
+      currentBranch: null,
+      isDirty: false,
+      baseRef: null,
+      aheadBehind: null,
+      aheadOfOrigin: null,
+      behindOfOrigin: null,
+      hasRemote: false,
+      remoteUrl: null,
+      error: null,
+      requestId: "status",
+    },
+  };
+  const newStatus = {
+    ...oldStatus,
+    payload: {
+      ...oldStatus.payload,
+      defaultWorkspaceBase: { refName: "@", displayName: "Current change" },
+    },
+  };
+  const [notGit, local, managed] = CheckoutStatusResponseSchema.shape.payload.options;
+  const legacyStatus = CheckoutStatusResponseSchema.extend({
+    payload: z.union([
+      notGit.omit({ defaultWorkspaceBase: true }),
+      local.omit({ defaultWorkspaceBase: true }),
+      managed.omit({ defaultWorkspaceBase: true }),
+    ]),
+  });
+  expect(CheckoutStatusResponseSchema.parse(oldStatus)).toEqual(oldStatus);
+  expect(CheckoutStatusResponseSchema.parse(newStatus)).toEqual(newStatus);
+  expect(legacyStatus.parse(newStatus)).toEqual(oldStatus);
+  const oldBranches = {
+    type: "branch_suggestions_response",
+    payload: {
+      branches: ["main"],
+      branchDetails: [{ name: "main", committerDate: 1, hasLocal: true, hasRemote: true }],
+      error: null,
+      requestId: "branches",
+    },
+  };
+  const newBranches = {
+    ...oldBranches,
+    payload: {
+      ...oldBranches.payload,
+      branchDetails: [
+        {
+          ...oldBranches.payload.branchDetails[0],
+          localRef: "a".repeat(40),
+          remoteRef: "b".repeat(40),
+          remoteName: "upstream",
+          resumeLookupError: "Saved jj Resume lookup failed.",
+        },
+      ],
+    },
+  };
+  const legacyDetail = BranchSuggestionsResponseSchema.shape.payload.shape.branchDetails
+    .unwrap()
+    .element.omit({ localRef: true, remoteRef: true, remoteName: true, resumeLookupError: true });
+  const legacyBranches = BranchSuggestionsResponseSchema.extend({
+    payload: BranchSuggestionsResponseSchema.shape.payload.extend({
+      branchDetails: z.array(legacyDetail).optional(),
+    }),
+  });
+  expect(BranchSuggestionsResponseSchema.parse(oldBranches)).toEqual(oldBranches);
+  expect(BranchSuggestionsResponseSchema.parse(newBranches)).toEqual(newBranches);
+  expect(legacyBranches.parse(newBranches)).toEqual(oldBranches);
+  for (const message of [oldStatus, newStatus, oldBranches, newBranches]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
+});
+
+test("structured jj rewrite refusals remain compatible with legacy checkout errors", () => {
+  const oldMessage = {
+    type: "checkout.edit_change.response",
+    payload: {
+      requestId: "edit",
+      cwd: "/native",
+      success: false,
+      changeId: null,
+      commitId: null,
+      bookmark: null,
+      error: { code: "NOT_ALLOWED", message: "Review the affected native descendants." },
+    },
+  };
+  const newMessage = {
+    ...oldMessage,
+    payload: {
+      ...oldMessage.payload,
+      error: { ...oldMessage.payload.error, reason: "rewrite_approval_required" },
+    },
+  };
+  const legacyError = z.object({
+    code: z.enum(["NOT_GIT_REPO", "NOT_ALLOWED", "MERGE_CONFLICT", "UNKNOWN"]),
+    message: z.string(),
+  });
+  const legacyResponse = CheckoutEditChangeResponseSchema.extend({
+    payload: CheckoutEditChangeResponseSchema.shape.payload.extend({
+      error: legacyError.nullable(),
+    }),
+  });
+  expect(legacyResponse.parse(newMessage)).toEqual(oldMessage);
+  expect(SessionOutboundMessageSchema.parse(oldMessage)).toEqual(oldMessage);
+  expect(SessionOutboundMessageSchema.parse(newMessage)).toEqual(newMessage);
+  for (const message of [oldMessage, newMessage]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
+});
+
+test("native PR capture is optional across request wire versions", () => {
+  const oldRequest = {
+    type: "checkout_pr_create_request",
+    cwd: "/workspace",
+    title: "Kept title",
+    requestId: "create",
+  };
+  const newRequest = { ...oldRequest, expectedChangeId: "captured" };
+  const legacy = CheckoutPrCreateRequestSchema.omit({ expectedChangeId: true });
+  expect(CheckoutPrCreateRequestSchema.parse(oldRequest)).toEqual(oldRequest);
+  expect(CheckoutPrCreateRequestSchema.parse(newRequest)).toEqual(newRequest);
+  expect(legacy.parse(newRequest)).toEqual(oldRequest);
+});
+
+test("jj fetch-rebase additions remain optional and generated wire parsing retains native outcomes", () => {
+  const legacy = {
+    type: "checkout.jj.fetch_rebase.response",
+    payload: {
+      requestId: "fetch-rebase",
+      cwd: "/native",
+      success: true,
+      changeId: "change",
+      commitId: "commit",
+      bookmark: null,
+      error: null,
+    },
+  };
+  const current = { ...legacy, payload: { ...legacy.payload, outcome: "unchanged" } };
+  expect(CheckoutFetchRebaseResponseSchema.parse(legacy)).toEqual(legacy);
+  const oldResponse = CheckoutFetchRebaseResponseSchema.extend({
+    payload: CheckoutFetchRebaseResponseSchema.shape.payload.omit({ outcome: true }),
+  });
+  expect(oldResponse.parse(current)).toEqual(legacy);
+  for (const message of [legacy, current]) {
+    const envelope = { type: "session", message };
+    expect(validateWSOutboundMessage(envelope)).toEqual({ success: true, data: envelope });
+  }
+  const oldInfo = {
+    status: "server_info",
+    serverId: "host",
+    hostname: null,
+    version: null,
+    features: { checkoutJj: true },
+  };
+  const currentInfo = {
+    ...oldInfo,
+    features: { ...oldInfo.features, checkoutJjFetchRebase: true },
+  };
+  expect(ServerInfoStatusPayloadSchema.parse(oldInfo)).toEqual(oldInfo);
+  expect(ServerInfoStatusPayloadSchema.parse(currentInfo)).toEqual(currentInfo);
+  const oldInfoSchema = z.object({
+    status: z.literal("server_info"),
+    serverId: z.string(),
+    hostname: z.string().nullable(),
+    version: z.string().nullable(),
+    features: z.object({ checkoutJj: z.boolean().optional() }),
+  });
+  expect(oldInfoSchema.parse(currentInfo)).toEqual(oldInfo);
+});
+
+test("selected native PR command identities are optional across wire versions", () => {
+  const identity = { host: "forge.example", targetRepository: "upstream/project", number: 42 };
+  const merge = {
+    type: "checkout_pr_merge_request",
+    cwd: "/native",
+    mergeMethod: "squash",
+    requestId: "merge",
+  };
+  const auto = {
+    type: "checkout.forge.set_auto_merge.request",
+    cwd: "/native",
+    enabled: false,
+    requestId: "disable",
+  };
+  for (const request of [merge, auto]) {
+    const current = { ...request, expectedPullRequest: identity };
+    expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+    expect(SessionInboundMessageSchema.parse(current)).toEqual(current);
+  }
+  expect(
+    CheckoutPrMergeRequestSchema.omit({ expectedPullRequest: true }).parse({
+      ...merge,
+      expectedPullRequest: identity,
+    }),
+  ).toEqual(merge);
+  expect(
+    CheckoutForgeSetAutoMergeRequestSchema.omit({ expectedPullRequest: true }).parse({
+      ...auto,
+      expectedPullRequest: identity,
+    }),
+  ).toEqual(auto);
+});
+
+test("native integration retains optional captured heads and distinct outcomes in generated validation", () => {
+  const legacy = {
+    type: "checkout.jj.integrate_base.response",
+    payload: {
+      cwd: "/native",
+      requestId: "integration",
+      success: false,
+      changeId: null,
+      commitId: null,
+      bookmark: null,
+      error: { code: "NOT_ALLOWED", message: "Review native integration" },
+    },
+  };
+  expect(CheckoutIntegrateBaseResponseSchema.parse(legacy)).toEqual(legacy);
+  for (const outcome of ["integrated", "noop", "conflicts"]) {
+    const response = {
+      ...legacy,
+      payload: {
+        ...legacy.payload,
+        changeId: "selected",
+        commitId: "source",
+        baseCommitId: "base",
+        integrationCommitId: "merge",
+        outcome,
+      },
+    };
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+    const frame = { type: "session", message: response };
+    expect(validateWSOutboundMessage(frame)).toEqual({ success: true, data: frame });
+  }
+  expect(
+    ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "host",
+      hostname: null,
+      version: null,
+      features: { checkoutJjIntegrate: true },
+    }).features?.checkoutJjIntegrate,
+  ).toBe(true);
 });

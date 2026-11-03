@@ -20,7 +20,7 @@ import {
   type TimelineSubscription,
 } from "./connection/index.js";
 import { CreationClient } from "./creation/index.js";
-import type { CreationSnapshot } from "@getpaseo/protocol/messages";
+import type { CheckoutError, CreationSnapshot } from "@getpaseo/protocol/messages";
 import type { z } from "zod";
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { LocalSpeechModel } from "@getpaseo/protocol/speech/rpc-schemas";
@@ -33,6 +33,10 @@ import {
   AgentRefreshedStatusPayloadSchema,
   AgentResumedStatusPayloadSchema,
   CheckoutRenameBranchResponseSchema,
+  CheckoutNewChangeResponseSchema,
+  CheckoutDescribeChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   parseServerInfoStatusPayload,
   RenameTerminalResponseSchema,
   RestartRequestedStatusPayloadSchema,
@@ -70,6 +74,7 @@ import type {
   CheckoutPrCreateResponse,
   CheckoutPrMergeResponse,
   CheckoutPrMergeMethod,
+  CheckoutPrIdentity,
   CheckoutForgeSetAutoMergeResponse,
   CheckoutGithubSetAutoMergeResponse,
   CheckoutForgeGetCheckDetailsResponse,
@@ -563,6 +568,10 @@ type CheckoutPrStatusPayload = CheckoutPrStatusResponse["payload"];
 type PullRequestTimelinePayload = PullRequestTimelineResponse["payload"];
 type CheckoutSwitchBranchPayload = CheckoutSwitchBranchResponse["payload"];
 export type RenameBranchResult = z.infer<typeof CheckoutRenameBranchResponseSchema>["payload"];
+export type NewChangeResult = z.infer<typeof CheckoutNewChangeResponseSchema>["payload"];
+export type IntegrateBaseResult = z.infer<typeof CheckoutIntegrateBaseResponseSchema>["payload"];
+export type FetchRebaseResult = z.infer<typeof CheckoutFetchRebaseResponseSchema>["payload"];
+export type DescribeChangeResult = z.infer<typeof CheckoutDescribeChangeResponseSchema>["payload"];
 type StashSavePayload = StashSaveResponse["payload"];
 type StashPopPayload = StashPopResponse["payload"];
 type StashListPayload = StashListResponse["payload"];
@@ -961,6 +970,22 @@ export interface RenameBranchInput {
   branch: string;
   requestId?: string;
 }
+export interface NewChangeInput {
+  expectedChangeId?: string;
+  acknowledgeRewrites?: boolean;
+  cwd: string;
+  message?: string;
+  /** jj: exact revision the new change starts on (captured "new on…"). */
+  targetCommitId?: string;
+  requestId?: string;
+}
+export interface DescribeChangeInput {
+  expectedChangeId?: string;
+  acknowledgeRewrites?: boolean;
+  cwd: string;
+  message: string;
+  requestId?: string;
+}
 export interface RenameTerminalInput {
   terminalId: string;
   title: string;
@@ -1055,6 +1080,13 @@ type PluginCatalogResponseEntry =
 export type PluginCatalogEntry = Omit<PluginCatalogResponseEntry, "clientBundle"> & {
   clientBundle: string;
 };
+
+export class CheckoutOperationError extends Error {
+  constructor(readonly checkoutError: CheckoutError) {
+    super(checkoutError.message);
+    this.name = "CheckoutOperationError";
+  }
+}
 
 export class DaemonConnectionError extends Error {
   readonly serverId?: string;
@@ -4660,9 +4692,16 @@ export class DaemonClient {
 
   async checkoutCommit(
     cwd: string,
-    input: { message?: string; addAll?: boolean },
+    input: {
+      message?: string;
+      addAll?: boolean;
+      expectedChangeId?: string;
+      acknowledgeRewrites?: boolean;
+    },
     requestId?: string,
   ): Promise<CheckoutCommitPayload> {
+    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
@@ -4670,6 +4709,8 @@ export class DaemonClient {
         cwd,
         message: input.message,
         addAll: input.addAll,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
       },
       responseType: "checkout_commit_response",
     });
@@ -4787,9 +4828,15 @@ export class DaemonClient {
 
   async checkoutPrCreate(
     cwd: string,
-    input: { title?: string; body?: string; baseRef?: string },
+    input: { title?: string; body?: string; baseRef?: string; expectedChangeId?: string },
     requestId?: string,
   ): Promise<CheckoutPrCreatePayload> {
+    // COMPAT(checkoutJjPrCreate): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports native publication.
+    if (
+      input.expectedChangeId !== undefined &&
+      this.lastServerInfoMessage?.features?.checkoutJjPrCreate !== true
+    )
+      throw new Error("Update the host to create pull requests from jj workspaces.");
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
@@ -4798,21 +4845,39 @@ export class DaemonClient {
         title: input.title,
         body: input.body,
         baseRef: input.baseRef,
+        expectedChangeId: input.expectedChangeId,
       },
       responseType: "checkout_pr_create_response",
     });
   }
 
+  private requireNativePrMutationCapability(expected?: CheckoutPrIdentity | null): void {
+    // COMPAT(checkoutJjPrMutations): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports selected native PR mutations.
+    if (
+      expected !== undefined &&
+      this.lastServerInfoMessage?.features?.checkoutJjPrMutations !== true
+    )
+      throw new Error(
+        "Update the host to merge pull requests or manage auto-merge from jj workspaces.",
+      );
+    if (expected === null)
+      throw new Error(
+        "Dismiss this action and refresh PR status to capture its exact repository and number.",
+      );
+  }
+
   async checkoutPrMerge(
     cwd: string,
-    input: { method: CheckoutPrMergeMethod },
+    input: { method: CheckoutPrMergeMethod; expectedPullRequest?: CheckoutPrIdentity | null },
     requestId?: string,
   ): Promise<CheckoutPrMergePayload> {
+    this.requireNativePrMutationCapability(input.expectedPullRequest);
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "checkout_pr_merge_request",
         cwd,
+        expectedPullRequest: input.expectedPullRequest ?? undefined,
         mergeMethod: input.method,
       },
       responseType: "checkout_pr_merge_response",
@@ -4821,14 +4886,18 @@ export class DaemonClient {
 
   async checkoutForgeSetAutoMerge(
     cwd: string,
-    input: { enabled: true; method: CheckoutPrMergeMethod } | { enabled: false },
+    input: ({ enabled: true; method: CheckoutPrMergeMethod } | { enabled: false }) & {
+      expectedPullRequest?: CheckoutPrIdentity | null;
+    },
     requestId?: string,
   ): Promise<CheckoutForgeSetAutoMergePayload> {
+    this.requireNativePrMutationCapability(input.expectedPullRequest);
     return this.sendNamespacedCorrelatedSessionRequest<"checkout.forge.set_auto_merge.response">({
       requestId,
       message: {
         type: "checkout.forge.set_auto_merge.request",
         cwd,
+        expectedPullRequest: input.expectedPullRequest ?? undefined,
         enabled: input.enabled,
         ...(input.enabled ? { mergeMethod: input.method } : {}),
       },
@@ -4937,13 +5006,40 @@ export class DaemonClient {
     cwd: string,
     branch: string,
     requestId?: string,
+    jjIntent?: {
+      mode?: "new-on" | "resume";
+      wipChangeId?: string;
+      targetCommitId?: string;
+      message?: string;
+      expectedChangeId?: string;
+      acknowledgeRewrites?: boolean;
+    },
   ): Promise<CheckoutSwitchBranchPayload> {
+    // The checkpoint capability predates graph selection intents; require
+    // this slice's capability so older daemons cannot silently drop them.
+    if (
+      jjIntent &&
+      (jjIntent.mode !== undefined ||
+        jjIntent.wipChangeId !== undefined ||
+        jjIntent.targetCommitId !== undefined ||
+        jjIntent.expectedChangeId !== undefined ||
+        jjIntent.message !== undefined ||
+        jjIntent.acknowledgeRewrites !== undefined)
+    ) {
+      this.requireJjGraphSelectionCapability();
+    }
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "checkout_switch_branch_request",
         cwd,
         branch,
+        mode: jjIntent?.mode,
+        wipChangeId: jjIntent?.wipChangeId,
+        targetCommitId: jjIntent?.targetCommitId,
+        message: jjIntent?.message,
+        expectedChangeId: jjIntent?.expectedChangeId,
+        acknowledgeRewrites: jjIntent?.acknowledgeRewrites,
       },
       responseType: "checkout_switch_branch_response",
     });
@@ -4958,6 +5054,116 @@ export class DaemonClient {
         branch: input.branch,
       },
       responseType: "checkout.rename_branch.response",
+    });
+  }
+
+  private requireJjCheckpointCapability(): void {
+    // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
+    if (this.lastServerInfoMessage?.features?.checkoutJjRewriteApproval !== true)
+      throw new Error("Update the host to use structured jj rewrite approval.");
+    if (this.lastServerInfoMessage?.features?.checkoutJjCheckpoint !== true)
+      throw new Error("Update the host to use checkpointed jj change actions.");
+  }
+
+  private requireJjGraphSelectionCapability(): void {
+    this.requireJjCheckpointCapability();
+    if (this.lastServerInfoMessage?.features?.checkoutJjGraphSelections !== true)
+      throw new Error("Update the host to use captured jj graph selections.");
+  }
+
+  async newChange(input: NewChangeInput): Promise<NewChangeResult> {
+    if (input.targetCommitId !== undefined) this.requireJjGraphSelectionCapability();
+    else if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.new_change.request",
+        cwd: input.cwd,
+        message: input.message,
+        targetCommitId: input.targetCommitId,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.new_change.response",
+    });
+  }
+
+  async describeChange(input: DescribeChangeInput): Promise<DescribeChangeResult> {
+    if (input.expectedChangeId !== undefined || input.acknowledgeRewrites !== undefined)
+      this.requireJjCheckpointCapability();
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.describe_change.request",
+        cwd: input.cwd,
+        message: input.message,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.describe_change.response",
+    });
+  }
+
+  async integrateIntoBase(input: {
+    cwd: string;
+    baseRef: string;
+    expectedChangeId: string;
+    expectedCommitId?: string;
+    expectedBaseCommitId?: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<IntegrateBaseResult> {
+    this.requireJjCheckpointCapability();
+    if (this.lastServerInfoMessage?.features?.checkoutJjIntegrate !== true)
+      throw new Error("Update the host to integrate jj work into its base.");
+    const { requestId, ...message } = input;
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "checkout.jj.integrate_base.request", ...message },
+      responseType: "checkout.jj.integrate_base.response",
+    });
+  }
+
+  async fetchAndRebase(input: {
+    cwd: string;
+    expectedChangeId: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<FetchRebaseResult> {
+    this.requireJjCheckpointCapability();
+    if (this.lastServerInfoMessage?.features?.checkoutJjFetchRebase !== true)
+      throw new Error("Update the host to fetch all remotes and rebase jj work.");
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.jj.fetch_rebase.request",
+        cwd: input.cwd,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.jj.fetch_rebase.response",
+    });
+  }
+
+  async editChange(input: {
+    cwd: string;
+    changeId: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+    requestId?: string;
+  }): Promise<DescribeChangeResult> {
+    this.requireJjCheckpointCapability();
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "checkout.edit_change.request",
+        cwd: input.cwd,
+        changeId: input.changeId,
+        expectedChangeId: input.expectedChangeId,
+        acknowledgeRewrites: input.acknowledgeRewrites,
+      },
+      responseType: "checkout.edit_change.response",
     });
   }
 

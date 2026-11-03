@@ -70,6 +70,11 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       isPaseoOwnedWorktree: true,
       error: null,
       requestId,
+      vcs: snapshot.git.vcs,
+      changeId: snapshot.git.changeId ?? null,
+      jjDescription: snapshot.git.jjDescription,
+      jjSnapshotRefusedPaths: snapshot.git.jjSnapshotRefusedPaths,
+      defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
     };
   }
 
@@ -90,6 +95,11 @@ export function buildCheckoutStatusPayloadFromSnapshot({
     isPaseoOwnedWorktree: false,
     error: null,
     requestId,
+    vcs: snapshot.git.vcs,
+    changeId: snapshot.git.changeId ?? null,
+    jjDescription: snapshot.git.jjDescription,
+    jjSnapshotRefusedPaths: snapshot.git.jjSnapshotRefusedPaths,
+    defaultWorkspaceBase: snapshot.git.defaultWorkspaceBase,
   };
 }
 
@@ -108,7 +118,11 @@ export function buildCheckoutPrStatusPayloadFromSnapshot({
   const forge = snapshot.forge.forge;
   return {
     cwd,
-    status: normalizeCheckoutPrStatusPayload(snapshot.forge.pullRequest, forge),
+    status: normalizeCheckoutPrStatusPayload(
+      snapshot.forge.pullRequest,
+      forge,
+      snapshot.forge.repository,
+    ),
     githubFeaturesEnabled: snapshot.forge.featuresEnabled,
     authState: snapshot.forge.authState,
     ...(forge ? { forge } : {}),
@@ -125,12 +139,14 @@ export function buildCheckoutPrStatusPayloadFromSnapshot({
 export function normalizeCheckoutPrStatusPayload(
   status: WorkspaceGitRuntimeSnapshot["forge"]["pullRequest"],
   forge?: string,
+  repository?: WorkspaceGitRuntimeSnapshot["forge"]["repository"],
 ): CheckoutPrStatusPayloadStatus | null {
   if (!status) {
     return null;
   }
   const payload: CheckoutPrStatusWireStatus = {
     ...(forge ? { forge } : {}),
+    ...(repository ? { repository } : {}),
     number: status.number,
     url: status.url,
     title: status.title,

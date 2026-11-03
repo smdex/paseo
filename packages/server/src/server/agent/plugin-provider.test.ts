@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentStorage } from "./agent-storage.js";
 import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import { relative } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -1000,7 +999,7 @@ describe("PluginAgentClientRegistry", () => {
         }),
     });
     const agent = await manager.createAgent(
-      { provider: harness.registration.id, cwd: "/workspace" },
+      { provider: harness.registration.id, cwd: tmpdir() },
       undefined,
       { workspaceId: undefined },
     );
@@ -1131,7 +1130,7 @@ describe("PluginAgentClientRegistry", () => {
     });
     const external = { type: "http", url: "http://example.test/mcp" } as const;
     const agent = await manager.createAgent(
-      { provider: harness.registration.id, cwd: "/workspace", mcpServers: { external } },
+      { provider: harness.registration.id, cwd: tmpdir(), mcpServers: { external } },
       undefined,
       { workspaceId: undefined },
     );

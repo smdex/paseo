@@ -81,6 +81,7 @@ function createInput(
     behindOfOrigin: 0,
     shouldPromoteArchive: false,
     shipDefault: "pr",
+    isJj: false,
     runtime: {
       commit: {
         disabled: false,
@@ -152,6 +153,11 @@ function createInput(
         status: "idle",
         handler: () => undefined,
       },
+      "new-change": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
       "archive-workspace": {
         disabled: false,
         status: "idle",
@@ -177,6 +183,77 @@ describe("git-actions-policy", () => {
       "pull-and-push",
       "archive-workspace",
     ]);
+  });
+
+  it("offers Finish for a described empty native change without treating Git descriptions as dirty", () => {
+    expect(
+      buildGitActions(
+        createInput({ isJj: true, hasDescribedJjChange: true, hasUncommittedChanges: false }),
+      ).primary,
+    ).toMatchObject({ id: "commit", label: "Finish change" });
+    expect(
+      buildGitActions(
+        createInput({ isJj: false, hasDescribedJjChange: true, hasUncommittedChanges: false }),
+      ).primary,
+    ).toBeNull();
+  });
+
+  it("adds the new-change action on jj checkouts only", () => {
+    const gitActions = buildGitActions(createInput({ hasRemote: true }));
+    const jjActions = buildGitActions(createInput({ hasRemote: true, isJj: true }));
+
+    expect(gitActions.secondary.map((action) => action.id)).not.toContain("new-change");
+    expect(jjActions.secondary.map((action) => action.id)).toEqual([
+      "pull",
+      "push",
+      "merge-branch",
+      "new-change",
+      "archive-workspace",
+    ]);
+    expect(jjActions.secondary.at(-2)).toMatchObject({
+      id: "new-change",
+      label: "New change",
+      closeOnSelect: true,
+    });
+  });
+
+  it("offers native Create PR as a form action while Git creation keeps its progress in the menu", () => {
+    const base = {
+      hasRemote: true,
+      isOnBaseBranch: false,
+      aheadCount: 2,
+      shipDefault: "pr" as const,
+    };
+    const native = buildGitActions(createInput({ ...base, isJj: true }));
+    const git = buildGitActions(createInput(base));
+    expect(native.secondary.find((action) => action.id === "pr")).toMatchObject({
+      label: "Create PR",
+      closeOnSelect: true,
+    });
+    expect(git.secondary.find((action) => action.id === "pr")).toMatchObject({
+      label: "Create PR",
+      closeOnSelect: false,
+    });
+  });
+
+  it("exposes native integration with captured dirty snapshots and a derived base bookmark", () => {
+    const base = { hasRemote: true, isOnBaseBranch: false, aheadCount: 2 } as const;
+    const gitActions = buildGitActions(createInput({ ...base, shipDefault: "merge" }));
+    const jjActions = buildGitActions(
+      createInput({ ...base, shipDefault: "merge", isJj: true, isOnBaseBranch: true }),
+    );
+
+    expect(gitActions.primary).toMatchObject({ id: "merge-branch" });
+    expect(gitActions.secondary.map((action) => action.id)).toContain("merge-branch");
+    expect(jjActions.primary).toMatchObject({ id: "merge-branch", closeOnSelect: true });
+    expect(jjActions.secondary.map((action) => action.id)).toContain("merge-branch");
+    const dirtyNative = buildGitActions(
+      createInput({ ...base, isJj: true, hasUncommittedChanges: true }),
+    );
+    expect(
+      dirtyNative.secondary.find((action) => action.id === "merge-branch")?.unavailableMessage,
+    ).toBeUndefined();
+    expect(jjActions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
   });
 
   it("prioritizes pull when the branch is behind origin", () => {
@@ -1138,4 +1215,46 @@ describe("git-actions-policy", () => {
       "merge-pr-rebase",
     ]);
   });
+});
+
+it("offers Fetch on dirty jj with unknown or zero behind without promoting Sync", () => {
+  for (const behindOfOrigin of [null, 0, 3]) {
+    const actions = buildGitActions(
+      createInput({ isJj: true, hasRemote: true, hasUncommittedChanges: true, behindOfOrigin }),
+    );
+    expect(actions.primary?.id).toBe("commit");
+    expect(actions.secondary.find((action) => action.id === "pull")).toMatchObject({
+      label: "Fetch",
+      pendingLabel: "Fetching...",
+      successLabel: "Fetched",
+      unavailableMessage: undefined,
+    });
+    expect(actions.secondary.map((action) => action.id)).not.toContain("pull-and-push");
+  }
+});
+
+it("offers native published PR merge independently of local jj dirtiness or ahead counts", () => {
+  const actions = buildGitActions(
+    createInput({
+      isJj: true,
+      isOnBaseBranch: false,
+      hasRemote: true,
+      hasPullRequest: true,
+      pullRequestUrl: "https://github.com/upstream/project/pull/42",
+      pullRequestState: "open",
+      pullRequestMergeable: "MERGEABLE",
+      pullRequestGithub: githubStatus(),
+      hasUncommittedChanges: true,
+      aheadCount: 0,
+      aheadOfOrigin: 2,
+    }),
+  );
+  expect(actions.secondary.find((action) => action.id === "merge-pr-squash")).toMatchObject({
+    disabled: false,
+    closeOnSelect: true,
+  });
+  expect(actions.secondary.find((action) => action.id === "merge-branch")).toMatchObject({
+    unavailableMessage: i18n.t("workspace.git.actions.unavailable.mergeNothing"),
+  });
+  expect(actions.secondary.map((action) => action.id)).not.toContain("merge-from-base");
 });

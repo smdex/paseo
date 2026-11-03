@@ -1,3 +1,4 @@
+import { JjChangeControls } from "@/git/jj-change-controls";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { floatingActionsClearance } from "@/components/ui/floating-action-button";
 import { useState, useCallback, useMemo, type ReactElement, type ReactNode } from "react";
@@ -469,12 +470,18 @@ interface ChangesPullRequestLinkModel extends Pick<PrHint, "forge" | "number" | 
   onOpen: () => void;
 }
 
+const vcsOf = (status: { vcs?: "git" | "jj" | null } | undefined | null): "git" | "jj" | null =>
+  status?.vcs ?? null;
+
 interface ChangesRepositoryToolbarModel {
   branchName: string | null;
   cwd: string;
   gitActions: GitActions | null;
   pullRequest: ChangesPullRequestLinkModel | null;
   serverId: string;
+  vcs?: "git" | "jj" | null;
+  /** jj: change ID of the working-copy change (switch intent CAS pin). */
+  changeId?: string | null;
   workspaceId?: string | null;
 }
 
@@ -510,6 +517,9 @@ interface BuildChangesHeaderModelInput {
   pullRequest: PrHint | null;
   selectedDiffStat: { additions: number; deletions: number } | null;
   serverId: string;
+  vcs?: "git" | "jj" | null;
+  /** jj: change ID of the working-copy change (switch intent CAS pin). */
+  changeId?: string | null;
   workspaceId?: string | null;
 }
 
@@ -526,6 +536,8 @@ function buildChangesHeaderModel(input: BuildChangesHeaderModelInput): {
         ? { ...input.pullRequest, onOpen: input.onOpenPullRequest }
         : null,
       serverId: input.serverId,
+      vcs: input.vcs,
+      changeId: input.changeId,
       workspaceId: input.workspaceId,
     },
     comparison: {
@@ -652,6 +664,8 @@ function ChangesRepositoryToolbar({
           workspaceId={model.workspaceId ?? model.cwd}
           workspaceDirectory={model.cwd}
           isGitCheckout
+          vcs={model.vcs}
+          currentChangeId={model.changeId}
           testID="changes-branch-switcher"
         />
       </ChangesToolbarLeading>
@@ -1452,6 +1466,27 @@ function useDiffTabNavigation({
   };
 }
 
+function NativeCheckoutControls({
+  serverId,
+  cwd,
+  status,
+}: {
+  serverId: string;
+  cwd: string;
+  status: CheckoutStatusPayload | null;
+}) {
+  if (status?.vcs !== "jj") return null;
+  return (
+    <JjChangeControls
+      serverId={serverId}
+      cwd={cwd}
+      changeId={status.changeId}
+      description={status.jjDescription ?? ""}
+      refusedPaths={status.jjSnapshotRefusedPaths ?? []}
+    />
+  );
+}
+
 export function ChangesSurface({
   serverId,
   workspaceId,
@@ -1901,6 +1936,7 @@ export function ChangesSurface({
       wrapLines,
     ],
   );
+  const vcs = vcsOf(status);
   const changesHeaderModel = useMemo(
     () =>
       buildChangesHeaderModel({
@@ -1918,6 +1954,8 @@ export function ChangesSurface({
         pullRequest: selectPrHintFromStatus(pullRequestStatus, forge),
         selectedDiffStat,
         serverId,
+        vcs,
+        changeId: status?.changeId ?? null,
         workspaceId,
       }),
     [
@@ -1935,6 +1973,8 @@ export function ChangesSurface({
       pullRequestStatus,
       selectedDiffStat,
       serverId,
+      status,
+      vcs,
       toolbarMode,
       workspaceId,
     ],
@@ -1955,6 +1995,8 @@ export function ChangesSurface({
           sidebarSurface={presentation === "tree"}
         />
       ) : null}
+
+      <NativeCheckoutControls serverId={serverId} cwd={cwd} status={status} />
 
       {forgeSetupMessage ? (
         <View style={styles.forgeSetupCallout} testID="forge-setup-callout">

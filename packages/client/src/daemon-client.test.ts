@@ -8501,6 +8501,160 @@ test("closes before admission when a protected-capable daemon is reached in lega
   expect(JSON.parse(daemonReceived[0] as string)).toMatchObject({ type: "hello" });
 });
 
+test("checkpointed jj actions refuse unsupported hosts before sending intent", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-compat",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjGraphSelections: true } });
+  await connecting;
+  await expect(
+    client.describeChange({ cwd: "/native", message: "draft", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host");
+  await expect(client.newChange({ cwd: "/native", acknowledgeRewrites: true })).rejects.toThrow(
+    "Update the host",
+  );
+  await expect(client.checkoutCommit("/native", { expectedChangeId: "captured" })).rejects.toThrow(
+    "Update the host",
+  );
+  await expect(client.editChange({ cwd: "/native", changeId: "selected" })).rejects.toThrow(
+    "Update the host",
+  );
+  expect(mock.sent).toEqual([]);
+});
+
+test("jj P2 captured intents refuse a checkpoint-only daemon", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-p2-compat",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true } });
+  await connecting;
+  await expect(
+    client.checkoutSwitchBranch("/native", "main", "switch", {
+      mode: "new-on",
+      targetCommitId: "captured-commit",
+      expectedChangeId: "captured-change",
+    }),
+  ).rejects.toThrow("Update the host");
+  await expect(
+    client.newChange({ cwd: "/native", targetCommitId: "captured-commit" }),
+  ).rejects.toThrow("Update the host");
+  expect(mock.sent).toEqual([]);
+});
+
+test("jj P2 bookmark intent preserves the legacy requestId position and exact capture", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-p2-wire",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({
+    features: {
+      checkoutJjGraphSelections: true,
+      checkoutJjCheckpoint: true,
+      checkoutJjRewriteApproval: true,
+    },
+  });
+  await connecting;
+  const result = client.checkoutSwitchBranch("/native/sub", "main", "captured-switch", {
+    mode: "new-on",
+    targetCommitId: "exact-commit",
+    expectedChangeId: "old-change",
+    acknowledgeRewrites: true,
+  });
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout_switch_branch_request",
+    cwd: "/native/sub",
+    branch: "main",
+    requestId: "captured-switch",
+    mode: "new-on",
+    targetCommitId: "exact-commit",
+    expectedChangeId: "old-change",
+    acknowledgeRewrites: true,
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "checkout_switch_branch_response",
+      payload: {
+        cwd: "/native/sub",
+        branch: "main",
+        success: true,
+        error: null,
+        requestId: "captured-switch",
+      },
+    }),
+  );
+  expect((await result).success).toBe(true);
+});
+
+test.each([
+  { code: "UNKNOWN", message: "Immutable change: select a mutable change." },
+  {
+    code: "NOT_ALLOWED",
+    reason: "rewrite_approval_required",
+    message: "Review descendants before continuing.",
+  },
+])("checkpointed jj Edit retains the structured refusal %j", async (error) => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-edit",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({
+    features: {
+      ownedSubscriptions: true,
+      checkoutJjCheckpoint: true,
+      checkoutJjRewriteApproval: true,
+    },
+  });
+  await connecting;
+  const result = client.editChange({
+    cwd: "/native/sub",
+    changeId: "selected",
+    expectedChangeId: "captured",
+    acknowledgeRewrites: true,
+    requestId: "native-edit",
+  });
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout.edit_change.request",
+    cwd: "/native/sub",
+    changeId: "selected",
+    expectedChangeId: "captured",
+    acknowledgeRewrites: true,
+    requestId: "native-edit",
+  });
+  const payload = {
+    cwd: "/native/sub",
+    success: false,
+    changeId: null,
+    commitId: null,
+    bookmark: null,
+    error,
+    requestId: "native-edit",
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "checkout.edit_change.response", payload }));
+  expect(await result).toEqual(payload);
+});
+
 test.each([
   { chunked: false, transportChunked: false },
   { chunked: true, transportChunked: false },
@@ -8926,3 +9080,321 @@ test("routed channels inherit an origin without drain support", async () => {
   expect(route.supportsDrain).toBe(false);
   route.close();
 });
+
+test("native PR creation refuses a host without the publication capability", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "native-pr",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.checkoutPrCreate("/native", { title: "Kept title", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host");
+  expect(mock.sent).toEqual([]);
+});
+
+test("native PR creation sends the captured change and retains the forge result", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "native-pr-capable",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjPrCreate: true } });
+  await connecting;
+  const creating = client.checkoutPrCreate(
+    "/native",
+    { title: "Kept title", body: "Kept body", baseRef: "main", expectedChangeId: "captured" },
+    "create-native",
+  );
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "checkout_pr_create_request",
+    cwd: "/native",
+    title: "Kept title",
+    body: "Kept body",
+    baseRef: "main",
+    expectedChangeId: "captured",
+    requestId: "create-native",
+  });
+  const payload = {
+    cwd: "/native",
+    requestId: "create-native",
+    error: null,
+    number: 12,
+    url: "https://github.com/acme/native/pull/12",
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "checkout_pr_create_response", payload }));
+  expect(await creating).toEqual(payload);
+});
+
+test("jj fetch-and-rebase refuses a host without its capability before sending", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-fetch-rebase",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.fetchAndRebase({ cwd: "/native", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host to fetch all remotes and rebase jj work.");
+  expect(mock.sent).toEqual([]);
+});
+
+test.each(["rebased", "unchanged", "conflicts"] as const)(
+  "jj fetch-and-rebase preserves its captured intent and %s outcome",
+  async (outcome) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "jj-fetch-rebase",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({
+      features: {
+        checkoutJjCheckpoint: true,
+        checkoutJjRewriteApproval: true,
+        checkoutJjFetchRebase: true,
+      },
+    });
+    await connecting;
+    const result = client.fetchAndRebase({
+      cwd: "/native",
+      expectedChangeId: "captured",
+      acknowledgeRewrites: true,
+      requestId: "fetch-rebase",
+    });
+    expect(parseSentFrame(mock.sent[0])).toEqual({
+      type: "checkout.jj.fetch_rebase.request",
+      cwd: "/native",
+      expectedChangeId: "captured",
+      acknowledgeRewrites: true,
+      requestId: "fetch-rebase",
+    });
+    const payload = {
+      cwd: "/native",
+      success: true,
+      changeId: "captured",
+      commitId: "rebased-commit",
+      bookmark: "feature",
+      outcome,
+      error: null,
+      requestId: "fetch-rebase",
+    };
+    mock.triggerMessage(wrapSessionMessage({ type: "checkout.jj.fetch_rebase.response", payload }));
+    expect(await result).toEqual(payload);
+  },
+);
+
+test.each(["merge", "enable", "disable"] as const)(
+  "native PR %s refuses hosts without selected-PR mutation support",
+  async (operation) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-mutations",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen();
+    await connecting;
+    const expectedPullRequest = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      number: 42,
+    };
+    const result =
+      operation === "merge"
+        ? client.checkoutPrMerge("/native", { method: "squash", expectedPullRequest })
+        : client.checkoutForgeSetAutoMerge(
+            "/native",
+            operation === "enable"
+              ? { enabled: true, method: "squash", expectedPullRequest }
+              : { enabled: false, expectedPullRequest },
+          );
+    await expect(result).rejects.toThrow("Update the host");
+    expect(mock.sent).toEqual([]);
+  },
+);
+
+test.each(["merge", "enable", "disable"] as const)(
+  "native selected PR %s sends the captured identity and retains provider result",
+  async (operation) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-command",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({ features: { checkoutJjPrMutations: true } });
+    await connecting;
+    const expectedPullRequest = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      number: 42,
+    };
+    const result =
+      operation === "merge"
+        ? client.checkoutPrMerge(
+            "/native",
+            { method: "squash", expectedPullRequest },
+            "selected-command",
+          )
+        : client.checkoutForgeSetAutoMerge(
+            "/native",
+            operation === "enable"
+              ? { enabled: true, method: "squash", expectedPullRequest }
+              : { enabled: false, expectedPullRequest },
+            "selected-command",
+          );
+    expect(parseSentFrame(mock.sent[0])).toEqual(
+      operation === "merge"
+        ? {
+            type: "checkout_pr_merge_request",
+            cwd: "/native",
+            mergeMethod: "squash",
+            expectedPullRequest,
+            requestId: "selected-command",
+          }
+        : {
+            type: "checkout.forge.set_auto_merge.request",
+            cwd: "/native",
+            enabled: operation === "enable",
+            ...(operation === "enable" ? { mergeMethod: "squash" } : {}),
+            expectedPullRequest,
+            requestId: "selected-command",
+          },
+    );
+    const payload = {
+      cwd: "/native",
+      requestId: "selected-command",
+      success: true,
+      error: null,
+      ...(operation === "merge" ? {} : { enabled: operation === "enable" }),
+    };
+    mock.triggerMessage(
+      wrapSessionMessage(
+        operation === "merge"
+          ? { type: "checkout_pr_merge_response", payload }
+          : { type: "checkout.forge.set_auto_merge.response", payload },
+      ),
+    );
+    expect(await result).toEqual(payload);
+  },
+);
+
+test.each([false, true])(
+  "native PR with missing identity checks host capability first: %s",
+  async (capable) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "native-pr-missing-identity",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({ features: { checkoutJjPrMutations: capable } });
+    await connecting;
+    await expect(
+      client.checkoutPrMerge("/native", { method: "squash", expectedPullRequest: null }),
+    ).rejects.toThrow(capable ? "exact repository and number" : "Update the host");
+    expect(mock.sent).toEqual([]);
+  },
+);
+
+test("native integration refuses hosts without its capability before sending", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "jj-integrate",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { checkoutJjCheckpoint: true, checkoutJjRewriteApproval: true } });
+  await connecting;
+  await expect(
+    client.integrateIntoBase({ cwd: "/native", baseRef: "main", expectedChangeId: "captured" }),
+  ).rejects.toThrow("Update the host to integrate jj work into its base.");
+  expect(mock.sent).toEqual([]);
+});
+
+test.each(["integrated", "noop", "conflicts"] as const)(
+  "native integration correlates captured source/base commits and %s outcome",
+  async (outcome) => {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "jj-integrate",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+    });
+    clients.push(client);
+    const connecting = client.connect();
+    mock.triggerOpen({
+      features: {
+        checkoutJjCheckpoint: true,
+        checkoutJjRewriteApproval: true,
+        checkoutJjIntegrate: true,
+      },
+    });
+    await connecting;
+    const input = {
+      cwd: "/native",
+      baseRef: "main",
+      expectedChangeId: "captured",
+      expectedCommitId: "source-commit",
+      expectedBaseCommitId: "base-commit",
+      acknowledgeRewrites: true,
+      requestId: "integrate",
+    };
+    const result = client.integrateIntoBase(input);
+    expect(parseSentFrame(mock.sent[0])).toEqual({
+      type: "checkout.jj.integrate_base.request",
+      ...input,
+    });
+    const payload = {
+      cwd: "/native",
+      requestId: "integrate",
+      success: outcome !== "conflicts",
+      changeId: "captured",
+      commitId: "source-commit",
+      bookmark: "feature",
+      baseCommitId: "integrated-base",
+      integrationCommitId: "retained-merge",
+      outcome,
+      error:
+        outcome === "conflicts"
+          ? { code: "MERGE_CONFLICT", message: "Resolve retained-merge on the host" }
+          : null,
+    };
+    mock.triggerMessage(
+      wrapSessionMessage({ type: "checkout.jj.integrate_base.response", payload }),
+    );
+    expect(await result).toEqual(payload);
+  },
+);
