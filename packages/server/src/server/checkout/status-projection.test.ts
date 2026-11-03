@@ -4,6 +4,7 @@ import { CheckoutPrStatusSchema } from "@getpaseo/protocol/messages";
 import type { WorkspaceGitRuntimeSnapshot } from "../workspace-git-service.js";
 import {
   buildCheckoutPrStatusPayloadFromSnapshot,
+  buildCheckoutStatusPayloadFromSnapshot,
   normalizeCheckoutPrStatusPayload,
 } from "./status-projection.js";
 
@@ -367,4 +368,90 @@ describe("checkout status projection", () => {
       ciStatus: "success",
     });
   });
+});
+
+describe("checkout status projection: vcs/changeId propagation", () => {
+  const forge = {
+    featuresEnabled: false,
+    authState: "no_remote" as const,
+    pullRequest: null,
+    error: null,
+  };
+
+  function snapshotWith(
+    git: Partial<WorkspaceGitRuntimeSnapshot["git"]>,
+  ): WorkspaceGitRuntimeSnapshot {
+    return {
+      cwd: "/repo",
+      git: {
+        isGit: true,
+        repoRoot: "/repo",
+        mainRepoRoot: "/repo",
+        currentBranch: "feature",
+        remoteUrl: null,
+        isPaseoOwnedWorktree: false,
+        isDirty: false,
+        baseRef: "main",
+        aheadBehind: null,
+        upstreamRef: null,
+        aheadOfOrigin: null,
+        behindOfOrigin: null,
+        hasRemote: false,
+        diffStat: null,
+        ...git,
+      },
+      forge,
+    };
+  }
+
+  test("carries vcs and changeId onto the wire payload for jj snapshots", () => {
+    const payload = buildCheckoutStatusPayloadFromSnapshot({
+      cwd: "/repo",
+      requestId: "r1",
+      snapshot: snapshotWith({
+        vcs: "jj",
+        changeId: "xyz123",
+        defaultWorkspaceBase: { refName: "a".repeat(40), displayName: "main" },
+      }),
+    });
+    expect(payload).toMatchObject({
+      isGit: true,
+      vcs: "jj",
+      changeId: "xyz123",
+      defaultWorkspaceBase: { refName: "a".repeat(40), displayName: "main" },
+    });
+  });
+
+  test("omits vcs and nulls changeId for git snapshots (old clients see the old shape)", () => {
+    const payload = buildCheckoutStatusPayloadFromSnapshot({
+      cwd: "/repo",
+      requestId: "r2",
+      snapshot: snapshotWith({ vcs: undefined, changeId: null }),
+    });
+    expect(payload).toMatchObject({ isGit: true, vcs: undefined, changeId: null });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain('"vcs":"jj"');
+  });
+});
+
+test("projects the exact native target identity without deriving it from the PR URL or display casing", () => {
+  const target = { host: "forge.example", targetRepository: "UPSTREAM/Project" };
+  const status = {
+    number: 42,
+    url: "https://forge.example/upstream/project/pull/42",
+    repoOwner: "upstream",
+    repoName: "project",
+    title: "Published",
+    state: "open",
+    baseRefName: "main",
+    headRefName: "feature",
+    isMerged: false,
+  };
+  const payload = normalizeCheckoutPrStatusPayload(status, "github", target);
+  expect(payload).toMatchObject({ number: 42, repository: target });
+  expect(CheckoutPrStatusSchema.parse(payload)).toEqual(payload);
+  const legacy = CheckoutPrStatusSchema.omit({ repository: true });
+  expect(legacy.parse(payload)).toEqual(
+    legacy.parse(normalizeCheckoutPrStatusPayload(status, "github")),
+  );
 });

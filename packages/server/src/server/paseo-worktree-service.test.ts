@@ -1,5 +1,15 @@
+import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  watch,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -19,10 +29,25 @@ import {
   createPaseoWorktree,
   type CreatePaseoWorktreeDeps,
 } from "./paseo-worktree-service.js";
-import { readPaseoWorktreeMetadata } from "../utils/worktree-metadata.js";
+import { archiveByScope, type ArchiveDependencies } from "./workspace-archive-service.js";
+import { createWorkspaceRecoveryService } from "./session/workspace-recovery/workspace-recovery-service.js";
+import { jjCommit, jjPush } from "../utils/checkout-jj.js";
+import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
+import {
+  readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
+  writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
+} from "../utils/worktree-metadata.js";
 import { createWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../utils/path.js";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import {
+  getJjPaseoWorktreesRoot,
+  createJjWorktree,
+  listJjWorkspaces,
+  jjRevisionResolves,
+} from "../utils/worktree-jj.js";
 import { deriveProjectKey } from "./project-key.js";
 
 const cleanupPaths: string[] = [];
@@ -1112,6 +1137,13 @@ function createDeps(options?: {
       projects.set(project.projectId, project);
       return project;
     },
+    update: async (projectId, updater) => {
+      const project = projects.get(projectId);
+      if (!project) return null;
+      const updated = updater(project);
+      projects.set(projectId, updated);
+      return updated;
+    },
     upsert: async (project) => {
       projects.set(project.projectId, project);
     },
@@ -1395,3 +1427,886 @@ function createGitHubPrRemoteRepo(): { tempDir: string; repoDir: string } {
   execFileSync("git", ["fetch", "origin"], { cwd: repoDir, stdio: "pipe" });
   return { tempDir, repoDir };
 }
+
+test.skipIf(!isJjAvailable())(
+  "jj provisioning failure forgets the created workspace before removing disk and retains its bookmark",
+  async () => {
+    const fixture = createScratchJjRepo({ files: { "README.md": "hello\n" } });
+    cleanupPaths.push(fixture.dir);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const deps = createDeps();
+    const retained: string[] = [];
+    deps.logger = {
+      warn: (info: { retainedBookmark: string }) => {
+        retained.push(info.retainedBookmark);
+      },
+    };
+    deps.workspaceGitService.resolveRepoRoot = async () => fixture.repoDir;
+    deps.workspaceProvisioning = {
+      createWorkspaceForWorktree: async () => {
+        throw new Error("provisioning failed");
+      },
+    };
+    const worktreesRoot = path.join(fixture.dir, "worktrees");
+    await expect(
+      createPaseoWorktree(
+        {
+          cwd: fixture.repoDir,
+          worktreeSlug: "failed-provision",
+          branchName: "feature-failed",
+          runSetup: false,
+          worktreesRoot,
+        },
+        deps,
+      ),
+    ).rejects.toThrow("provisioning failed");
+    expect((await listJjWorkspaces(fixture.repoDir)).map((entry) => entry.name)).toEqual([
+      "default",
+    ]);
+    expect(await jjRevisionResolves(fixture.repoDir, "feature-failed")).toBe(true);
+    expect(retained).toEqual(["feature-failed"]);
+    expect(
+      existsSync(
+        path.join(
+          await getJjPaseoWorktreesRoot(fixture.repoDir, { worktreesRoot }),
+          "failed-provision",
+        ),
+      ),
+    ).toBe(false);
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "opens a native PR with its head bookmark when locally unclaimed",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    const remote = path.join(h.fixture.dir, "remote.git");
+    execFileSync("git", ["init", "--bare", "-q", remote]);
+    expect(h.fixture.jj(["git", "remote", "add", "origin", remote]).status).toBe(0);
+    expect(h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "main"]).status).toBe(
+      0,
+    );
+    const publisher = path.join(h.fixture.dir, "publisher");
+    expect(h.fixture.jj(["git", "clone", "--no-colocate", remote, publisher]).status).toBe(0);
+    expect(h.fixture.jj(["new", "main@origin"], publisher).status).toBe(0);
+    writeFileSync(path.join(publisher, "pr.txt"), "the selected PR\n");
+    expect(h.fixture.jj(["commit", "-m", "PR work"], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "create", "Feature/PR_7", "-r", "@-"], publisher).status).toBe(
+      0,
+    );
+    expect(
+      h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "Feature/PR_7"], publisher)
+        .status,
+    ).toBe(0);
+    const pullRequestHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "Feature/PR_7", "-T", "commit_id"], publisher)
+      .stdout.trim();
+    expect(h.fixture.jj(["bookmark", "create", "keep-me", "-r", "main"]).status).toBe(0);
+    const keepMeHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "keep-me", "-T", "commit_id"])
+      .stdout.trim();
+    const base = h.fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    const sourceHead = h.fixture
+      .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+      .stdout.trim();
+    const repository = {
+      host: "github.com",
+      targetRepository: "acme/repo",
+      sourceRepository: "acme/repo",
+      headRef: "main",
+      headSha: base,
+      remoteHeadSha: base,
+    };
+    let lookups = 0;
+    h.deps.github.getPullRequestCheckoutTarget = async (input) => {
+      expect(input.repository).toEqual(repository);
+      lookups++;
+      return {
+        number: input.number,
+        baseRefName: "main",
+        headRefName: "Feature/PR_7",
+        headOwnerLogin: "acme",
+        headRepositorySshUrl: null,
+        headRepositoryUrl: null,
+        isCrossRepository: false,
+      };
+    };
+    h.deps.workspaceGitService.resolveForge = async () => ({
+      forge: "github",
+      host: "github.com",
+      service: h.deps.github,
+      repository,
+    });
+    const input = {
+      cwd: h.fixture.repoDir,
+      projectId: "project",
+      worktreeSlug: "review-seven",
+      refName: "stale-head-from-picker",
+      checkoutSource: { kind: "change_request" as const, forge: "github", number: 7 },
+      runSetup: false,
+      paseoHome: h.fixture.dir,
+    };
+    const resolveTarget = h.deps.github.getPullRequestCheckoutTarget;
+    h.deps.github.getPullRequestCheckoutTarget = async () => {
+      throw new Error("Forge lookup unavailable");
+    };
+    await expect(createPaseoWorktree(input, h.deps)).rejects.toMatchObject({
+      code: "workspace_source_unavailable",
+      message: expect.stringContaining("Forge lookup unavailable"),
+    });
+    expect((await listJjWorkspaces(h.fixture.repoDir)).map((workspace) => workspace.name)).toEqual([
+      "default",
+    ]);
+    expect(h.deps.workspaces.size).toBe(0);
+    h.deps.github.getPullRequestCheckoutTarget = async ({ number }) => ({
+      number,
+      baseRefName: "main",
+      headRefName: "missing-head",
+      headOwnerLogin: "acme",
+      headRepositorySshUrl: null,
+      headRepositoryUrl: null,
+      isCrossRepository: false,
+    });
+    await expect(createPaseoWorktree(input, h.deps)).rejects.toMatchObject({
+      code: "workspace_source_unavailable",
+      message: expect.stringContaining("missing-head"),
+    });
+    expect((await listJjWorkspaces(h.fixture.repoDir)).map((workspace) => workspace.name)).toEqual([
+      "default",
+    ]);
+    expect(h.deps.workspaces.size).toBe(0);
+    h.deps.github.getPullRequestCheckoutTarget = resolveTarget;
+    const result = await createPaseoWorktree(input, h.deps);
+    expect(lookups).toBe(1);
+    expect(readFileSync(path.join(result.workspace.cwd, "pr.txt"), "utf8")).toBe(
+      "the selected PR\n",
+    );
+    expect(result.workspace.cwd).toBe(path.join(h.fixture.dir, "repo-review-seven"));
+    expect(result.worktree.comparisonBaseRef).toBe(base);
+    expect(result.worktree.branchName).toBe("Feature/PR_7");
+    expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+      sourceHead,
+    );
+    expect(await readPaseoWorktreeMetadata(result.workspace.cwd)).toMatchObject({
+      baseRef: base,
+      jjBookmark: result.worktree.branchName,
+      changeRequestLookupTarget: {
+        headRef: "Feature/PR_7",
+        changeRequestNumber: 7,
+        localBranchName: result.worktree.branchName,
+      },
+    });
+    const { readJjCheckpoint } = await import("../utils/jj-checkpoint.js");
+    expect((await readJjCheckpoint(result.workspace.cwd, h.fixture.dir))?.publication).toEqual({
+      remoteName: "origin",
+      remoteUrl: remote,
+      localBookmark: result.worktree.branchName,
+      remoteBookmark: "Feature/PR_7",
+      sourceRepository: "acme/repo",
+      targetRepository: "acme/repo",
+    });
+
+    const publishContext = { paseoHome: h.fixture.dir };
+    const remoteHead = () =>
+      execFileSync("git", ["ls-remote", remote, "refs/heads/Feature/PR_7"], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\t")[0];
+    const localHead = () =>
+      h.fixture
+        .jj(["log", "--no-graph", "-r", 'bookmarks(exact:"Feature/PR_7")', "-T", "commit_id"])
+        .stdout.trim();
+    expect(remoteHead()).toBe(pullRequestHead);
+    writeFileSync(path.join(result.workspace.cwd, "pr.txt"), "first pushed update\n");
+    const firstUpdate = await jjCommit(
+      result.workspace.cwd,
+      { message: "First PR update" },
+      publishContext,
+    );
+    await jjPush(result.workspace.cwd, publishContext);
+    expect(remoteHead()).toBe(localHead());
+    expect(localHead()).not.toBe(pullRequestHead);
+
+    writeFileSync(path.join(result.workspace.cwd, "pr.txt"), "second pushed update\n");
+    await jjCommit(result.workspace.cwd, { message: "Second PR update" }, publishContext);
+    await jjPush(result.workspace.cwd, publishContext);
+    expect(remoteHead()).toBe(localHead());
+    expect(localHead()).not.toBe(firstUpdate.commitId);
+    expect(
+      h.fixture.jj(["log", "--no-graph", "-r", "keep-me", "-T", "commit_id"]).stdout.trim(),
+    ).toBe(keepMeHead);
+    expect(h.fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim()).toBe(
+      base,
+    );
+    expect(
+      execFileSync("git", ["ls-remote", remote, "refs/heads/main"], { encoding: "utf8" })
+        .trim()
+        .split("\t")[0],
+    ).toBe(base);
+
+    const publishedHead = localHead();
+    const collision = await createPaseoWorktree({ ...input, worktreeSlug: "review-eight" }, h.deps);
+    expect(collision.worktree.branchName).toBe("review-eight");
+    expect(collision.worktree.branchName).not.toBe("Feature/PR_7");
+    expect(
+      h.fixture
+        .jj(["log", "--no-graph", "-r", 'bookmarks(exact:"Feature/PR_7")', "-T", "commit_id"])
+        .stdout.trim(),
+    ).toBe(publishedHead);
+    await expect(jjPush(collision.workspace.cwd, publishContext)).rejects.toThrow(
+      "saved publication mapping",
+    );
+  },
+);
+
+test.skipIf(!isJjAvailable() || isPlatform("win32"))(
+  "opens a fork PR without Git discovery and preserves a bookmarkless source's forge context",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    execFileSync("git", ["init", "-q", h.fixture.dir]);
+    const origin = path.join(h.fixture.dir, "origin.git");
+    const fork = path.join(h.fixture.dir, "fork.git");
+
+    execFileSync("git", ["init", "--bare", "-q", origin]);
+    expect(h.fixture.jj(["git", "remote", "add", "origin", origin]).status).toBe(0);
+    expect(h.fixture.jj(["git", "push", "--remote", "origin", "--bookmark", "main"]).status).toBe(
+      0,
+    );
+    execFileSync("git", ["clone", "--bare", "--quiet", origin, fork]);
+    const publisher = path.join(h.fixture.dir, "publisher");
+    expect(h.fixture.jj(["git", "clone", "--no-colocate", origin, publisher]).status).toBe(0);
+    expect(h.fixture.jj(["new", "main@origin"], publisher).status).toBe(0);
+    writeFileSync(path.join(publisher, "fork-only.txt"), "intended fork work\n");
+    expect(h.fixture.jj(["commit", "-m", "fork PR"], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "create", "review/PR_7", "-r", "@-"], publisher).status).toBe(
+      0,
+    );
+    expect(h.fixture.jj(["git", "remote", "add", "fork", fork], publisher).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "track", "review/PR_7@fork"], publisher).status).toBe(0);
+    expect(
+      h.fixture.jj(["git", "push", "--remote", "fork", "--bookmark", "review/PR_7"], publisher)
+        .status,
+    ).toBe(0);
+    for (const remote of [origin, fork])
+      execFileSync("git", ["--git-dir", remote, "update-server-info"]);
+    const server = createServer((request, response) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      const prefix = pathname.startsWith("/acme/repo.git/")
+        ? "/acme/repo.git"
+        : "/contributor/fork.git";
+      try {
+        response.end(
+          readFileSync(
+            path.join(prefix === "/acme/repo.git" ? origin : fork, pathname.slice(prefix.length)),
+          ),
+        );
+      } catch {
+        response.writeHead(404).end();
+      }
+    });
+    server.unref();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected HTTP fixture address");
+    const originUrl = `http://127.0.0.1:${address.port}/acme/repo.git`;
+    const forkUrl = `http://127.0.0.1:${address.port}/contributor/fork.git`;
+    const forkSshUrl = "git@github.com:contributor/fork.git";
+    execFileSync("git", [
+      "--git-dir",
+      path.join(h.fixture.repoDir, ".jj/repo/store/git"),
+      "config",
+      `url.${forkUrl}.insteadOf`,
+      forkSshUrl,
+    ]);
+    expect(h.fixture.jj(["git", "remote", "set-url", "origin", originUrl]).status).toBe(0);
+    expect(h.fixture.jj(["bookmark", "forget", "main"]).status).toBe(0);
+    const { getJjForgeRepositoryContext } = await import("../utils/checkout-jj.js");
+    const before = await getJjForgeRepositoryContext(h.fixture.repoDir, {
+      paseoHome: h.fixture.dir,
+    });
+    expect(before.headRef).toBeNull();
+    const head = h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim();
+    const userRemote = path.join(h.fixture.dir, "user-remote.git");
+    h.deps.github.getPullRequestCheckoutTarget = async ({ number, repository }) => {
+      expect(repository).toEqual(before);
+      return {
+        number,
+        baseRefName: "main",
+        headRefName: "review/PR_7",
+        headOwnerLogin: "contributor",
+        headRepositorySshUrl: forkSshUrl,
+        headRepositoryUrl: forkUrl,
+        isCrossRepository: true,
+      };
+    };
+    h.deps.workspaceGitService.resolveForge = async (cwd) => ({
+      forge: "github",
+      host: "github.com",
+      service: h.deps.github,
+      repository: await getJjForgeRepositoryContext(cwd, { paseoHome: h.fixture.dir }),
+    });
+    const bin = path.join(h.fixture.dir, "guard-bin");
+    mkdirSync(bin);
+    const calls = path.join(h.fixture.dir, "git-calls");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      path.join(bin, "git"),
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realGit}' "$@"\n`,
+    );
+    chmodSync(path.join(bin, "git"), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath}`;
+    try {
+      const result = await createPaseoWorktree(
+        {
+          cwd: h.fixture.repoDir,
+          projectId: "project",
+          worktreeSlug: "fork-review",
+          action: "checkout",
+          checkoutSource: { kind: "change_request", forge: "github", number: 7 },
+          runSetup: false,
+          paseoHome: h.fixture.dir,
+        },
+        h.deps,
+      );
+      expect(readFileSync(path.join(result.workspace.cwd, "fork-only.txt"), "utf8")).toBe(
+        "intended fork work\n",
+      );
+      expect(result.workspace.untrustedSource).toEqual({
+        kind: "change_request",
+        forge: "github",
+        number: 7,
+        headRepository: "contributor/fork",
+      });
+      expect(
+        await getJjForgeRepositoryContext(h.fixture.repoDir, { paseoHome: h.fixture.dir }),
+      ).toEqual(before);
+      expect(
+        await getJjForgeRepositoryContext(result.workspace.cwd, { paseoHome: h.fixture.dir }),
+      ).toMatchObject({
+        targetRepository: "acme/repo",
+        sourceRepository: "contributor/fork",
+        headRef: "review/PR_7",
+        remoteUrl: forkUrl,
+      });
+      expect(h.fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"]).stdout.trim()).toBe(
+        head,
+      );
+      const transportCalls = readFileSync(calls, "utf8").trim().split("\n");
+      expect(transportCalls).toHaveLength(2);
+      expect(
+        transportCalls.every((call) =>
+          call.includes(`--git-dir ${path.join(h.fixture.repoDir, ".jj/repo/store/git")} fetch `),
+        ),
+      ).toBe(true);
+      const { readJjCheckpoint } = await import("../utils/jj-checkpoint.js");
+      expect((await readJjCheckpoint(h.fixture.repoDir, h.fixture.dir))?.forgeRemote).toEqual({
+        remoteName: "origin",
+        remoteUrl: originUrl,
+      });
+      expect(h.fixture.jj(["git", "remote", "set-url", "origin", userRemote]).status).toBe(0);
+      await expect(
+        getJjForgeRepositoryContext(h.fixture.repoDir, { paseoHome: h.fixture.dir }),
+      ).rejects.toThrow("unambiguous");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        }),
+      );
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  },
+);
+
+interface JjLifecycleTestFixture {
+  fixture: ReturnType<typeof createScratchJjRepo>;
+  deps: TestDeps;
+  worktreesRoot: string;
+  archiveDeps: ArchiveDependencies;
+  recovery: ReturnType<typeof createWorkspaceRecoveryService>;
+  create: (
+    branchName: string,
+    runSetup?: boolean,
+  ) => Promise<Awaited<ReturnType<typeof createPaseoWorktree>>>;
+}
+
+function jjLifecycleTestFixture(colocate: boolean): JjLifecycleTestFixture {
+  const fixture = createScratchJjRepo({ colocate, files: { "base.txt": "base\n" } });
+  cleanupPaths.push(fixture.dir);
+  fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+  const deps = createDeps();
+  const project = createPersistedProjectRecordForTest({
+    projectId: "project",
+    rootPath: fixture.repoDir,
+    displayName: "project",
+  });
+  deps.projects.set(project.projectId, project);
+  deps.workspaceGitService.resolveRepoRoot = async () => fixture.repoDir;
+  deps.workspaceGitService.getCheckout = async (cwd) => ({
+    cwd,
+    isGit: true,
+    currentBranch: null,
+    remoteUrl: null,
+    worktreeRoot: cwd,
+    mainRepoRoot: cwd === fixture.repoDir ? null : fixture.repoDir,
+    isPaseoOwnedWorktree: cwd !== fixture.repoDir,
+  });
+  deps.workspaceGitService.getSnapshot = async () => null;
+  const worktreesRoot = path.join(fixture.dir, "custom-worktrees");
+  const archiveDeps: ArchiveDependencies = {
+    paseoHome: fixture.dir,
+    paseoWorktreesBaseRoot: worktreesRoot,
+    github: deps.github,
+    workspaceGitService: deps.workspaceGitService,
+    agentManager: {
+      listAgents: () => [],
+      getAgent: () => null,
+      archiveAgent: async () => null,
+      archiveSnapshot: async () => ({}),
+    },
+    agentStorage: { listByWorkspace: async () => [] },
+    getWorkspace: async (id) => deps.workspaces.get(id) ?? null,
+    findWorkspaceIdForCwd: async (cwd) =>
+      [...deps.workspaces.values()].find((r) => r.cwd === cwd && !r.archivedAt)?.workspaceId ??
+      null,
+    findWorkspaceIdsForBackingPath: async (root) =>
+      [...deps.workspaces.values()]
+        .filter((r) => r.worktreeRoot === root)
+        .map((r) => r.workspaceId),
+    listActiveWorkspaces: async () => [...deps.workspaces.values()].filter((r) => !r.archivedAt),
+    archiveWorkspaceRecord: async (id) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, archivedAt: "archived" });
+    },
+    setWorkspaceRecoveryPin: async (id, pin) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, recoveryBookmark: pin });
+    },
+    emitWorkspaceUpdatesForWorkspaceIds: async () => {},
+    markWorkspaceArchiving: () => {},
+    clearWorkspaceArchiving: () => {},
+    killTerminalsForWorkspace: async () => {},
+  };
+  const recovery = createWorkspaceRecoveryService({
+    paseoHome: fixture.dir,
+    worktreesRoot,
+    getWorkspace: archiveDeps.getWorkspace!,
+    getProject: async () => project,
+    isDirectory: async (cwd) => existsSync(cwd),
+    unarchiveWorkspace: async (r) => {
+      deps.workspaces.set(r.workspaceId, { ...r, archivedAt: null });
+    },
+    clearRecoveryPin: async (id) => {
+      const r = deps.workspaces.get(id)!;
+      deps.workspaces.set(id, { ...r, recoveryBookmark: null });
+    },
+  });
+  const create = (branchName: string, runSetup = false) =>
+    createPaseoWorktree(
+      {
+        cwd: fixture.repoDir,
+        worktreeSlug: "reused",
+        branchName,
+        refName: "main",
+        runSetup,
+        worktreesRoot,
+        projectId: "project",
+      },
+      deps,
+    );
+  return { fixture, deps, worktreesRoot, archiveDeps, recovery, create };
+}
+
+for (const colocate of [false, true]) {
+  test.skipIf(!isJjAvailable())(
+    `jj refuses old recovery/archive at a new incarnation of the same path (colocate=${colocate})`,
+    async () => {
+      const h = jjLifecycleTestFixture(colocate);
+      const old = await h.create("old-feature");
+      writeFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "saved old work\n");
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: old.workspace.workspaceId },
+        requestId: "old",
+      });
+      const saved = h.deps.workspaces.get(old.workspace.workspaceId)!;
+      const fresh = await h.create("new-feature");
+      expect(fresh.worktree.worktreePath).toBe(old.worktree.worktreePath);
+      expect(fresh.workspace.jjWorkspaceId).not.toBe(saved.jjWorkspaceId);
+      const freshHead = h.fixture.jj(
+        ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+        fresh.worktree.worktreePath,
+      ).stdout;
+      await expect(h.recovery.restore(saved.workspaceId)).rejects.toThrow("different incarnation");
+      await expect(
+        archiveByScope(h.archiveDeps, {
+          scope: { kind: "workspace", workspaceId: saved.workspaceId },
+          requestId: "replay",
+        }),
+      ).rejects.toThrow("different incarnation");
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      expect(h.deps.workspaces.get(fresh.workspace.workspaceId)?.archivedAt).toBeNull();
+      expect(
+        h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+      ).toBe("saved old work\n");
+      expect(
+        h.fixture.jj(
+          ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+          fresh.worktree.worktreePath,
+        ).stdout,
+      ).toBe(freshHead);
+      expect(existsSync(path.join(fresh.worktree.worktreePath, "old-work.txt"))).toBe(false);
+      // Removing the new checkout must not repin an unrelated older record at this pathname.
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: fresh.workspace.workspaceId },
+        requestId: "new",
+      });
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      expect(h.deps.workspaces.get(fresh.workspace.workspaceId)?.recoveryBookmark).not.toBe(
+        saved.recoveryBookmark,
+      );
+      await expect(h.recovery.restore(saved.workspaceId)).resolves.toEqual({
+        workspaceId: saved.workspaceId,
+        action: "restore",
+      });
+      expect(readFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+      await expect(h.recovery.restore(fresh.workspace.workspaceId)).rejects.toThrow(
+        "different incarnation",
+      );
+    },
+  );
+}
+
+for (const failProvisioning of [false, true]) {
+  test.skipIf(!isJjAvailable())(
+    `jj keeps creation ownership through provisioning/rollback before a queued archive (failure=${failProvisioning})`,
+    async () => {
+      const h = jjLifecycleTestFixture(false);
+      const old = await h.create("old-feature");
+      writeFileSync(path.join(old.worktree.worktreePath, "old-work.txt"), "old contents\n");
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: old.workspace.workspaceId },
+        requestId: "old",
+      });
+      const saved = h.deps.workspaces.get(old.workspace.workspaceId)!;
+      const ready = path.join(h.fixture.dir, "ready");
+      const release = path.join(h.fixture.dir, "release");
+      const script = path.join(h.fixture.dir, "setup.cjs");
+      writeFileSync(
+        script,
+        `const fs = require("node:fs"); const release = ${JSON.stringify(release)}; const watcher = fs.watch(${JSON.stringify(h.fixture.dir)}, () => { if (fs.existsSync(release)) watcher.close(); }); fs.writeFileSync(${JSON.stringify(ready)}, "ready");`,
+      );
+      writeFileSync(
+        path.join(h.fixture.repoDir, "paseo.json"),
+        JSON.stringify({
+          worktree: { setup: [`${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`] },
+        }),
+      );
+      const reachedSetup = Promise.withResolvers<void>();
+      const readyWatcher = watch(h.fixture.dir, () => {
+        if (existsSync(ready)) reachedSetup.resolve();
+      });
+      const provision = h.deps.workspaceProvisioning.createWorkspaceForWorktree;
+      let provisionFinished = false;
+      h.deps.workspaceProvisioning.createWorkspaceForWorktree = async (input) => {
+        if (failProvisioning) {
+          provisionFinished = true;
+          throw new Error("provision failure");
+        }
+        const result = await provision(input);
+        provisionFinished = true;
+        return result;
+      };
+      const creating = h.create("new-feature", true);
+      const creationResult = creating.then(
+        (value) => ({ value, error: null }),
+        (error: unknown) => ({ value: null, error }),
+      );
+      await reachedSetup.promise;
+      readyWatcher.close();
+      // Enqueue the real archive under the shared guard while low-level setup still owns it.
+      const archiving = withWorkspaceLifecycle(old.worktree.worktreePath, async () => {
+        expect(provisionFinished).toBe(true);
+        expect(existsSync(old.worktree.worktreePath)).toBe(!failProvisioning);
+        return archiveByScope(h.archiveDeps, {
+          scope: { kind: "workspace", workspaceId: saved.workspaceId },
+          requestId: "queued",
+        });
+      });
+      const archiveResult = archiving.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      writeFileSync(release, "release");
+      const result = await creationResult;
+      const archiveError = await archiveResult;
+      expect(archiveError).toBeInstanceOf(Error);
+      expect(String(archiveError)).toContain("incarnation");
+      expect(provisionFinished).toBe(true);
+      expect(h.deps.workspaces.get(saved.workspaceId)).toEqual(saved);
+      if (failProvisioning) {
+        expect(String(result.error)).toContain("provision failure");
+        expect((await listJjWorkspaces(h.fixture.repoDir)).map((e) => e.name)).toEqual(["default"]);
+      } else {
+        expect(result.error).toBeNull();
+        expect(result.value?.workspace.jjWorkspaceId).toBe(
+          await readJjWorkspaceIncarnation(old.worktree.worktreePath),
+        );
+      }
+      expect(
+        h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+      ).toBe("old contents\n");
+    },
+  );
+}
+
+test.skipIf(!isJjAvailable() || isPlatform("win32"))(
+  "native root/subproject/secondary creation skips forge for workspace and initial-agent intent",
+  async () => {
+    const h = jjLifecycleTestFixture(false);
+    execFileSync("git", ["init", "-q", h.fixture.dir]);
+    mkdirSync(path.join(h.fixture.repoDir, "sub"));
+    writeFileSync(path.join(h.fixture.repoDir, "sub", "keep.txt"), "keep\n");
+    h.fixture.jj(["commit", "-m", "subproject"]);
+    h.fixture.jj(["bookmark", "move", "main", "--to", "@-"]);
+    const secondary = path.join(h.fixture.dir, "secondary");
+    expect(
+      h.fixture.jj(["workspace", "add", "--name", "secondary", "-r", "main", secondary]).status,
+    ).toBe(0);
+    h.deps.workspaceGitService.resolveForge = async () => {
+      throw new Error("forge resolution must not run");
+    };
+    h.deps.github.invalidate = () => {
+      throw new Error("forge invalidation must not run");
+    };
+    const { resolveJjRepoIdentity } = await import("../utils/vcs-backend.js");
+    h.deps.workspaceGitService.resolveRepoRoot = async (cwd) => {
+      const identity = await resolveJjRepoIdentity(cwd);
+      if (!identity) throw new Error("not jj");
+      return identity.workspaceRoot;
+    };
+    h.deps.workspaceGitService.getCheckout = async (cwd) => ({
+      cwd,
+      isGit: true,
+      currentBranch: "main",
+      remoteUrl: null,
+      worktreeRoot: (await resolveJjRepoIdentity(cwd))?.workspaceRoot ?? cwd,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+    });
+    const cwds = [
+      h.fixture.repoDir,
+      path.join(h.fixture.repoDir, "sub"),
+      secondary,
+      path.join(secondary, "sub"),
+    ];
+    const gitCalls = path.join(h.fixture.dir, "git-calls.log");
+    const bin = path.join(h.fixture.dir, "guard-bin");
+    mkdirSync(bin);
+    const guardGit = path.join(bin, "git");
+    writeFileSync(
+      guardGit,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${gitCalls}'\nexit 122\n`,
+    );
+    chmodSync(guardGit, 0o755);
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
+    try {
+      for (const [index, cwd] of cwds.entries()) {
+        const result = await createPaseoWorktree(
+          {
+            cwd,
+            branchName: `created-${index}`,
+            worktreeSlug: `created-${index}`,
+            runSetup: false,
+            worktreesRoot: h.worktreesRoot,
+            firstAgentContext: { prompt: "Initial agent", attachments: [] },
+          },
+          h.deps,
+        );
+        expect(
+          readFileSync(
+            path.join(result.workspace.cwd, cwd.endsWith("sub") ? "keep.txt" : "sub/keep.txt"),
+            "utf8",
+          ),
+        ).toBe("keep\n");
+        expect(result.workspace.kind).toBe("worktree");
+        await expect(
+          createPaseoWorktree(
+            {
+              cwd,
+              checkoutSource: { kind: "change_request", forge: "github", number: 1 },
+              runSetup: false,
+            },
+            h.deps,
+          ),
+        ).rejects.toThrow("forge resolution must not run");
+        await expect(
+          createPaseoWorktree({ cwd, githubPrNumber: 1, runSetup: false }, h.deps),
+        ).rejects.toThrow("forge resolution must not run");
+      }
+      writeFileSync(path.join(secondary, "only-secondary.txt"), "selected workspace\n");
+      expect(h.fixture.jj(["describe", "-m", "secondary selection"], secondary).status).toBe(0);
+      const selectedId = h.fixture
+        .jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], secondary)
+        .stdout.trim();
+      const selected = await createPaseoWorktree(
+        {
+          cwd: path.join(secondary, "sub"),
+          refName: "@",
+          branchName: "selected-secondary",
+          worktreeSlug: "selected-secondary",
+          runSetup: false,
+          worktreesRoot: h.worktreesRoot,
+        },
+        h.deps,
+      );
+      expect(selected.worktree.comparisonBaseRef).toBe(selectedId);
+      expect(selected.workspace.mainRepoRoot).toBe(h.fixture.repoDir);
+      expect(
+        readFileSync(path.join(selected.worktree.worktreePath, "only-secondary.txt"), "utf8"),
+      ).toBe("selected workspace\n");
+      expect(existsSync(gitCalls)).toBe(false);
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "native first-agent auto-name uses owned bookmark/checkpoint under enclosing Git with custom secondary placement",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "sub/file.txt": "base\n" } });
+    cleanupPaths.push(fixture.dir);
+    execFileSync("git", ["init", "-q", fixture.dir]);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = path.join(fixture.dir, "custom");
+    const paseoHome = path.join(fixture.dir, "home");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "placeholder",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "placeholder" },
+    });
+    writePaseoWorktreeFirstAgentBranchAutoNameMetadata(created.worktreePath, {
+      placeholderBranchName: "placeholder",
+    });
+    const { getJjChangeMeta } = await import("../utils/checkout-jj.js");
+    const { importJjCheckpoint, readJjCheckpoint, writeJjCheckpoint } =
+      await import("../utils/jj-checkpoint.js");
+    const head = (await getJjChangeMeta(created.worktreePath, "@"))!;
+    const checkpoint = await importJjCheckpoint({
+      backingRoot: created.worktreePath,
+      head,
+      paseoHome,
+    });
+    const publication = {
+      remoteName: "fork",
+      remoteUrl: "https://host.invalid/fork/project",
+      localBookmark: "placeholder",
+      remoteBookmark: "original-remote-name",
+      sourceRepository: "fork/project",
+      targetRepository: "upstream/project",
+    };
+    await writeJjCheckpoint({ ...checkpoint, publication }, paseoHome);
+    let gitCalls = 0;
+    const forbiddenGit = async () => {
+      gitCalls++;
+      throw new Error("Unexpected enclosing Git access");
+    };
+    await expect(
+      attemptFirstAgentBranchAutoName({
+        cwd: path.join(created.worktreePath, "sub"),
+        paseoHome,
+        worktreesRoot,
+        expectedJjWorkspaceId: "00000000-0000-4000-8000-000000000001",
+        firstAgentContext: { prompt: "Old workspace request" },
+        generateBranchNameFromContext: async () => {
+          throw new Error("Generation must not run for a replacement");
+        },
+        getCurrentBranch: forbiddenGit,
+        localBranchExists: forbiddenGit,
+        renameCurrentBranch: forbiddenGit,
+      }),
+    ).rejects.toThrow("incarnation changed before auto-name");
+    const result = await attemptFirstAgentBranchAutoName({
+      cwd: path.join(created.worktreePath, "sub"),
+      paseoHome,
+      worktreesRoot,
+      expectedJjWorkspaceId: (await readJjWorkspaceIncarnation(created.worktreePath))!,
+      firstAgentContext: { prompt: "Name this native project" },
+      generateBranchNameFromContext: async () => "native-generated",
+      getCurrentBranch: forbiddenGit,
+      localBranchExists: forbiddenGit,
+      renameCurrentBranch: forbiddenGit,
+    });
+    expect(result).toEqual({ attempted: true, renamed: true, branchName: "native-generated" });
+    expect(gitCalls).toBe(0);
+    const saved = (await readJjCheckpoint(created.worktreePath, paseoHome))!;
+    expect(saved.publication).toEqual({ ...publication, localBookmark: "native-generated" });
+    expect(saved.metadata).toMatchObject({
+      jjBookmark: "native-generated",
+      firstAgentBranchAutoName: { status: "attempted" },
+    });
+    expect((await getJjChangeMeta(created.worktreePath, "@"))!.changeId).toBe(head.changeId);
+    expect(await jjRevisionResolves(fixture.repoDir, "main")).toBe(true);
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "native auto-name rechecks dispatch after asynchronous generation without Git fallback",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "readme.txt": "base\n" } });
+    cleanupPaths.push(fixture.dir);
+    fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+    const worktreesRoot = path.join(fixture.dir, "custom");
+    const paseoHome = path.join(fixture.dir, "home");
+    const created = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "pending-name",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "pending-name" },
+    });
+    writePaseoWorktreeFirstAgentBranchAutoNameMetadata(created.worktreePath, {
+      placeholderBranchName: "pending-name",
+    });
+    const previous = process.env.PASEO_JJ_DISPATCH;
+    let gitCalls = 0;
+    const forbiddenGit = async () => {
+      gitCalls++;
+      throw new Error("Unexpected Git fallback");
+    };
+    try {
+      process.env.PASEO_JJ_DISPATCH = "1";
+      await expect(
+        attemptFirstAgentBranchAutoName({
+          cwd: created.worktreePath,
+          paseoHome,
+          worktreesRoot,
+          firstAgentContext: { prompt: "Name this project" },
+          generateBranchNameFromContext: async () => {
+            process.env.PASEO_JJ_DISPATCH = "0";
+            return "must-not-rename";
+          },
+          getCurrentBranch: forbiddenGit,
+          localBranchExists: forbiddenGit,
+          renameCurrentBranch: forbiddenGit,
+        }),
+      ).rejects.toThrow(/disabled/);
+      expect(gitCalls).toBe(0);
+      expect(await jjRevisionResolves(fixture.repoDir, "pending-name")).toBe(true);
+      expect(await jjRevisionResolves(fixture.repoDir, "must-not-rename")).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_JJ_DISPATCH;
+      else process.env.PASEO_JJ_DISPATCH = previous;
+    }
+  },
+);

@@ -2,6 +2,11 @@ import { watch as watchPath } from "node:fs";
 import { stat } from "node:fs/promises";
 import { setImmediate as yieldToLoop } from "node:timers/promises";
 import pLimit from "p-limit";
+import {
+  hasDurableJjAuthority,
+  hasPositiveJjEvidence,
+  sameJjWorkspaceAuthority,
+} from "./workspace-jj-authority.js";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
 import type {
@@ -445,8 +450,14 @@ export class WorkspaceReconciliationService {
         if (!reconcileWorkspacePlacement({ workspace, checkout: wsGit, updatedAt: timestamp }))
           return;
         let fields: Partial<MutableWorkspacePlacement> | null = null;
-        await this.workspaceRegistry.update(workspace.workspaceId, (current) => {
-          if (current.cwd !== workspace.cwd || current.projectId !== workspace.projectId)
+        await this.workspaceRegistry.update(workspace.workspaceId, async (current) => {
+          if (
+            current.cwd !== workspace.cwd ||
+            current.projectId !== workspace.projectId ||
+            hasDurableJjAuthority(current) ||
+            (await hasPositiveJjEvidence(current)) ||
+            !sameJjWorkspaceAuthority(workspace, current)
+          )
             return current;
           const update = reconcileWorkspacePlacement({
             workspace: current,
@@ -495,7 +506,7 @@ export class WorkspaceReconciliationService {
           project.rootPath,
           { recursive: false },
           (_event, filename) => {
-            if (filename === null || filename.toString() === ".git") {
+            if (filename === null || [".git", ".jj"].includes(filename.toString())) {
               this.scheduleObservedReconciliation();
             }
           },

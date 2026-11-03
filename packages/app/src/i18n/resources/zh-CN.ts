@@ -823,6 +823,26 @@ export const zhCN: TranslationResources = {
           pending: "正在 commit...",
           success: "已 commit",
         },
+        integrateBase: {
+          pending: "正在集成到基线…",
+          approve: "批准集成",
+          detail: "将所选更改集成到 {{base}}。所选工作副本和其他工作区的修订版本保持不变。",
+          integrated: "基线现已包含所选工作。",
+          noop: "基线已包含所选工作。",
+        },
+        fetchRebase: {
+          label: "获取并变基",
+          pending: "正在获取并变基…",
+          detail: "获取所有远程仓库，然后将所有可变分支变基到 trunk。",
+          rebased: "已获取所有远程仓库，并将可变工作变基到 trunk。",
+          unchanged: "已获取所有远程仓库。可变工作已在 trunk 上。",
+          conflicts: "变基产生了冲突。请先在主机上解决冲突再继续。",
+        },
+        fetch: {
+          label: "获取",
+          pending: "正在获取...",
+          success: "已获取",
+        },
         pull: {
           label: "Pull",
           pending: "正在 pull...",
@@ -840,6 +860,12 @@ export const zhCN: TranslationResources = {
         },
         viewPr: "查看 PR",
         createPr: {
+          form: {
+            title: "标题",
+            body: "描述",
+            base: "基础书签（可选）",
+            automatic: "自动生成",
+          },
           label: "创建 PR",
           pending: "正在创建 PR...",
           success: "PR 已创建",
@@ -862,6 +888,16 @@ export const zhCN: TranslationResources = {
           pending: "正在归档...",
           success: "已归档",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "新变更",
+          pending: "正在开始新变更...",
+          success: "已开始新变更",
+        },
         mergePr: {
           squash: "Merge PR (squash)",
           merge: "Merge PR (merge)",
@@ -876,6 +912,7 @@ export const zhCN: TranslationResources = {
         },
         viewPr_mr: "查看 MR",
         autoMerge: {
+          disable: "禁用自动合并",
           enableSquash: "Auto merge (squash)",
           enableMerge: "Auto merge (merge)",
           enableRebase: "Auto merge (rebase)",
@@ -919,6 +956,7 @@ export const zhCN: TranslationResources = {
         },
         toasts: {
           failedCommit: "Commit 失败",
+          failedNewChange: "开始新变更失败",
           failedPull: "Pull 失败",
           failedPush: "Push 失败",
           failedPullAndPush: "Pull 并 push 失败",
@@ -1398,6 +1436,7 @@ export const zhCN: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "当前变更",
       startingRef: "起始 ref",
       intoBase: "进入 {{baseRef}}",
       searching: "正在搜索...",
@@ -1634,6 +1673,15 @@ export const zhCN: TranslationResources = {
     restore: "恢复",
     later: "稍后",
     stashRestored: "Stashed 变更已恢复",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "正在搜索 workspace...",

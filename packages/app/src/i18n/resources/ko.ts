@@ -827,6 +827,29 @@ export const ko: TranslationResources = {
           pending: "커밋하는 중...",
           success: "커밋됨",
         },
+        integrateBase: {
+          pending: "베이스에 통합 중…",
+          approve: "통합 승인",
+          detail:
+            "선택한 변경을 {{base}}에 통합합니다. 선택한 작업 복사본과 다른 작업 공간의 리비전은 그대로 유지됩니다.",
+          integrated: "베이스에 선택한 작업이 포함되었습니다.",
+          noop: "베이스에 선택한 작업이 이미 포함되어 있습니다.",
+        },
+        fetchRebase: {
+          label: "가져오기 및 리베이스",
+          pending: "가져오기 및 리베이스 중…",
+          detail:
+            "모든 원격 저장소에서 가져온 후 변경 가능한 모든 브랜치를 trunk 위로 리베이스합니다.",
+          rebased: "모든 원격 저장소에서 가져와 변경 가능한 작업을 trunk 위로 리베이스했습니다.",
+          unchanged:
+            "모든 원격 저장소에서 가져왔습니다. 변경 가능한 작업이 이미 trunk 위에 있습니다.",
+          conflicts: "리베이스 중 충돌이 발생했습니다. 계속하기 전에 호스트에서 충돌을 해결하세요.",
+        },
+        fetch: {
+          label: "가져오기",
+          pending: "가져오는 중...",
+          success: "가져옴",
+        },
         pull: {
           label: "풀",
           pending: "가져오는 중...",
@@ -845,6 +868,12 @@ export const ko: TranslationResources = {
         viewPr: "PR 보기",
         viewPr_mr: "MR 보기",
         createPr: {
+          form: {
+            title: "제목",
+            body: "설명",
+            base: "기준 북마크(선택 사항)",
+            automatic: "자동 생성",
+          },
           label: "PR 생성",
           pending: "PR 생성 중...",
           success: "PR 생성됨",
@@ -867,6 +896,16 @@ export const ko: TranslationResources = {
           pending: "보관하는 중...",
           success: "보관됨",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "새 체인지",
+          pending: "새 체인지 시작 중...",
+          success: "새 체인지가 시작되었습니다",
+        },
         mergePr: {
           squash: "PR 병합(스쿼시)",
           merge: "PR 병합(병합)",
@@ -880,6 +919,7 @@ export const ko: TranslationResources = {
           success_mr: "MR 병합됨",
         },
         autoMerge: {
+          disable: "자동 병합 비활성화",
           enableSquash: "자동 병합(스쿼시)",
           enableMerge: "자동 병합(병합)",
           enableRebase: "자동 병합(리베이스)",
@@ -934,6 +974,7 @@ export const ko: TranslationResources = {
         },
         toasts: {
           failedCommit: "커밋하지 못했습니다",
+          failedNewChange: "새 체인지 시작 실패",
           failedPull: "가져오지 못했습니다",
           failedPush: "푸시하지 못했습니다",
           failedPullAndPush: "풀 후 푸시하지 못했습니다",
@@ -1416,6 +1457,7 @@ export const ko: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "현재 변경",
       startingRef: "시작 ref",
       intoBase: "{{baseRef}}(으)로",
       searching: "검색 중...",
@@ -1662,6 +1704,15 @@ export const ko: TranslationResources = {
     restore: "복원",
     later: "나중에",
     stashRestored: "스태시된 변경 사항이 복원되었습니다",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "워크스페이스 검색 중...",

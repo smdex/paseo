@@ -1,16 +1,18 @@
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
 import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { getRealpathAwareRelativePath } from "../utils/path.js";
 import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
+import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
 import type { WorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import {
   createWorktreeCore,
   type CreateWorktreeCoreDeps,
   type CreateWorktreeCoreInput,
+  type CreateWorktreeCoreResult,
 } from "./worktree-core.js";
 import {
   mapWorkspaceRelativeCwdToWorktree,
@@ -23,11 +25,23 @@ import { getCurrentBranch, localBranchExists, renameCurrentBranch } from "../uti
 import {
   markPaseoWorktreeFirstAgentBranchAutoNameAttempted,
   readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
   writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
 } from "../utils/worktree-metadata.js";
 import type { WorktreeCreationIntent } from "./resolve-worktree-creation-intent.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import { buildAgentBranchNameSeed } from "./agent/prompt-attachments.js";
+import { resolveJjRepoIdentity } from "../utils/vcs-backend.js";
+import { resolveEffectiveBackend } from "../utils/checkout-dispatch.js";
+import { getJjWorkspaceBookmark, hasJjBookmark, jjRenameBookmark } from "../utils/checkout-jj.js";
+import {
+  JjCheckpointError,
+  readJjCheckpoint,
+  validateJjCheckpoint,
+  writeJjCheckpoint,
+} from "../utils/jj-checkpoint.js";
+import { withWorkspaceLifecycle } from "../utils/workspace-lifecycle.js";
+import { rollbackJjWorkspace } from "../utils/worktree-jj.js";
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 
@@ -62,7 +76,7 @@ export interface AttemptFirstAgentBranchAutoNameResult {
 }
 
 export interface CreatePaseoWorktreeDeps extends CreateWorktreeCoreDeps {
-  lifecycle?: Pick<PluginLifecycle, "wait" | "before">;
+  lifecycle?: PluginLifecycle;
   workspaceGitService: WorkspaceGitService;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForWorktree">;
 }
@@ -79,7 +93,33 @@ async function createPaseoWorktreeWithPriority(
   deps: CreatePaseoWorktreeDeps,
 ): Promise<CreatePaseoWorktreeResult> {
   const workspaceCwdPlan = await planWorkspaceCwdForWorktree(input.cwd, deps.workspaceGitService);
-  const createdWorktree = await createWorktreeCore(input, deps);
+  const creationBackend = await resolveEffectiveBackend(input.cwd);
+  let completed: CreatePaseoWorktreeResult | null = null;
+  const createdWorktree = await createWorktreeCore(input, {
+    ...deps,
+    onJjWorktreeCreated: async (created) => {
+      completed = await provisionCreatedWorktree(
+        input,
+        deps,
+        created,
+        workspaceCwdPlan,
+        creationBackend,
+      );
+    },
+  });
+  if (completed) return completed;
+  return withWorkspaceLifecycle(createdWorktree.worktree.worktreePath, () =>
+    provisionCreatedWorktree(input, deps, createdWorktree, workspaceCwdPlan, creationBackend),
+  );
+}
+
+async function provisionCreatedWorktree(
+  input: CreatePaseoWorktreeInput,
+  deps: CreatePaseoWorktreeDeps,
+  createdWorktree: CreateWorktreeCoreResult,
+  workspaceCwdPlan: { inputCwd: string; relativeWorkspaceCwd: string },
+  creationBackend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
+): Promise<CreatePaseoWorktreeResult> {
   try {
     if (createdWorktree.created) {
       await deps.lifecycle?.wait("worktree.create.after", {
@@ -132,7 +172,9 @@ async function createPaseoWorktreeWithPriority(
         : {}),
     });
 
-    deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+    if (creationBackend !== "jj") {
+      deps.github.invalidate({ cwd: createdWorktree.worktree.worktreePath });
+    }
 
     return {
       worktree: createdWorktree.worktree,
@@ -143,6 +185,18 @@ async function createPaseoWorktreeWithPriority(
     };
   } catch (error) {
     if (!createdWorktree.created) {
+      throw error;
+    }
+    // Rollback routes by the backend that CREATED the worktree: the git-only
+    // rollback would fail its `git worktree remove` and leave a jj workspace
+    // registered. Created bookmarks are deliberately retained and reported.
+    if (creationBackend === "jj") {
+      await rollbackJjWorkspace(
+        createdWorktree.repoRoot,
+        basename(createdWorktree.worktree.worktreePath),
+        createdWorktree.worktree.worktreePath,
+        { createdBookmark: createdWorktree.worktree.jjCreatedBookmark, logger: deps.logger },
+      );
       throw error;
     }
     return rollbackCreatedPaseoWorktree(
@@ -169,7 +223,7 @@ async function isDirectory(targetPath: string): Promise<boolean> {
 async function planWorkspaceCwdForWorktree(
   inputCwd: string,
   workspaceGitService: Pick<WorkspaceGitService, "getCheckout">,
-): Promise<{ inputCwd: string; relativeWorkspaceCwd: string; sourceCheckout: string }> {
+): Promise<{ inputCwd: string; relativeWorkspaceCwd: string }> {
   const normalizedInputCwd = resolve(inputCwd);
   const sourceCheckout = await workspaceGitService.getCheckout(normalizedInputCwd);
   const sourceWorktreePath = sourceCheckout.worktreeRoot ?? normalizedInputCwd;
@@ -177,20 +231,45 @@ async function planWorkspaceCwdForWorktree(
   if (relativeWorkspaceCwd === null) {
     throw new Error(`Workspace cwd is outside its source worktree: ${normalizedInputCwd}`);
   }
-  return { inputCwd: normalizedInputCwd, relativeWorkspaceCwd, sourceCheckout: sourceWorktreePath };
+  return { inputCwd: normalizedInputCwd, relativeWorkspaceCwd };
 }
 
-export async function attemptFirstAgentBranchAutoName(options: {
+export interface FirstAgentBranchAutoNameOptions {
   cwd: string;
   firstAgentContext: FirstAgentContext | undefined;
   generateBranchNameFromContext: (input: {
     cwd: string;
     firstAgentContext: FirstAgentContext;
   }) => Promise<string | null>;
+  paseoHome?: string;
+  worktreesRoot?: string;
+  expectedJjWorkspaceId?: string;
   getCurrentBranch?: typeof getCurrentBranch;
   renameCurrentBranch?: typeof renameCurrentBranch;
   localBranchExists?: typeof localBranchExists;
-}): Promise<AttemptFirstAgentBranchAutoNameResult> {
+}
+
+export async function attemptFirstAgentBranchAutoName(
+  options: FirstAgentBranchAutoNameOptions,
+): Promise<AttemptFirstAgentBranchAutoNameResult> {
+  const root = (await resolveJjRepoIdentity(options.cwd))?.workspaceRoot ?? options.cwd;
+  return withWorkspaceLifecycle(root, async () => {
+    if (
+      options.expectedJjWorkspaceId &&
+      (await readJjWorkspaceIncarnation(root)) !== options.expectedJjWorkspaceId
+    )
+      throw new JjCheckpointError(
+        "The workspace incarnation changed before auto-name; replacement files and bookmarks were not changed.",
+      );
+    const backend = await resolveEffectiveBackend(options.cwd);
+    return attemptFirstAgentBranchAutoNameUnderLifecycle({ ...options, cwd: root }, backend);
+  });
+}
+
+async function attemptFirstAgentBranchAutoNameUnderLifecycle(
+  options: FirstAgentBranchAutoNameOptions,
+  backend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
+): Promise<AttemptFirstAgentBranchAutoNameResult> {
   const firstAgentContext = options.firstAgentContext;
   if (!firstAgentContext || !buildAgentBranchNameSeed(firstAgentContext)) {
     return { attempted: false, renamed: false, branchName: null };
@@ -210,7 +289,11 @@ export async function attemptFirstAgentBranchAutoName(options: {
     return { attempted: false, renamed: false, branchName: null };
   }
 
-  const getCurrentBranchImpl = options.getCurrentBranch ?? getCurrentBranch;
+  const {
+    currentBranch: getCurrentBranchImpl,
+    exists: localBranchExistsImpl,
+    rename: renameCurrentBranchImpl,
+  } = await autoNameBackendPorts(options, backend);
   const placeholderBranchName = metadata.firstAgentBranchAutoName.placeholderBranchName;
   if ((await getCurrentBranchImpl(options.cwd)) !== placeholderBranchName) {
     await markPaseoWorktreeFirstAgentBranchAutoNameAttempted(options.cwd);
@@ -218,6 +301,7 @@ export async function attemptFirstAgentBranchAutoName(options: {
   }
 
   await markPaseoWorktreeFirstAgentBranchAutoNameAttempted(options.cwd);
+  if (backend === "jj") await checkpointAutoNameAttempt(options);
 
   const branchName = await options.generateBranchNameFromContext({
     cwd: options.cwd,
@@ -234,7 +318,6 @@ export async function attemptFirstAgentBranchAutoName(options: {
     return { attempted: true, renamed: false, branchName: null };
   }
 
-  const localBranchExistsImpl = options.localBranchExists ?? localBranchExists;
   const targetName = await findAvailableBranchName({
     cwd: options.cwd,
     desiredName: branchName,
@@ -245,13 +328,66 @@ export async function attemptFirstAgentBranchAutoName(options: {
     return { attempted: true, renamed: false, branchName: null };
   }
 
-  const renameCurrentBranchImpl = options.renameCurrentBranch ?? renameCurrentBranch;
   const renamedBranch = await renameCurrentBranchImpl(options.cwd, targetName);
   return {
     attempted: true,
     renamed: true,
     branchName: renamedBranch.currentBranch ?? targetName,
   };
+}
+
+async function autoNameBackendPorts(
+  options: FirstAgentBranchAutoNameOptions,
+  backend: Awaited<ReturnType<typeof resolveEffectiveBackend>>,
+) {
+  const context = { paseoHome: options.paseoHome, worktreesRoot: options.worktreesRoot };
+  const ports =
+    backend === "jj"
+      ? {
+          currentBranch: (cwd: string) => getJjWorkspaceBookmark(cwd, context),
+          exists: (cwd: string, name: string) => hasJjBookmark(cwd, name, context),
+          rename: (cwd: string, name: string) => jjRenameBookmark(cwd, name, context),
+        }
+      : {
+          currentBranch: options.getCurrentBranch ?? getCurrentBranch,
+          exists: options.localBranchExists ?? localBranchExists,
+          rename: options.renameCurrentBranch ?? renameCurrentBranch,
+        };
+  const incarnation = await readJjWorkspaceIncarnation(options.cwd);
+  const assertCurrentBackend = async (cwd: string) => {
+    if ((await readJjWorkspaceIncarnation(cwd)) !== incarnation)
+      throw new JjCheckpointError(
+        "The workspace incarnation changed during auto-name; replacement bookmarks were not changed.",
+      );
+    if ((await resolveEffectiveBackend(cwd)) !== backend)
+      throw new Error(
+        "The checkout backend changed during auto-name; no branch rename was attempted.",
+      );
+  };
+  return {
+    currentBranch: async (cwd: string) => {
+      await assertCurrentBackend(cwd);
+      return ports.currentBranch(cwd);
+    },
+    exists: async (cwd: string, name: string) => {
+      await assertCurrentBackend(cwd);
+      return ports.exists(cwd, name);
+    },
+    rename: async (cwd: string, name: string) => {
+      await assertCurrentBackend(cwd);
+      return ports.rename(cwd, name);
+    },
+  };
+}
+
+async function checkpointAutoNameAttempt(options: FirstAgentBranchAutoNameOptions): Promise<void> {
+  const checkpoint = await readJjCheckpoint(options.cwd, options.paseoHome);
+  if (!checkpoint) return;
+  await validateJjCheckpoint(checkpoint, options.cwd);
+  await writeJjCheckpoint(
+    { ...checkpoint, metadata: await readPaseoWorktreeMetadata(options.cwd) },
+    options.paseoHome,
+  );
 }
 
 const MAX_BRANCH_NAME_SUFFIX_ATTEMPTS = 50;
