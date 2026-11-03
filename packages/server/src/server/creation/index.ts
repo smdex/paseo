@@ -198,7 +198,12 @@ export class CreationService {
         error instanceof Error && "code" in error && typeof error.code === "string"
           ? error.code
           : undefined;
-      const rejectedBeforeProvision = code === "directory_not_found" || code === "source_required";
+      const rejectedBeforeProvision = [
+        "directory_not_found",
+        "source_required",
+        "workspace_path_exists",
+        "workspace_source_unavailable",
+      ].includes(code ?? "");
       const unknown =
         stage === "prompt" ||
         (stage === "workspace" && !rejectedBeforeProvision) ||

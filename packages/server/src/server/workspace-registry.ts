@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import { areEquivalentPaths } from "../utils/path.js";
+import { jjWorkspaceAuthority, sameJjWorkspaceAuthority } from "./workspace-jj-authority.js";
 import {
   generateProjectId,
   type PersistedProjectKind,
@@ -87,6 +88,20 @@ const PersistedWorkspaceRecordSchema = z.object({
     .transform((value) => value ?? null),
   isPaseoOwnedWorktree: z.boolean().default(false),
   mainRepoRoot: z.string().nullable().default(null),
+  // Persisted separately from the pathname, which can be reused after archive.
+  jjWorkspaceId: z.string().min(1).optional(),
+  // Absent is unknown legacy provenance, never inferred external ownership.
+  jjWorkspaceManagement: z.enum(["managed", "external"]).optional(),
+  jjCheckpointRef: z
+    .object({ path: z.string(), generation: z.number().int().positive() })
+    .optional(),
+  // jj only: private recovery bookmark pinned before the workspace was forgotten.
+  // Null on git workspaces and on jj workspaces that were never archived.
+  recoveryBookmark: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
@@ -122,6 +137,8 @@ export interface WorkspaceMutation {
 
 export interface WorkspaceMutationContext {
   expectsInitialAgent?: boolean;
+  // Creation must not overwrite a recovery record whose id was allocated earlier.
+  requireAbsent?: boolean;
 }
 
 export interface WorkspaceArchiveContext {
@@ -149,7 +166,9 @@ export interface ProjectRegistry {
   upsert(record: PersistedProjectRecord): Promise<void>;
   update(
     projectId: string,
-    updater: (record: PersistedProjectRecord) => PersistedProjectRecord,
+    updater: (
+      record: PersistedProjectRecord,
+    ) => PersistedProjectRecord | Promise<PersistedProjectRecord>,
   ): Promise<PersistedProjectRecord | null>;
   archive(projectId: string, archivedAt: string): Promise<void>;
   remove(projectId: string): Promise<void>;
@@ -165,7 +184,9 @@ export interface WorkspaceRegistry {
   get(workspaceId: string): Promise<PersistedWorkspaceRecord | null>;
   update(
     workspaceId: string,
-    updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    updater: (
+      record: PersistedWorkspaceRecord,
+    ) => PersistedWorkspaceRecord | Promise<PersistedWorkspaceRecord>,
   ): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord, context?: WorkspaceMutationContext): Promise<void>;
   archive(
@@ -178,6 +199,48 @@ export interface WorkspaceRegistry {
   subscribeToMutations?(
     listener: (mutation: WorkspaceMutation) => void | Promise<void>,
   ): () => void;
+}
+
+/** Retirement must not clear a later archive generation installed while recovery waited. */
+export async function clearWorkspaceRecoveryReference(
+  registry: Pick<WorkspaceRegistry, "update">,
+  workspaceId: string,
+  expectedPin: string,
+  expected?: PersistedWorkspaceRecord,
+): Promise<void> {
+  await registry.update(workspaceId, (record) => {
+    jjWorkspaceAuthority(record);
+    if (expected && !sameJjWorkspaceAuthority(expected, record)) return record;
+    return record.recoveryBookmark === expectedPin
+      ? {
+          ...record,
+          jjWorkspaceManagement: "managed",
+          jjWorkspaceId: record.jjWorkspaceId ?? expectedPin,
+          recoveryBookmark: null,
+        }
+      : record;
+  });
+}
+
+/** Compare inside the queued update, not before asynchronous pin creation. */
+export async function setWorkspaceRecoveryReference(
+  registry: Pick<WorkspaceRegistry, "update">,
+  workspaceId: string,
+  pin: string,
+  expected: PersistedWorkspaceRecord,
+): Promise<void> {
+  const updated = await registry.update(workspaceId, (record) => {
+    if (!sameJjWorkspaceAuthority(expected, record) || jjWorkspaceAuthority(record) !== "managed")
+      throw new Error("Workspace managed incarnation changed before recovery pin persistence");
+    return {
+      ...record,
+      jjWorkspaceManagement: "managed",
+      recoveryBookmark: pin,
+      ...(expected.jjCheckpointRef ? { jjCheckpointRef: expected.jjCheckpointRef } : {}),
+    };
+  });
+  if (!updated)
+    throw new Error(`Workspace disappeared before recovery pin persistence: ${workspaceId}`);
 }
 
 type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord;
@@ -240,19 +303,25 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     return this.cache.get(id) ?? null;
   }
 
-  async upsert(record: TRecord): Promise<void> {
+  async upsert(record: TRecord, options?: { requireAbsent?: boolean }): Promise<void> {
     const parsed = this.schema.parse(record);
     await this.mutateCache((records) => {
-      records.set(this.getId(parsed), parsed);
+      const id = this.getId(parsed);
+      if (options?.requireAbsent && records.has(id))
+        throw new Error(`Record already exists: ${id}`);
+      records.set(id, parsed);
       return undefined;
     });
   }
 
-  async update(id: string, updater: (record: TRecord) => TRecord): Promise<TRecord | null> {
-    return this.mutateCache((records) => {
+  async update(
+    id: string,
+    updater: (record: TRecord) => TRecord | Promise<TRecord>,
+  ): Promise<TRecord | null> {
+    return this.mutateCache(async (records) => {
       const existing = records.get(id);
       if (!existing) return null;
-      const next = this.schema.parse(updater(existing));
+      const next = this.schema.parse(await updater(existing));
       records.set(id, next);
       return next;
     });
@@ -316,7 +385,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   }
 
   protected async mutateCache<TResult>(
-    updater: (records: Map<string, TRecord>) => TResult,
+    updater: (records: Map<string, TRecord>) => TResult | Promise<TResult>,
     hooks?: {
       forcePersist?: (result: TResult) => boolean;
       beforeWrite?: (records: readonly TRecord[]) => Promise<void>;
@@ -336,7 +405,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
         throw new Error("Workspace registry mutations are blocked until daemon restart");
       }
       const staged = new Map(this.cache);
-      const result = updater(staged);
+      const result = await updater(staged);
       const recordsChanged = !mapsEqual(this.cache, staged);
       if (!recordsChanged && !hooks?.forcePersist?.(result)) return result;
       const records = Array.from(staged.values());
@@ -485,7 +554,9 @@ export class FileBackedProjectRegistry
 
   override async update(
     projectId: string,
-    updater: (record: PersistedProjectRecord) => PersistedProjectRecord,
+    updater: (
+      record: PersistedProjectRecord,
+    ) => PersistedProjectRecord | Promise<PersistedProjectRecord>,
   ): Promise<PersistedProjectRecord | null> {
     const project = await super.update(projectId, updater);
     if (!project) return null;
@@ -551,7 +622,9 @@ export class FileBackedWorkspaceRegistry
 
   override async update(
     workspaceId: string,
-    updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    updater: (
+      record: PersistedWorkspaceRecord,
+    ) => PersistedWorkspaceRecord | Promise<PersistedWorkspaceRecord>,
   ): Promise<PersistedWorkspaceRecord | null> {
     const workspace = await super.update(workspaceId, updater);
     if (workspace) {
@@ -564,7 +637,7 @@ export class FileBackedWorkspaceRegistry
     record: PersistedWorkspaceRecord,
     context?: WorkspaceMutationContext,
   ): Promise<void> {
-    await super.upsert(record);
+    await super.upsert(record, { requireAbsent: context?.requireAbsent });
     await this.notifyMutation({
       kind: "upsert",
       workspaceId: record.workspaceId,
@@ -695,6 +768,10 @@ export function createPersistedWorkspaceRecord(input: {
   baseBranch?: string | null;
   isPaseoOwnedWorktree?: boolean;
   mainRepoRoot?: string | null;
+  recoveryBookmark?: string | null;
+  jjWorkspaceId?: string;
+  jjWorkspaceManagement?: "managed" | "external";
+  jjCheckpointRef?: PersistedWorkspaceRecord["jjCheckpointRef"];
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -715,6 +792,8 @@ export function createPersistedWorkspaceRecord(input: {
     baseBranch: input.baseBranch ?? null,
     isPaseoOwnedWorktree: input.isPaseoOwnedWorktree ?? false,
     mainRepoRoot: input.mainRepoRoot ?? null,
+    recoveryBookmark: input.recoveryBookmark ?? null,
+    ...(input.jjWorkspaceId ? { jjWorkspaceId: input.jjWorkspaceId } : {}),
     archivedAt: input.archivedAt ?? null,
     autoArchivedChangeRequestUrl: input.autoArchivedChangeRequestUrl ?? null,
     pinnedAt: input.pinnedAt ?? null,

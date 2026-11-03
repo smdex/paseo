@@ -1,4 +1,4 @@
-import { mkdir, open, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import pLimit from "p-limit";
@@ -47,9 +47,13 @@ const PaseoWorktreeMetadataV2Schema = z.object({
       worktreePort: z.number().int().positive(),
     })
     .optional(),
+  // jj only: the workspace-OWNED feature bookmark this Paseo worktree manages.
+  // Owned bookmarks are advanced by Paseo mutations and never deleted by
+  // recovery flows; derivation never substitutes for a recorded owner.
+  jjBookmark: z.string().min(1).nullable().optional(),
 });
 
-const PaseoWorktreeMetadataSchema = z.union([
+export const PaseoWorktreeMetadataSchema = z.union([
   PaseoWorktreeMetadataV1Schema,
   PaseoWorktreeMetadataV2Schema,
 ]);
@@ -165,9 +169,66 @@ async function getGitDirForWorktreeRoot(worktreeRoot: string): Promise<string> {
   return gitPath;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export async function getPaseoWorktreeMetadataPath(worktreeRoot: string): Promise<string> {
-  const gitDir = await getGitDirForWorktreeRoot(worktreeRoot);
-  return join(gitDir, "paseo", "worktree.json");
+  const jjDir = join(worktreeRoot, ".jj");
+  const jjMetadataPath = join(jjDir, "paseo", "worktree.json");
+  if (await pathExists(jjMetadataPath)) return jjMetadataPath;
+  if (await pathExists(join(worktreeRoot, ".git"))) {
+    return join(await getGitDirForWorktreeRoot(worktreeRoot), "paseo", "worktree.json");
+  }
+  if (await pathExists(jjDir)) return jjMetadataPath;
+  throw new Error(`Not a jj workspace: ${worktreeRoot}`);
+}
+
+/** A reused pathname is not the same jj backing checkout. */
+export async function readJjWorkspaceIncarnation(worktreeRoot: string): Promise<string | null> {
+  const path = join(worktreeRoot, ".jj", "paseo", "incarnation");
+  let identity: string;
+  try {
+    identity = (await readFile(path, "utf8")).trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!identity || identity.includes("\n"))
+    throw new Error(`Invalid jj workspace incarnation: ${path}`);
+  return identity;
+}
+
+export async function writeJjWorkspaceIncarnation(
+  worktreeRoot: string,
+  identity: string,
+): Promise<void> {
+  const jjDir = join(worktreeRoot, ".jj");
+  if (!(await pathExists(jjDir))) throw new Error(`Not a jj workspace: ${worktreeRoot}`);
+  const dir = join(jjDir, "paseo");
+  const current = await readJjWorkspaceIncarnation(worktreeRoot);
+  if (current && current !== identity) throw new Error("Cannot replace a jj workspace incarnation");
+  if (current === identity) return;
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "incarnation"), `${identity}\n`, { flag: "wx" });
+}
+
+export async function assertJjWorkspaceIncarnation(
+  worktreeRoot: string,
+  expected: string | null | undefined,
+): Promise<void> {
+  const actual = await readJjWorkspaceIncarnation(worktreeRoot);
+  if (!expected || !actual || actual !== expected) {
+    throw new Error(
+      "The backing jj checkout has an unknown or different incarnation; retained recovery data and live files were not changed.",
+    );
+  }
 }
 
 export function isQualifiedRef(ref: string): boolean {
@@ -227,6 +288,7 @@ export async function writePaseoWorktreeMetadata(
     baseRefName: string;
     baseRef?: string;
     changeRequestLookupTarget?: PaseoWorktreeChangeRequestHint;
+    jjBookmark?: string | null;
   },
 ): Promise<void> {
   return mutateMetadata(worktreeRoot, async (root) => {
@@ -238,9 +300,10 @@ export async function writePaseoWorktreeMetadata(
     }
 
     const metadata: PaseoWorktreeMetadata = {
-      version: 1,
+      version: options.jjBookmark !== undefined ? 2 : 1,
       baseRefName,
       ...(baseRef ? { baseRef } : {}),
+      ...(options.jjBookmark !== undefined ? { jjBookmark: options.jjBookmark } : {}),
       ...(options.changeRequestLookupTarget
         ? { changeRequestLookupTarget: options.changeRequestLookupTarget }
         : {}),
@@ -261,6 +324,17 @@ export async function setPaseoWorktreeBaseRef(input: {
       baseRefName: branchNameFromRef(input.baseRef),
       baseRef: input.baseRef,
     });
+  });
+}
+
+export async function updatePaseoWorktreeJjBookmark(
+  worktreeRoot: string,
+  change: { from: string | null; to: string },
+): Promise<void> {
+  return mutateMetadata(worktreeRoot, async (root) => {
+    const current = await readMetadataFile(root);
+    if (!current || current.version !== 2 || (current.jjBookmark ?? null) !== change.from) return;
+    await writePaseoWorktreeMetadataFile(root, { ...current, jjBookmark: change.to });
   });
 }
 
@@ -438,7 +512,7 @@ export async function readPaseoWorktreeRuntimePort(worktreeRoot: string): Promis
   return null;
 }
 
-async function writePaseoWorktreeMetadataFile(
+export async function writePaseoWorktreeMetadataFile(
   worktreeRoot: string,
   metadata: PaseoWorktreeMetadata,
 ): Promise<void> {
@@ -449,7 +523,7 @@ async function writePaseoWorktreeMetadataFile(
   }
   // Never recreate an archived Git directory while a queued mutation is pending.
   try {
-    await mkdir(join(await getGitDirForWorktreeRoot(worktreeRoot), "paseo"));
+    await mkdir(dirname(metadataPath));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }

@@ -42,6 +42,70 @@ Linux produces the `paseo-desktop` launcher and desktop entry. macOS produces
 Electron runtime and the checkout's built daemon, client, and renderer rather
 than downloading a published desktop release.
 
+## NixOS packages and checkout smoke
+
+The flake packages the checkout's daemon/CLI (`.#paseo`) and Electron desktop
+(`.#desktop`) on Linux. It does not download published releases.
+
+```bash
+nix build .#paseo -o result
+nix build .#desktop -o result-desktop
+./result/bin/paseo --version
+```
+
+**Keep the installed daemon on port 6767 untouched.** To verify the packaged
+daemon/CLI, run an isolated instance with a fresh `PASEO_HOME` on a free
+loopback port (substitute a currently unused port for 16768):
+
+```bash
+SMOKE_HOME=$(mktemp -d)
+SMOKE_PORT=16768
+PASEO_HOME="$SMOKE_HOME" PASEO_LISTEN=127.0.0.1:$SMOKE_PORT \
+  PASEO_RELAY_ENABLED=false PASEO_WEB_UI_ENABLED=true ./result/bin/paseo daemon run &
+SMOKE_PID=$!
+# Wait until daemon status reports connectedDaemon: reachable before proceeding.
+./result/bin/paseo --host 127.0.0.1:$SMOKE_PORT daemon status --json
+curl --fail http://127.0.0.1:$SMOKE_PORT/
+./result/bin/paseo --host 127.0.0.1:$SMOKE_PORT terminal create \
+  --cwd "$SMOKE_HOME" --name nix-smoke --json
+# Use the returned terminal id:
+./result/bin/paseo --host 127.0.0.1:$SMOKE_PORT terminal send-keys ID 'echo NIX_SMOKE_OK' Enter
+./result/bin/paseo --host 127.0.0.1:$SMOKE_PORT terminal capture ID --json
+./result/bin/paseo --host 127.0.0.1:$SMOKE_PORT terminal kill ID
+kill "$SMOKE_PID"
+wait "$SMOKE_PID" 2>/dev/null || true
+```
+
+The capture must contain `NIX_SMOKE_OK`. Delete `$SMOKE_HOME` after inspecting
+the logs. Do not copy the CI Nix smoke verbatim: CI binds port 6767 because its
+runner has no installed daemon. Pass `--host` to **each** client command (or
+`--home` instead); do not set both `PASEO_HOST` and `PASEO_HOME` for a CLI
+invocation.
+
+To check the **packaged desktop**, launch it under a graphical NixOS session
+with a different isolated home and free port. It launches its own daemon:
+
+```bash
+DESKTOP_HOME=$(mktemp -d)
+# Desktop persists its listen setting; seed it before the first launch.
+printf '%s\n' '{"version":1,"daemon":{"listen":"127.0.0.1:16769","relay":{"enabled":false}}}' > "$DESKTOP_HOME/config.json"
+PASEO_HOME="$DESKTOP_HOME" PASEO_LISTEN=127.0.0.1:16769 \
+  PASEO_ELECTRON_USER_DATA_DIR="$DESKTOP_HOME/electron" \
+  ./result-desktop/bin/paseo-desktop
+# In a second terminal, while it is running:
+./result/bin/paseo --host 127.0.0.1:16769 daemon status
+```
+
+Check that the desktop renderer opens, can display a Workspace, and exposes
+the same terminal round-trip. Exit the desktop before deleting its test home.
+For the Android leg, use [NixOS Android toolchain](android.md#nixos-android-toolchain)
+and point `EXPO_PUBLIC_LOCAL_DAEMON` at the selected isolated daemon
+(use `adb reverse` for a USB phone). Confirm the mobile client connects to the
+same daemon, sees the Workspace, and displays the terminal output. Capture
+CLI status, desktop/mobile screenshots, and the terminal output as QA evidence.
+The Linux CI currently checks the Nix daemon and builds the desktop package;
+a combined NixOS desktop + Android interaction is a separate manual check.
+
 ### PASEO_HOME
 
 `PASEO_HOME` is the directory that holds runtime state (agents, worktrees, workspace config, sockets, daemon log). Resolution rules:

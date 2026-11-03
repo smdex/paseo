@@ -81,6 +81,7 @@ import type {
 } from "./workspace-git-service.js";
 import type { GitCommandRuntimeMetricsSnapshot } from "../utils/git-command-runtime-metrics.js";
 import { snapshotGitCommandRuntimeMetrics } from "../utils/run-git-command.js";
+import { isJjFeatureAvailable, warmJjRuntime } from "../utils/vcs-backend.js";
 import { createPluginClientId, isPluginClientId } from "./plugins/plugin-session-identity.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { deriveProjectSlug } from "./workspace-git-metadata.js";
@@ -710,6 +711,12 @@ export class VoiceAssistantWebSocketServer {
     workspaceLabelService?: WorkspaceLabelService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
+    // Warm the jj runtime probe AND hold construction until it settles, so
+    // the first server_info can never advertise checkoutJj from a cold probe
+    // while dispatch would route differently (review should-fix 1). The probe
+    // has a 5s cap; on timeout the feature stays unadvertised until the next
+    // server_info after warm-up completes.
+    warmJjRuntime();
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
@@ -2218,6 +2225,18 @@ export class VoiceAssistantWebSocketServer {
         // COMPAT(checkoutDiscardChanges): added in v0.3.0, remove gate after 2027-02-08.
         checkoutDiscardChanges: true,
         checkoutDiffAll: true,
+        // COMPAT(checkoutJj): advertised from the same gate checkout dispatch uses
+        // (jj runtime probe + dispatch enablement) so routing and capability can
+        // never disagree. Warm-up runs at server construction.
+        checkoutJj: isJjFeatureAvailable(),
+        checkoutJjCheckpoint: isJjFeatureAvailable(),
+        checkoutJjPrCreate: isJjFeatureAvailable(),
+        checkoutJjPrWorkspace: isJjFeatureAvailable(),
+        checkoutJjPrMutations: isJjFeatureAvailable(),
+        checkoutJjRewriteApproval: isJjFeatureAvailable(),
+        checkoutJjFetchRebase: isJjFeatureAvailable(),
+        checkoutJjIntegrate: isJjFeatureAvailable(),
+        checkoutJjGraphSelections: isJjFeatureAvailable(),
         // COMPAT(agentProfiles): added in v0.3.2, remove gate after 2027-02-11.
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.

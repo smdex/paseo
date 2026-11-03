@@ -835,6 +835,31 @@ export const ru: TranslationResources = {
           pending: "Создание коммита...",
           success: "Коммит создан",
         },
+        integrateBase: {
+          pending: "Интеграция в базу…",
+          approve: "Подтвердить интеграцию",
+          detail:
+            "Интегрировать выбранное изменение в {{base}}. Выбранная рабочая копия и ревизии других рабочих пространств не изменятся.",
+          integrated: "База теперь содержит выбранную работу.",
+          noop: "База уже содержит выбранную работу.",
+        },
+        fetchRebase: {
+          label: "Получить и перебазировать",
+          pending: "Получение и перебазирование…",
+          detail:
+            "Получить данные из всех удалённых репозиториев и перебазировать все изменяемые ветки на trunk.",
+          rebased:
+            "Данные получены из всех удалённых репозиториев, изменяемые ветки перебазированы на trunk.",
+          unchanged:
+            "Данные получены из всех удалённых репозиториев. Изменяемые ветки уже находятся на trunk.",
+          conflicts:
+            "Перебазирование завершилось с конфликтами. Разрешите конфликты на хосте перед продолжением.",
+        },
+        fetch: {
+          label: "Получить",
+          pending: "Получение...",
+          success: "Получено",
+        },
         pull: {
           label: "Получить изменения",
           pending: "Получение изменений...",
@@ -852,6 +877,12 @@ export const ru: TranslationResources = {
         },
         viewPr: "Посмотреть PR",
         createPr: {
+          form: {
+            title: "Заголовок",
+            body: "Описание",
+            base: "Базовая закладка (необязательно)",
+            automatic: "Создать автоматически",
+          },
           label: "Создать PR",
           pending: "Создание PR...",
           success: "PR создан",
@@ -874,6 +905,16 @@ export const ru: TranslationResources = {
           pending: "Архивирование...",
           success: "В архиве",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "Новая правка",
+          pending: "Создание новой правки...",
+          success: "Новая правка создана",
+        },
         mergePr: {
           squash: "Выполнить слияние PR (squash)",
           merge: "Выполнить слияние PR (merge)",
@@ -888,6 +929,7 @@ export const ru: TranslationResources = {
         },
         viewPr_mr: "Посмотреть MR",
         autoMerge: {
+          disable: "Отключить автоматическое слияние",
           enableSquash: "Включить автослияние (squash)",
           enableMerge: "Включить автослияние (merge)",
           enableRebase: "Включить автослияние (rebase)",
@@ -944,6 +986,7 @@ export const ru: TranslationResources = {
         },
         toasts: {
           failedCommit: "Не удалось создать коммит",
+          failedNewChange: "Не удалось создать новую правку",
           failedPull: "Не удалось получить изменения",
           failedPush: "Не удалось отправить изменения",
           failedPullAndPush: "Не удалось получить и отправить изменения",
@@ -1427,6 +1470,7 @@ export const ru: TranslationResources = {
       launch: "Выберите, что запустить",
     },
     refPicker: {
+      currentChange: "Текущее изменение",
       startingRef: "Исходная точка",
       intoBase: "в ветку {{baseRef}}",
       searching: "Идет поиск...",
@@ -1681,6 +1725,15 @@ export const ru: TranslationResources = {
     restore: "Восстановить",
     later: "Позже",
     stashRestored: "Изменения из stash восстановлены.",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "Поиск в рабочем пространстве...",

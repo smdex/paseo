@@ -827,6 +827,28 @@ export const ar: TranslationResources = {
           pending: "ارتكاب...",
           success: "ملتزم",
         },
+        integrateBase: {
+          pending: "جارٍ الدمج في القاعدة…",
+          approve: "الموافقة على الدمج",
+          detail:
+            "دمج التغيير المحدد في {{base}}. تبقى نسخة العمل المحددة ورؤوس مساحات العمل الأخرى دون تغيير.",
+          integrated: "تحتوي القاعدة الآن على العمل المحدد.",
+          noop: "تحتوي القاعدة بالفعل على العمل المحدد.",
+        },
+        fetchRebase: {
+          label: "جلب وإعادة تأسيس",
+          pending: "جارٍ الجلب وإعادة التأسيس…",
+          detail:
+            "اجلب جميع المستودعات البعيدة، ثم أعد تأسيس جميع الفروع القابلة للتعديل على trunk.",
+          rebased: "تم جلب جميع المستودعات البعيدة وإعادة تأسيس العمل القابل للتعديل على trunk.",
+          unchanged: "تم جلب جميع المستودعات البعيدة. العمل القابل للتعديل موجود على trunk بالفعل.",
+          conflicts: "نتجت تعارضات عن إعادة التأسيس. عالج التعارضات على المضيف قبل المتابعة.",
+        },
+        fetch: {
+          label: "جلب",
+          pending: "جارٍ الجلب...",
+          success: "تم الجلب",
+        },
         pull: {
           label: "يحذب",
           pending: "سحب...",
@@ -844,6 +866,12 @@ export const ar: TranslationResources = {
         },
         viewPr: "عرض PR",
         createPr: {
+          form: {
+            title: "العنوان",
+            body: "الوصف",
+            base: "العلامة المرجعية الأساسية (اختياري)",
+            automatic: "إنشاء تلقائيًا",
+          },
           label: "إنشاء PR",
           pending: "إنشاء PR...",
           success: "تم إنشاء PR",
@@ -866,6 +894,16 @@ export const ar: TranslationResources = {
           pending: "أرشفة...",
           success: "مؤرشف",
         },
+        finishChange: en.workspace.git.actions.finishChange,
+        describeChange: en.workspace.git.actions.describeChange,
+        editChange: en.workspace.git.actions.editChange,
+        newChangeOn: en.workspace.git.actions.newChangeOn,
+        jj: en.workspace.git.actions.jj,
+        newChange: {
+          label: "تغيير جديد",
+          pending: "جارٍ بدء تغيير جديد...",
+          success: "تم بدء التغيير الجديد",
+        },
         mergePr: {
           squash: "دمج PR (squash)",
           merge: "دمج PR (merge)",
@@ -880,6 +918,7 @@ export const ar: TranslationResources = {
         },
         viewPr_mr: "عرض MR",
         autoMerge: {
+          disable: "تعطيل الدمج التلقائي",
           enableSquash: "دمج تلقائي (squash)",
           enableMerge: "دمج تلقائي (merge)",
           enableRebase: "دمج تلقائي (rebase)",
@@ -927,6 +966,7 @@ export const ar: TranslationResources = {
         },
         toasts: {
           failedCommit: "فشل في الالتزام",
+          failedNewChange: "فشل بدء تغيير جديد",
           failedPull: "فشل في السحب",
           failedPush: "فشل في الدفع",
           failedPullAndPush: "فشل في السحب والدفع",
@@ -1409,6 +1449,7 @@ export const ar: TranslationResources = {
       launch: "Choose what to launch",
     },
     refPicker: {
+      currentChange: "التغيير الحالي",
       startingRef: "بدء المرجع",
       intoBase: "إلى {{baseRef}}",
       searching: "جارٍ البحث...",
@@ -1651,6 +1692,15 @@ export const ar: TranslationResources = {
     restore: "يعيد",
     later: "لاحقاً",
     stashRestored: "تمت استعادة التغييرات المخفية",
+    jjSwitchTitle: en.branchSwitcher.jjSwitchTitle,
+    jjSwitchMessage: en.branchSwitcher.jjSwitchMessage,
+    jjSwitchConfirm: en.branchSwitcher.jjSwitchConfirm,
+    jjResumeTitle: en.branchSwitcher.jjResumeTitle,
+    jjResumeMessage: en.branchSwitcher.jjResumeMessage,
+    jjResumeConfirm: en.branchSwitcher.jjResumeConfirm,
+    jjResumeNewChange: en.branchSwitcher.jjResumeNewChange,
+    jjSwitchedResume: en.branchSwitcher.jjSwitchedResume,
+    jjSwitchedNewOn: en.branchSwitcher.jjSwitchedNewOn,
   },
   agentAutocomplete: {
     searchingWorkspace: "جارٍ البحث في مساحة العمل...",

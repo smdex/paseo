@@ -202,6 +202,7 @@ export interface PullRequestCommandStatus {
 
 export interface MergePullRequestOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
   status?: PullRequestCommandStatus | null;
@@ -209,6 +210,7 @@ export interface MergePullRequestOptions {
 
 export interface EnablePullRequestAutoMergeOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
   status?: PullRequestCommandStatus | null;
@@ -216,6 +218,7 @@ export interface EnablePullRequestAutoMergeOptions {
 
 export interface DisablePullRequestAutoMergeOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   prNumber: number;
   status?: PullRequestCommandStatus | null;
 }
@@ -228,7 +231,26 @@ export interface PullRequestAutoMergeResult {
   success: true;
 }
 
-export type ForgeReadOptions =
+export interface ForgeRepositoryContext {
+  host: string;
+  targetRepository: string;
+  sourceRepository: string;
+  headRef: string | null;
+  /** Exact local candidate F, never a branch-name substitute. */
+  headSha: string | null;
+  /** Observed remote bookmark H; null means no observed remote head, not a lease. */
+  remoteHeadSha: string | null;
+}
+
+export class ForgeRepositoryContextError extends Error {
+  readonly kind = "repository-context";
+  constructor(message: string) {
+    super(message);
+    this.name = "ForgeRepositoryContextError";
+  }
+}
+
+export type ForgeReadOptions = { repository?: ForgeRepositoryContext } & (
   | {
       force?: false;
       reason?: string;
@@ -236,7 +258,8 @@ export type ForgeReadOptions =
   | {
       force: true;
       reason: string;
-    };
+    }
+);
 
 export type ListPullRequestsOptions = {
   cwd: string;
@@ -430,6 +453,7 @@ export type SearchIssuesAndPrsOptions = {
 
 export interface CreatePullRequestOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   title: string;
   head: string;
   base: string;
@@ -514,10 +538,11 @@ export interface ForgeService {
     headRef: string;
     headSha?: string;
     headRepositoryOwner?: string;
+    repository?: ForgeRepositoryContext;
     onStatus?: (status: CurrentPullRequestStatus | null) => void;
     onError?: (error: unknown) => void;
   }): { unsubscribe: () => void };
-  invalidate(options: { cwd: string }): void;
+  invalidate(options: { cwd: string } & ForgeReadOptions): void;
   dispose?(): void;
 }
 

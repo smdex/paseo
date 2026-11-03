@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { PullRequestCommandStatus } from "./forge-service.js";
+import type { ForgeRepositoryContext, PullRequestCommandStatus } from "./forge-service.js";
 import { GITLAB_ACTIVE_PIPELINE_STATUS_SET } from "@getpaseo/protocol/gitlab-pipeline";
 import type { GitLabStatusFacts } from "./gitlab-facts.js";
 import {
@@ -261,6 +261,108 @@ const DISCUSSIONS = [
 ];
 
 describe("createGitLabService", () => {
+  it("binds native read requests to host/target/source projects and requires exact F/H terminal evidence", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitlab.one.invalid",
+      sourceRepository: "fork/repo",
+      targetRepository: "group/sub/repo",
+      headRef: OPEN_MR.source_branch,
+      headSha: OPEN_MR.sha,
+      remoteHeadSha: OPEN_MR.sha,
+    };
+    let sourceId = 101;
+    let sha = OPEN_MR.sha;
+    let state = "opened";
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "mr")
+          return ok(
+            JSON.stringify(
+              args[1] === "list"
+                ? [{ ...OPEN_MR, source_project_id: sourceId, sha, state }]
+                : { ...OPEN_MR, source_project_id: sourceId, sha, state },
+            ),
+          );
+        if (args[0] === "issue") return ok("[]");
+        if (args[0] === "api") {
+          const path = args[1].slice("projects/".length);
+          if (!path.includes("/"))
+            return ok(JSON.stringify({ id: 101, path_with_namespace: decodeURIComponent(path) }));
+          return ok(JSON.stringify({ approvals_required: 0, approvals_left: 0 }));
+        }
+        throw new Error(`Unexpected read ${args.join(" ")}`);
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("implicit Git discovery");
+        },
+      },
+    );
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(14);
+    for (const { host, targetRepository } of [
+      repository,
+      { ...repository, host: "gitlab.two.invalid", targetRepository: "other/repo" },
+    ]) {
+      await service.listPullRequests({
+        cwd: input.cwd,
+        repository: { ...repository, host, targetRepository },
+      });
+      expect(calls.at(-1)).toContain(`https://${host}/${targetRepository}`);
+      await service.searchIssuesAndPrs({
+        cwd: input.cwd,
+        repository: { ...repository, host, targetRepository },
+        query: "issue",
+        kinds: ["issue"],
+      });
+      expect(calls.at(-1)).toContain(`https://${host}/${targetRepository}`);
+    }
+    expect(calls.find((args) => args[1] === "projects/fork%2Frepo")).toEqual([
+      "api",
+      "projects/fork%2Frepo",
+      "--hostname",
+      repository.host,
+    ]);
+    sourceId = 999;
+    expect(await service.getCurrentPullRequestStatus(input)).toBeNull();
+    sourceId = 101;
+    sha = "2".repeat(40);
+    expect(await service.getCurrentPullRequestStatus(input)).toMatchObject({
+      number: 14,
+      state: "open",
+    });
+    sha = OPEN_MR.sha;
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+        headSha: "3".repeat(40),
+        force: true,
+        reason: "terminal-head-proof",
+      }),
+    ).toMatchObject({ number: 14, state: "open" });
+    state = "merged";
+    expect(
+      await service.getCurrentPullRequestStatus({
+        ...input,
+        repository: { ...repository, headSha: "4".repeat(40), remoteHeadSha: null },
+        headSha: "4".repeat(40),
+      }),
+    ).toBeNull();
+    expect(
+      (
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        })
+      )?.state,
+    ).toBe("merged");
+  });
   it("maps a glab merge request view to the neutral current PR status", async () => {
     const { service, calls } = makeService((args) =>
       ok(JSON.stringify(args[1] === "list" ? [OPEN_MR] : OPEN_MR)),
@@ -505,6 +607,71 @@ describe("createGitLabService", () => {
       headRepositorySshUrl: null,
       headRepositoryUrl: null,
     });
+  });
+
+  it("resolves the exact native fork clone URLs on the selected host without Git discovery", async () => {
+    const repository: ForgeRepositoryContext = {
+      host: "gitlab.example.com",
+      sourceRepository: "target/group/repo",
+      targetRepository: "target/group/repo",
+      headRef: "main",
+      headSha: null,
+      remoteHeadSha: null,
+    };
+    const { service, calls } = makeService(
+      (args) => {
+        if (args[0] === "mr")
+          return ok(JSON.stringify({ ...OPEN_MR, source_project_id: 202, target_project_id: 101 }));
+        if (args[0] === "api" && args[1] === "projects/202")
+          return ok(
+            JSON.stringify({
+              id: 202,
+              path_with_namespace: "fork/group/repo",
+              ssh_url_to_repo: "git@gitlab.example.com:fork/group/repo.git",
+              http_url_to_repo: "https://gitlab.example.com/fork/group/repo.git",
+            }),
+          );
+        throw new Error(`Unexpected forge request ${args.join(" ")}`);
+      },
+      {
+        resolveRemoteUrl: async () => {
+          throw new Error("Git discovery forbidden");
+        },
+      },
+    );
+    expect(
+      await service.getPullRequestCheckoutTarget({
+        cwd: "/native-secondary",
+        number: 14,
+        repository,
+      }),
+    ).toMatchObject({
+      isCrossRepository: true,
+      headOwnerLogin: "fork/group",
+      headRepositorySshUrl: "git@gitlab.example.com:fork/group/repo.git",
+      headRepositoryUrl: "https://gitlab.example.com/fork/group/repo.git",
+    });
+    expect(calls.at(-1)).toEqual(["api", "projects/202", "--hostname", repository.host]);
+  });
+
+  it("refuses a native MR checkout when source project identity is unavailable", async () => {
+    const { service } = makeService(() =>
+      ok(JSON.stringify({ ...OPEN_MR, source_project_id: null })),
+    );
+    await expect(
+      service.getPullRequestCheckoutTarget({
+        cwd: "/native",
+        number: 14,
+        repository: {
+          host: "gitlab.example.com",
+          targetRepository: "group/repo",
+          sourceRepository: "group/repo",
+          headRef: "main",
+          headSha: null,
+          remoteHeadSha: null,
+        },
+      }),
+    ).rejects.toThrow("source and target projects");
   });
 
   it("creates a merge request and parses the URL and iid from glab output", async () => {
@@ -1603,3 +1770,99 @@ describe("createGitLabService", () => {
     );
   });
 });
+
+it("creates a native fork MR with an explicit source project and target host", async () => {
+  const { service, calls } = makeService(() =>
+    ok("https://gitlab.example.com/upstream/project/-/merge_requests/31"),
+  );
+  const repository: ForgeRepositoryContext = {
+    host: "gitlab.example.com",
+    targetRepository: "upstream/project",
+    sourceRepository: "group/subgroup/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "a".repeat(40),
+  };
+  expect(
+    await service.createPullRequest({
+      cwd: "/native",
+      repository,
+      title: "Native",
+      body: "Body",
+      head: "feature",
+      base: "main",
+    }),
+  ).toEqual({ url: "https://gitlab.example.com/upstream/project/-/merge_requests/31", number: 31 });
+  expect(calls).toEqual([
+    [
+      "mr",
+      "create",
+      "--title",
+      "Native",
+      "--description",
+      "Body",
+      "--source-branch",
+      "feature",
+      "--target-branch",
+      "main",
+      "--yes",
+      "--head",
+      "https://gitlab.example.com/group/subgroup/fork",
+      "--repo",
+      "https://gitlab.example.com/upstream/project",
+    ],
+  ]);
+});
+
+it.each(["merge", "enable", "disable"] as const)(
+  "routes native GitLab %s to the exact target project and host",
+  async (operation) => {
+    const { service, calls } = makeService(() => ok(""));
+    const repository: ForgeRepositoryContext = {
+      host: "gl.private",
+      targetRepository: "upstream/group/project",
+      sourceRepository: "fork/project",
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "b".repeat(40),
+    };
+    const input = { cwd: "/native", repository, prNumber: 14 };
+    if (operation === "merge")
+      await service.mergePullRequest({
+        ...input,
+        mergeMethod: "squash",
+        status: gitlabAutoMergeStatus({
+          detailedMergeStatus: "mergeable",
+          pipelineStatus: "success",
+        }),
+      });
+    else if (operation === "enable")
+      await service.enablePullRequestAutoMerge({
+        ...input,
+        mergeMethod: "squash",
+        status: gitlabAutoMergeStatus(),
+      });
+    else await service.disablePullRequestAutoMerge(input);
+    expect(calls).toEqual([
+      operation === "disable"
+        ? [
+            "api",
+            "--method",
+            "POST",
+            "projects/upstream%2Fgroup%2Fproject/merge_requests/14/cancel_merge_when_pipeline_succeeds",
+            "--hostname",
+            "gl.private",
+          ]
+        : [
+            "mr",
+            "merge",
+            "14",
+            operation === "merge" ? "--auto-merge=false" : "--auto-merge",
+            "--yes",
+            "--squash",
+            "--repo",
+            "https://gl.private/upstream/group/project",
+          ],
+    ]);
+  },
+);

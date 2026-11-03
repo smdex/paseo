@@ -1,4 +1,8 @@
-import type { ForgeService, PullRequestCheckoutTarget } from "../services/forge-service.js";
+import type {
+  ForgeService,
+  ForgeRepositoryContext,
+  PullRequestCheckoutTarget,
+} from "../services/forge-service.js";
 import type { WorktreeSource } from "../utils/worktree.js";
 
 export type WorktreeCreationIntent = Exclude<
@@ -28,6 +32,7 @@ export interface ResolveWorktreeCreationIntentInput {
 export interface ResolveWorktreeCreationIntentDeps {
   forge: string;
   forgeService: ForgeService;
+  repository?: ForgeRepositoryContext;
   resolveDefaultBranch: (repoRoot: string) => Promise<string>;
 }
 
@@ -247,6 +252,7 @@ async function resolvePrCheckoutTarget(params: {
   return params.deps.forgeService.getPullRequestCheckoutTarget({
     cwd: params.repoRoot,
     number: params.changeRequestNumber,
+    ...(params.deps.repository ? { repository: params.deps.repository } : {}),
   });
 }
 
@@ -279,5 +285,6 @@ async function resolvePrHeadRef(params: {
   return params.deps.forgeService.getPullRequestHeadRef({
     cwd: params.repoRoot,
     number: params.changeRequestNumber,
+    ...(params.deps.repository ? { repository: params.deps.repository } : {}),
   });
 }

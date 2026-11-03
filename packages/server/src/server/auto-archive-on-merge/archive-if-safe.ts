@@ -6,6 +6,7 @@ import type { DaemonConfigStore } from "../daemon-config-store.js";
 import {
   archiveByScope,
   type ActiveWorkspaceRef,
+  type WorkspaceArchiveAuthorityPorts,
   killTerminalsForWorkspace,
 } from "../workspace-archive-service.js";
 import type {
@@ -16,8 +17,9 @@ import type { ForgeService } from "../../services/forge-service.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
 import type { WorkspaceArchiveContext } from "../workspace-registry.js";
+import { detectVcsBackend } from "../../utils/vcs-backend.js";
 
-export interface AutoArchiveArchiveOptions {
+export interface AutoArchiveArchiveOptions extends WorkspaceArchiveAuthorityPorts {
   paseoHome: string;
   paseoWorktreesBaseRoot?: string;
   daemonConfigStore: DaemonConfigStore;
@@ -63,6 +65,9 @@ export async function archiveIfSafe(input: {
   const cwd = snapshot.cwd;
   const pullRequest = snapshot.forge.pullRequest;
 
+  // Native merge/source proof and durable WIP accounting land with jj auto-archive parity.
+  if (snapshot.git.vcs === "jj" || (await detectVcsBackend(cwd)) === "jj") return;
+
   if (
     !pullRequest?.isMerged ||
     !snapshot.git.headSha ||
@@ -105,6 +110,9 @@ export async function archiveIfSafe(input: {
         agentStorage: options.agentStorage,
         findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
         listActiveWorkspaces: options.listActiveWorkspaces,
+        getWorkspace: options.getWorkspace,
+        setWorkspaceRecoveryPin: options.setWorkspaceRecoveryPin,
+        findWorkspaceIdsForBackingPath: options.findWorkspaceIdsForBackingPath,
         archiveWorkspaceRecord: (workspaceIdToArchive, archivedAt) =>
           options.archiveWorkspaceRecord(
             workspaceIdToArchive,
