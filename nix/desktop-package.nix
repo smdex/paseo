@@ -97,6 +97,9 @@ buildNpmPackage {
   buildPhase = ''
     runHook preBuild
 
+    # npmRebuildFlags skips lifecycle scripts, including required dependency patches.
+    npm run postinstall
+
     # Native deps (terminal emulation; libuv-linked on Linux)
     npm rebuild node-pty
 

@@ -90,6 +90,9 @@ buildNpmPackage rec {
   buildPhase = ''
     runHook preBuild
 
+    # npmRebuildFlags skips lifecycle scripts, including required dependency patches.
+    npm run postinstall
+
     # Rebuild only node-pty (native addon for terminal emulation). The sherpa
     # speech runtime ships prebuilt platform packages and is copied into the
     # daemon closure by scripts/trace-daemon.mjs.
