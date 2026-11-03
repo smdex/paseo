@@ -29,6 +29,30 @@ the titlebar row. Production builds leave the variable unset and show no label.
 
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
+## Maintaining the smdex fork
+
+Keep fork work as feature commits above `upstream/main`: native plugin tools,
+Jcode and its activity hooks, JJ checkout/recovery/change controls, Pi subagent
+observation, and Nix packaging. Fold feature fixes and rebase repairs into the
+owning commit rather than retaining WIP or integration-only commits. Keep tests
+with their feature; old command captures are not repeatable checks.
+
+Before rewriting published history, retain a local backup branch and save dirty
+tracked files separately. Compare the consolidated tree with that backup before
+rebasing: only deliberate removals should differ. Restore local edits after
+verification, not into the fork commits.
+
+For an update, fetch `upstream/main` and `origin/main`, capture their exact heads,
+rebase the feature stack, and verify shared lifecycle and forge boundaries as well
+as individual features. Increment the `-smdex.N` suffix for the same upstream
+version; start at `-smdex.1` when the upstream version changes. Sync workspace
+versions with `npm run version:sync-internal`, regenerate the lockfile without
+lifecycle scripts, and refresh `nix/npm-deps.hash` when the lockfile changes.
+Run the [targeted checks](testing.md), build workspace declarations, typecheck,
+lint, and format before pushing. Use an explicit `--force-with-lease` against the
+captured origin head so another push cannot be overwritten. Do not publish npm
+packages or restart installed daemons as part of a source update.
+
 ## Nix desktop package
 
 The flake exposes `packages.<system>.desktop` on Linux and macOS:
