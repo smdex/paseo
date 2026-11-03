@@ -43,7 +43,7 @@ export function createTestRegistries() {
     update: async (id, updater) => {
       const current = projects.get(id);
       if (!current) return null;
-      const updated = updater(current);
+      const updated = await updater(current);
       projects.set(id, updated);
       return updated;
     },
@@ -70,7 +70,7 @@ export function createTestRegistries() {
     update: async (id, updater) => {
       const existing = workspaces.get(id);
       if (!existing) return null;
-      const updated = updater(existing);
+      const updated = await updater(existing);
       workspaces.set(id, updated);
       return updated;
     },

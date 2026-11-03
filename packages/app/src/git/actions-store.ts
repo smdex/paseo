@@ -1,3 +1,4 @@
+import { CheckoutOperationError } from "@getpaseo/client/internal/daemon-client";
 import type { CheckoutPrMergeMethod } from "@getpaseo/protocol/messages";
 import { create } from "zustand";
 import { queryClient as appQueryClient } from "@/data/query-client";
@@ -25,6 +26,7 @@ export type CheckoutGitAsyncActionId =
   | "disable-pr-auto-merge"
   | "merge-branch"
   | "merge-from-base"
+  | "new-change"
   | "discard-changes";
 
 type CheckoutKey = string;
@@ -95,6 +97,7 @@ function inFlightKey(key: CheckoutKey, actionId: CheckoutGitAsyncActionId): stri
 
 interface CheckoutGitActionsStoreState {
   statusByCheckout: Record<CheckoutKey, StatusMap>;
+  errorByCheckout: Record<CheckoutKey, string | null>;
 
   getStatus: (params: {
     serverId: string;
@@ -102,7 +105,12 @@ interface CheckoutGitActionsStoreState {
     actionId: CheckoutGitAsyncActionId;
   }) => CheckoutGitActionStatus;
 
-  commit: (params: { serverId: string; cwd: string }) => Promise<void>;
+  commit: (params: {
+    serverId: string;
+    cwd: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+  }) => Promise<void>;
   pull: (params: { serverId: string; cwd: string }) => Promise<void>;
   push: (params: { serverId: string; cwd: string }) => Promise<void>;
   pullAndPush: (params: { serverId: string; cwd: string }) => Promise<void>;
@@ -122,6 +130,12 @@ interface CheckoutGitActionsStoreState {
   mergeBranch: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   mergeFromBase: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   discardChanges: (params: { serverId: string; cwd: string; paths: string[] }) => Promise<void>;
+  newChange: (params: {
+    serverId: string;
+    cwd: string;
+    expectedChangeId?: string;
+    acknowledgeRewrites?: boolean;
+  }) => Promise<void>;
 }
 
 async function runCheckoutAction({
@@ -150,6 +164,9 @@ async function runCheckoutAction({
     successTimers.delete(inflightId);
   }
 
+  useCheckoutGitActionsStore.setState((state) => ({
+    errorByCheckout: { ...state.errorByCheckout, [key]: null },
+  }));
   setStatus(key, actionId, "pending");
 
   const promise = (async () => {
@@ -163,6 +180,12 @@ async function runCheckoutAction({
       }, SUCCESS_DISPLAY_MS);
       successTimers.set(inflightId, timer);
     } catch (error) {
+      useCheckoutGitActionsStore.setState((state) => ({
+        errorByCheckout: {
+          ...state.errorByCheckout,
+          [key]: error instanceof Error ? error.message : String(error),
+        },
+      }));
       setStatus(key, actionId, "idle");
       throw error;
     } finally {
@@ -176,22 +199,27 @@ async function runCheckoutAction({
 
 export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()((set, get) => ({
   statusByCheckout: {},
+  errorByCheckout: {},
 
   getStatus: ({ serverId, cwd, actionId }) => {
     const key = checkoutKey(serverId, cwd);
     return get().statusByCheckout[key]?.[actionId] ?? "idle";
   },
 
-  commit: async ({ serverId, cwd }) => {
+  commit: async ({ serverId, cwd, expectedChangeId, acknowledgeRewrites }) => {
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: "commit",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutCommit(cwd, { addAll: true });
+        const payload = await client.checkoutCommit(cwd, {
+          addAll: true,
+          expectedChangeId,
+          acknowledgeRewrites,
+        });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -206,7 +234,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPull(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -221,7 +249,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPush(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -236,7 +264,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutRefresh(cwd);
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -251,11 +279,11 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const pullPayload = await client.checkoutPull(cwd);
         if (pullPayload.error) {
-          throw new Error(pullPayload.error.message);
+          throw new CheckoutOperationError(pullPayload.error);
         }
         const pushPayload = await client.checkoutPush(cwd);
         if (pushPayload.error) {
-          throw new Error(pushPayload.error.message);
+          throw new CheckoutOperationError(pushPayload.error);
         }
       },
     });
@@ -270,7 +298,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPrCreate(cwd, {});
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -285,7 +313,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const client = resolveClient(serverId);
         const payload = await client.checkoutPrMerge(cwd, { method });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -307,7 +335,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
             ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: true, method })
             : await client.checkoutGithubSetAutoMerge(cwd, { enabled: true, method });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -329,7 +357,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
             ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: false })
             : await client.checkoutGithubSetAutoMerge(cwd, { enabled: false });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -348,7 +376,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           requireCleanTarget: true,
         });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -366,7 +394,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
           requireCleanTarget: true,
         });
         if (payload.error) {
-          throw new Error(payload.error.message);
+          throw new CheckoutOperationError(payload.error);
         }
       },
     });
@@ -388,6 +416,20 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
       },
     });
   },
+  newChange: async ({ serverId, cwd, expectedChangeId, acknowledgeRewrites }) => {
+    await runCheckoutAction({
+      serverId,
+      cwd,
+      actionId: "new-change",
+      run: async () => {
+        const client = resolveClient(serverId);
+        const payload = await client.newChange({ cwd, expectedChangeId, acknowledgeRewrites });
+        if (payload.error) {
+          throw new CheckoutOperationError(payload.error);
+        }
+      },
+    });
+  },
 }));
 
 export function __resetCheckoutGitActionsStoreForTests() {
@@ -396,5 +438,5 @@ export function __resetCheckoutGitActionsStoreForTests() {
   }
   successTimers.clear();
   inFlight.clear();
-  useCheckoutGitActionsStore.setState({ statusByCheckout: {} });
+  useCheckoutGitActionsStore.setState({ statusByCheckout: {}, errorByCheckout: {} });
 }

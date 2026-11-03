@@ -1,11 +1,16 @@
 import type pino from "pino";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
-import {
-  checkoutResolvedBranch,
-  type CheckoutExistingBranchResult,
-  type GitMutationRefreshReason,
+import type {
+  CheckoutExistingBranchResult,
+  GitMutationRefreshReason,
 } from "../../../utils/checkout-git.js";
-import { runGitCommand } from "../../../utils/run-git-command.js";
+import {
+  dispatchExecuteBranchCheckout,
+  dispatchExecuteCreateBranchFromBase,
+  resolveEffectiveBackend,
+  type JjSwitchIntent,
+} from "../../../utils/checkout-dispatch.js";
+import type { CheckoutContext } from "../../../utils/checkout-git.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-session.js";
 
@@ -21,7 +26,11 @@ import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-ses
  * session as loose callbacks.
  */
 export interface GitMutationService {
-  checkoutExistingBranch(cwd: string, branch: string): Promise<CheckoutExistingBranchResult>;
+  checkoutExistingBranch(
+    cwd: string,
+    branch: string,
+    switchOptions?: { intent?: JjSwitchIntent; context?: CheckoutContext },
+  ): Promise<CheckoutExistingBranchResult>;
   createBranchFromBase(params: {
     cwd: string;
     baseBranch: string;
@@ -91,14 +100,24 @@ export function createGitMutationService(deps: {
   }
 
   return {
-    async checkoutExistingBranch(cwd, branch) {
+    async checkoutExistingBranch(cwd, branch, switchOptions) {
       assertSafeGitRef(branch, "branch");
       const resolution = await workspaceGitService.validateBranchRef(cwd, branch);
       if (resolution.kind === "not-found") {
         throw new Error(`Branch not found: ${branch}`);
       }
-      await ensureCleanWorkingTree(cwd);
-      const result = await checkoutResolvedBranch({ cwd, resolution });
+      // jj snapshots the working copy into the change being left — the git
+      // clean-tree gate and its "commit or stash" message never apply
+      // (jjSwitchBookmark refuses only untracked files that would not survive).
+      if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+        await ensureCleanWorkingTree(cwd);
+      }
+      const result = await dispatchExecuteBranchCheckout(
+        cwd,
+        resolution,
+        switchOptions?.intent,
+        switchOptions?.context,
+      );
       await notifyGitMutation(cwd, "switch-branch", { invalidateForge: true });
       return result;
     },
@@ -117,16 +136,20 @@ export function createGitMutationService(deps: {
         throw new Error(`Branch already exists: ${newBranchName}`);
       }
 
-      await ensureCleanWorkingTree(cwd);
+      // jj preserves the working copy across `jj new` (snapshots ride the
+      // change), so the git clean-tree gate must not reject jj checkouts
+      // (review fix 12).
+      if ((await resolveEffectiveBackend(cwd)) !== "jj") {
+        await ensureCleanWorkingTree(cwd);
+      }
       // --no-track: a branch we create is not a continuation of its base, so it gets no
       // upstream. Without it git hands the new branch `origin/<base>` whenever the base is a
       // remote-tracking ref or branch.autoSetupMerge asks for inheritance, and every later
       // push then reads that upstream and lands the work on the default branch. The worktree
-      // path makes the same promise with `git worktree add -b <branch> --no-track <base>`.
-      await runGitCommand(["checkout", "-b", newBranchName, "--no-track", baseBranch], {
-        cwd,
-        timeout: 120_000,
-      });
+      // path makes the same promise with `git worktree add -b <branch> --no-track <base>`;
+      // the jj arm creates a new change on the base and bookmarks it, never moving the
+      // base bookmark.
+      await dispatchExecuteCreateBranchFromBase(cwd, { baseBranch, newBranchName });
       await notifyGitMutation(cwd, "create-branch");
     },
 

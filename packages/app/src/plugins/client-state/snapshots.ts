@@ -40,6 +40,7 @@ export function createPluginWorkspaceSnapshot(
   )
     return cached.snapshot;
   const diffStat = workspace.diffStat ? Object.freeze({ ...workspace.diffStat }) : null;
+  const vcs = workspace.gitRuntime?.vcs;
   const snapshot = Object.freeze({
     ref: entityRefs.workspace(hostId, workspace.id),
     hostId,
@@ -59,6 +60,7 @@ export function createPluginWorkspaceSnapshot(
     projectRootPath: workspace.projectRootPath,
     directory: workspace.workspaceDirectory,
     projectKind: workspace.projectKind,
+    ...(vcs ? { vcs } : {}),
     kind: workspace.workspaceKind,
     name: workspace.name,
     title: workspace.title ?? null,

@@ -89,6 +89,9 @@ import {
 import {
   buildPickerOptionData,
   defaultBasePickerItem,
+  canSearchRefPickerChangeRequests,
+  refPickerChangeRequests,
+  refPickerBackend,
   pickerItemLabel,
   pickerItemToCheckoutRequest,
   startsNewBranch,
@@ -889,6 +892,7 @@ export function NewWorkspaceScreen({
   // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
   const supportsWorkspaceMultiplicity = useHostFeature(selectedServerId, "workspaceMultiplicity");
   const supportsForgeSearch = useHostFeature(selectedServerId, "forgeSearch");
+  const supportsJjPrWorkspace = useHostFeature(selectedServerId, "checkoutJjPrWorkspace");
   const [creationIdentity] = useState(() => ({
     draftId: draftId ?? generateDraftId(),
     worktreeSlug: createNameId(),
@@ -1054,6 +1058,7 @@ export function NewWorkspaceScreen({
     canCreateWorktree,
   });
 
+  const pickerBackend = refPickerBackend({ status: checkoutStatus, enabled: pickerQueryEnabled });
   const branchSuggestionsQuery = useQuery({
     queryKey: [
       "branch-suggestions",
@@ -1072,7 +1077,7 @@ export function NewWorkspaceScreen({
         limit: 20,
       });
     },
-    enabled: pickerQueryEnabled,
+    enabled: pickerBackend.branchesEnabled,
     staleTime: 15_000,
   });
 
@@ -1083,19 +1088,33 @@ export function NewWorkspaceScreen({
     query: debouncedPickerSearchQuery,
     kinds: ["change_request"],
     supportsForgeSearch,
-    enabled: pickerQueryEnabled,
+    enabled: canSearchRefPickerChangeRequests({
+      status: checkoutStatus,
+      enabled: pickerQueryEnabled,
+      supportsJjPrWorkspace,
+    }),
   });
 
   const branchDetails = useMemo(
-    () => normalizeBranchDetails(branchSuggestionsQuery.data),
-    [branchSuggestionsQuery.data],
+    () =>
+      pickerBackend.branchesEnabled ? normalizeBranchDetails(branchSuggestionsQuery.data) : [],
+    [branchSuggestionsQuery.data, pickerBackend.branchesEnabled],
   );
   const forgeSearchAuthenticated =
     !githubPrSearchQuery.data || githubPrSearchQuery.data.authState === "authenticated";
   const prItems: ForgeSearchItem[] = useMemo(() => {
     if (!forgeSearchAuthenticated) return [];
-    return githubPrSearchQuery.data?.items ?? [];
-  }, [forgeSearchAuthenticated, githubPrSearchQuery.data?.items]);
+    return refPickerChangeRequests(
+      checkoutStatus,
+      githubPrSearchQuery.data?.items,
+      supportsJjPrWorkspace,
+    );
+  }, [
+    checkoutStatus,
+    forgeSearchAuthenticated,
+    githubPrSearchQuery.data?.items,
+    supportsJjPrWorkspace,
+  ]);
 
   const baseItem = useMemo(
     () => selectedItem ?? (checkoutStatus ? defaultBasePickerItem(checkoutStatus) : null),
@@ -1107,13 +1126,14 @@ export function NewWorkspaceScreen({
         branchDetails,
         prItems,
         baseItem,
+        vcs: pickerBackend.vcs,
       }),
-    [baseItem, branchDetails, prItems],
+    [baseItem, branchDetails, pickerBackend.vcs, prItems],
   );
   const triggerLabel = useMemo(() => {
     const displayItem = itemById.get(selectedOptionId);
-    return displayItem ? pickerItemLabel(displayItem) : "main";
-  }, [itemById, selectedOptionId]);
+    return displayItem ? pickerItemLabel(displayItem) : t("newWorkspace.refPicker.startingRef");
+  }, [itemById, selectedOptionId, t]);
   const selectPickerItem = useCallback(
     (item: PickerItem) => {
       setup.chooseBase(item);

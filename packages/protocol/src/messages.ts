@@ -985,10 +985,8 @@ export type RecentProviderSessionDescriptorPayload = z.infer<
   typeof RecentProviderSessionDescriptorPayloadSchema
 >;
 
-// ============================================================================
-// Session Inbound Messages (Session receives these)
-// ============================================================================
-
+// =====================================================================// Session Inbound Messages (Session receives these)
+// =====================================================================
 export const VoiceAudioChunkMessageSchema = z.object({
   type: z.literal("voice_audio_chunk"),
   audio: z.string(), // base64 encoded
@@ -1345,10 +1343,8 @@ export const SendAgentMessageSchema = z.object({
   attachments: AgentAttachmentsSchema,
 });
 
-// ============================================================================
-// Agent RPCs (requestId-correlated)
-// ============================================================================
-
+// =====================================================================// Agent RPCs (requestId-correlated)
+// =====================================================================
 const DirectorySyncRequestSchema = z.object({
   generation: z.string().optional(),
   afterSeq: z.number().int().nonnegative().optional(),
@@ -1795,10 +1791,8 @@ export const WriteProjectConfigRequestMessageSchema = z.object({
   expectedRevision: PaseoConfigRevisionSchema.nullable(),
 });
 
-// ============================================================================
-// Dictation Streaming (lossless, resumable)
-// ============================================================================
-
+// =====================================================================// Dictation Streaming (lossless, resumable)
+// =====================================================================
 export const DictationStreamStartMessageSchema = z.object({
   type: z.literal("dictation_stream_start"),
   dictationId: z.string(),
@@ -2404,10 +2398,12 @@ const CheckoutErrorCodeSchema = z.enum([
   "UNKNOWN",
 ]);
 
-const CheckoutErrorSchema = z.object({
+export const CheckoutErrorSchema = z.object({
   code: CheckoutErrorCodeSchema,
   message: z.string(),
+  reason: z.literal("rewrite_approval_required").optional(),
 });
+export type CheckoutError = z.infer<typeof CheckoutErrorSchema>;
 
 const CheckoutDiffCompareSchema = z.object({
   mode: z.enum(["uncommitted", "base", "all"]),
@@ -2491,6 +2487,8 @@ export const CheckoutCommitRequestSchema = z.object({
   cwd: z.string(),
   message: z.string().optional(),
   addAll: z.boolean().optional(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -2542,13 +2540,19 @@ export const CheckoutPrCreateRequestSchema = z.object({
   title: z.string().optional(),
   body: z.string().optional(),
   baseRef: z.string().optional(),
+  expectedChangeId: z.string().optional(),
   requestId: z.string(),
 });
+
+export const CheckoutPrTargetSchema = z.object({ host: z.string(), targetRepository: z.string() });
+export const CheckoutPrIdentitySchema = CheckoutPrTargetSchema.extend({ number: z.number() });
+export type CheckoutPrIdentity = z.infer<typeof CheckoutPrIdentitySchema>;
 
 export const CheckoutPrMergeRequestSchema = z.object({
   type: z.literal("checkout_pr_merge_request"),
   cwd: z.string(),
   mergeMethod: z.enum(["merge", "squash", "rebase"]),
+  expectedPullRequest: CheckoutPrIdentitySchema.optional(),
   requestId: z.string(),
 });
 
@@ -2557,6 +2561,7 @@ export const CheckoutForgeSetAutoMergeRequestSchema = z.object({
   cwd: z.string(),
   enabled: z.boolean(),
   mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
+  expectedPullRequest: CheckoutPrIdentitySchema.optional(),
   requestId: z.string(),
 });
 
@@ -2580,6 +2585,7 @@ const CheckoutCommitFileSchema = z.object({
 
 const CheckoutCommitSchema = z.object({
   sha: z.string(),
+  changeId: z.string().optional(),
   shortSha: z.string(),
   subject: z.string(),
   authorName: z.string(),
@@ -2665,6 +2671,22 @@ export const CheckoutSwitchBranchRequestSchema = z.object({
   type: z.literal("checkout_switch_branch_request"),
   cwd: z.string(),
   branch: z.string(),
+  /**
+   * jj bookmark-switch intent, captured when the switcher was opened; every
+   * field is optional and ignored by git-only daemons (old-daemon safe).
+   * `new-on` (default): new change on the captured revision. `resume`:
+   * same-ID edit of the saved WIP.
+   */
+  mode: z.enum(["new-on", "resume"]).optional(),
+  /** Change ID of the saved WIP on the target line (resume). */
+  wipChangeId: z.string().optional(),
+  /** Bookmark revision captured when the switcher opened (new-on CAS). */
+  targetCommitId: z.string().optional(),
+  /** Working-copy change ID captured when the switcher opened. */
+  expectedChangeId: z.string().optional(),
+  /** Optional description for the new working-copy change (new-on). */
+  message: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -2672,6 +2694,60 @@ export const CheckoutRenameBranchRequestSchema = z.object({
   type: z.literal("checkout.rename_branch.request"),
   cwd: z.string(),
   branch: z.string(),
+  requestId: z.string(),
+});
+
+export const CheckoutNewChangeRequestSchema = z.object({
+  type: z.literal("checkout.new_change.request"),
+  cwd: z.string(),
+  /** Optional description for the new working-copy change. */
+  message: z.string().optional(),
+  /**
+   * Optional exact revision the new change starts on (jj). Captured by the
+   * caller (e.g. "New change on…" from history); omitted means the current
+   * working copy. Ignored by git-only daemons (old-daemon safe).
+   */
+  targetCommitId: z.string().optional(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutDescribeChangeRequestSchema = z.object({
+  type: z.literal("checkout.describe_change.request"),
+  cwd: z.string(),
+  /** Replacement description for the current working-copy change. */
+  message: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutIntegrateBaseRequestSchema = z.object({
+  type: z.literal("checkout.jj.integrate_base.request"),
+  cwd: z.string(),
+  baseRef: z.string(),
+  expectedChangeId: z.string().optional(),
+  expectedCommitId: z.string().optional(),
+  expectedBaseCommitId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutFetchRebaseRequestSchema = z.object({
+  type: z.literal("checkout.jj.fetch_rebase.request"),
+  cwd: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
+  requestId: z.string(),
+});
+
+export const CheckoutEditChangeRequestSchema = z.object({
+  type: z.literal("checkout.edit_change.request"),
+  cwd: z.string(),
+  changeId: z.string(),
+  expectedChangeId: z.string().optional(),
+  acknowledgeRewrites: z.boolean().optional(),
   requestId: z.string(),
 });
 
@@ -3226,10 +3302,8 @@ export const PushUnregisterResponseSchema = z.object({
   }),
 });
 
-// ============================================================================
-// Terminal Messages
-// ============================================================================
-
+// =====================================================================// Terminal Messages
+// =====================================================================
 export const ListTerminalsRequestSchema = z.object({
   type: z.literal("list_terminals_request"),
   cwd: z.string().optional(),
@@ -3643,6 +3717,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PullRequestTimelineRequestSchema,
   CheckoutSwitchBranchRequestSchema,
   CheckoutRenameBranchRequestSchema,
+  CheckoutNewChangeRequestSchema,
+  CheckoutDescribeChangeRequestSchema,
+  CheckoutEditChangeRequestSchema,
+  CheckoutFetchRebaseRequestSchema,
+  CheckoutIntegrateBaseRequestSchema,
   StashSaveRequestSchema,
   StashPopRequestSchema,
   StashListRequestSchema,
@@ -3730,10 +3809,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
 
-// ============================================================================
-// Session Outbound Messages (Session emits these)
-// ============================================================================
-
+// =====================================================================// Session Outbound Messages (Session emits these)
+// =====================================================================
 export const ActivityLogPayloadSchema = z.object({
   subscriptionId: z.string().optional(),
   id: z.string(),
@@ -4003,6 +4080,25 @@ export const ServerInfoStatusPayloadSchema = z
         agentHistorySearch: z.boolean().optional(),
         // COMPAT(checkoutRefresh): added in v0.1.86, remove gate after 2026-11-29.
         checkoutRefresh: z.boolean().optional(),
+        // COMPAT(checkoutJj): first-class jj checkout support; advertised only when
+        // the daemon's jj runtime probe passes and dispatch is enabled. Remove the
+        // gate once the client floor ships jj-aware UI.
+        checkoutJj: z.boolean().optional(),
+        checkoutJjCheckpoint: z.boolean().optional(),
+        // COMPAT(checkoutJjPrCreate): added in v0.11.2-smdex; remove after 2027-04-14 once the host floor supports native publication.
+        checkoutJjPrCreate: z.boolean().optional(),
+        // COMPAT(checkoutJjPrWorkspace): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native PR workspace creation.
+        checkoutJjPrWorkspace: z.boolean().optional(),
+        // COMPAT(checkoutJjPrMutations): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports selected native PR commands.
+        checkoutJjPrMutations: z.boolean().optional(),
+        // COMPAT(checkoutJjRewriteApproval): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor sends structured rewrite refusals.
+        checkoutJjRewriteApproval: z.boolean().optional(),
+        // COMPAT(checkoutJjFetchRebase): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports native fetch/rebase.
+        checkoutJjFetchRebase: z.boolean().optional(),
+        // COMPAT(checkoutJjIntegrate): added in v0.11.2-smdex; remove after 2027-04-14 once the daemon floor supports captured native integration.
+        checkoutJjIntegrate: z.boolean().optional(),
+        // COMPAT(checkoutJjGraphSelections): added in v0.11.2-smdex; remove after 2027-03-31 once the daemon floor understands captured P2 intents.
+        checkoutJjGraphSelections: z.boolean().optional(),
         // COMPAT(workspaceMultiplicity): added in v0.1.97, drop the gate when floor >= v0.1.97
         workspaceMultiplicity: z.boolean().optional(),
         // COMPAT(projectRemove): added in v0.1.97, drop the gate when floor >= v0.1.97.
@@ -4343,6 +4439,10 @@ const WorkspaceGitRuntimePayloadSchema = z
       .optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    // Backend discriminator: "jj" on Jujutsu repositories, unset on git.
+    vcs: z.enum(["git", "jj"]).optional(),
+    // jj change id of the working-copy commit (jj only; null when unknown).
+    changeId: z.string().nullable().optional(),
   })
   .optional()
   .nullable();
@@ -5697,6 +5797,14 @@ const CheckoutStatusCommonSchema = z.object({
   // upstream branch name is not necessarily currentBranch, so composing one is wrong.
   // aheadOfOrigin/behindOfOrigin are measured against exactly this ref.
   upstreamRef: z.string().nullable().optional(),
+  // Backend discriminator for the checkout: "jj" on Jujutsu repositories,
+  // unset on git. Drives contextual labels; older clients ignore it.
+  vcs: z.enum(["git", "jj"]).optional(),
+  // jj change id of the working-copy commit (jj only; null when unknown).
+  changeId: z.string().nullable().optional(),
+  jjDescription: z.string().optional(),
+  jjSnapshotRefusedPaths: z.array(z.string()).optional(),
+  defaultWorkspaceBase: z.object({ refName: z.string(), displayName: z.string() }).optional(),
 });
 
 const CheckoutStatusNotGitSchema = CheckoutStatusCommonSchema.extend({
@@ -5809,6 +5917,7 @@ export const CheckoutPrStatusSchema = z.object({
   // COMPAT(forge): added in v0.2.0-beta.1. Remove the GitHub default after
   // 2027-01-17 once the supported daemon floor is >= v0.2.0.
   forge: z.string().optional().default("github"),
+  repository: CheckoutPrTargetSchema.optional(),
   projectPath: z.string().optional(),
   number: z.number().optional(),
   url: z.string(),
@@ -6291,6 +6400,10 @@ export const CheckoutSwitchBranchResponseSchema = z.object({
     success: z.boolean(),
     branch: z.string(),
     source: z.enum(["local", "remote"]).optional(),
+    /** jj switch outcome: which native mode ran and the resulting working-copy change. */
+    mode: z.enum(["new-on", "resume"]).optional(),
+    changeId: z.string().nullable().optional(),
+    commitId: z.string().nullable().optional(),
     error: CheckoutErrorSchema.nullable(),
     requestId: z.string(),
   }),
@@ -6303,6 +6416,81 @@ export const CheckoutRenameBranchResponseSchema = z.object({
     success: z.boolean(),
     cwd: z.string(),
     currentBranch: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutNewChangeResponseSchema = z.object({
+  type: z.literal("checkout.new_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutDescribeChangeResponseSchema = z.object({
+  type: z.literal("checkout.describe_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutIntegrationOutcomeSchema = z.enum(["integrated", "noop", "conflicts"]);
+export type CheckoutIntegrationOutcome = z.infer<typeof CheckoutIntegrationOutcomeSchema>;
+
+export const CheckoutIntegrateBaseResponseSchema = z.object({
+  type: z.literal("checkout.jj.integrate_base.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    baseCommitId: z.string().nullable().optional(),
+    integrationCommitId: z.string().nullable().optional(),
+    outcome: CheckoutIntegrationOutcomeSchema.optional(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutFetchRebaseOutcomeSchema = z.enum(["rebased", "unchanged", "conflicts"]);
+export type CheckoutFetchRebaseOutcome = z.infer<typeof CheckoutFetchRebaseOutcomeSchema>;
+
+export const CheckoutFetchRebaseResponseSchema = z.object({
+  type: z.literal("checkout.jj.fetch_rebase.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
+    outcome: CheckoutFetchRebaseOutcomeSchema.optional(),
+    error: CheckoutErrorSchema.nullable(),
+  }),
+});
+
+export const CheckoutEditChangeResponseSchema = z.object({
+  type: z.literal("checkout.edit_change.response"),
+  payload: z.object({
+    requestId: z.string(),
+    success: z.boolean(),
+    cwd: z.string(),
+    changeId: z.string().nullable(),
+    commitId: z.string().nullable(),
+    bookmark: z.string().nullable(),
     error: CheckoutErrorSchema.nullable(),
   }),
 });
@@ -6368,6 +6556,17 @@ export const BranchSuggestionsResponseSchema = z.object({
           hasRemote: z.boolean().optional(),
           localAhead: z.number().int().nonnegative().optional(),
           localBehind: z.number().int().nonnegative().optional(),
+          localRef: z.string().optional(),
+          remoteRef: z.string().optional(),
+          remoteName: z.string().optional(),
+          /**
+           * jj: change ID of the checkpoint-saved WIP on this bookmark's
+           * line, offered as a same-ID Resume. Absent on git and when the
+           * line holds no saved WIP.
+           */
+          wipChangeId: z.string().optional(),
+          // COMPAT(jjResumeLookupErrors): added in v0.11.2-smdex, remove after 2027-04-14 once the daemon floor advertises this detail to every jj client.
+          resumeLookupError: z.string().optional(),
         }),
       )
       .optional(),
@@ -6861,10 +7060,8 @@ export const ListCommandsResponseSchema = z.object({
   }),
 });
 
-// ============================================================================
-// Terminal Outbound Messages
-// ============================================================================
-
+// =====================================================================// Terminal Outbound Messages
+// =====================================================================
 const TerminalInfoSchema = z.object({
   createdAt: z.string().nullable().optional(),
   isScript: z.boolean().optional(),
@@ -7543,6 +7740,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PullRequestTimelineResponseSchema,
   CheckoutSwitchBranchResponseSchema,
   CheckoutRenameBranchResponseSchema,
+  CheckoutNewChangeResponseSchema,
+  CheckoutDescribeChangeResponseSchema,
+  CheckoutEditChangeResponseSchema,
+  CheckoutFetchRebaseResponseSchema,
+  CheckoutIntegrateBaseResponseSchema,
   StashSaveResponseSchema,
   StashPopResponseSchema,
   StashListResponseSchema,
@@ -7967,6 +8169,12 @@ export type CheckoutSwitchBranchRequest = z.infer<typeof CheckoutSwitchBranchReq
 export type CheckoutSwitchBranchResponse = z.infer<typeof CheckoutSwitchBranchResponseSchema>;
 export type CheckoutRenameBranchRequest = z.infer<typeof CheckoutRenameBranchRequestSchema>;
 export type CheckoutRenameBranchResponse = z.infer<typeof CheckoutRenameBranchResponseSchema>;
+export type CheckoutNewChangeRequest = z.infer<typeof CheckoutNewChangeRequestSchema>;
+export type CheckoutNewChangeResponse = z.infer<typeof CheckoutNewChangeResponseSchema>;
+export type CheckoutNewChangePayload = CheckoutNewChangeResponse["payload"];
+export type CheckoutDescribeChangeRequest = z.infer<typeof CheckoutDescribeChangeRequestSchema>;
+export type CheckoutDescribeChangeResponse = z.infer<typeof CheckoutDescribeChangeResponseSchema>;
+export type CheckoutDescribeChangePayload = CheckoutDescribeChangeResponse["payload"];
 export type StashSaveRequest = z.infer<typeof StashSaveRequestSchema>;
 export type StashSaveResponse = z.infer<typeof StashSaveResponseSchema>;
 export type StashPopRequest = z.infer<typeof StashPopRequestSchema>;
@@ -8083,10 +8291,8 @@ export type CaptureTerminalRequest = z.infer<typeof CaptureTerminalRequestSchema
 export type CaptureTerminalResponse = z.infer<typeof CaptureTerminalResponseSchema>;
 export type TerminalStreamExit = z.infer<typeof TerminalStreamExitSchema>;
 
-// ============================================================================
-// WebSocket Level Messages (wraps session messages)
-// ============================================================================
-
+// =====================================================================// WebSocket Level Messages (wraps session messages)
+// =====================================================================
 // WebSocket-only messages (not session messages)
 export const WSPingMessageSchema = z.object({
   type: z.literal("ping"),
@@ -8177,10 +8383,8 @@ export type WSInboundMessage = z.infer<typeof WSInboundMessageSchema>;
 export type WSOutboundMessage = z.infer<typeof WSOutboundMessageSchema>;
 export type WSHelloMessage = z.infer<typeof WSHelloMessageSchema>;
 
-// ============================================================================
-// Helper functions for message conversion
-// ============================================================================
-
+// =====================================================================// Helper functions for message conversion
+// =====================================================================
 /**
  * Extract session message from WebSocket message
  * Returns null if message should be handled at WS level only
