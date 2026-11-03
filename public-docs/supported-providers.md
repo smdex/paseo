@@ -18,6 +18,7 @@ Work out of the box once the underlying CLI is installed and authenticated.
 - [Codex](/docs/codex). OpenAI's workspace agent with sandbox controls and optional network access.
 - [OpenCode](https://opencode.ai/). Open-source coding assistant with multi-provider model support.
 - [Pi](https://pi.dev). Minimal terminal-based coding agent with multi-provider LLM support.
+- [Jcode](/docs/jcode). Open-source TUI coding agent, run through a bundled provider plugin. Also supports terminal activity hooks and the shared skills directory in its own config.
 - [Antigravity](#antigravity). Uses your installed `agy` CLI through a built-in provider plugin.
 - [Muse Code](/docs/muse-code). Meta's terminal coding agent, bundled as a provider plugin.
 

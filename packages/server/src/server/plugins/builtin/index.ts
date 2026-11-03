@@ -10,6 +10,7 @@ export const builtinPlugins = [
   "cursor-usage-source",
   "grok-usage-source",
   "hoplite-provider",
+  "jcode-provider",
   "kimi-usage-source",
   "minimax-usage-source",
   "muse-provider",
