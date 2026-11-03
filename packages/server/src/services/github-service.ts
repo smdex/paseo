@@ -14,6 +14,7 @@ import { execCommand } from "../utils/spawn.js";
 import { resolveSshHostname } from "../utils/ssh-hostname.js";
 import {
   CLI_AUTH_PROBE_TIMEOUT_MS,
+  requireForgeRepositoryContext,
   createForgeCliRunner,
   ForgeAuthenticationError,
   ForgeCliMissingError,
@@ -23,6 +24,7 @@ import {
   type ForgeCommandFailureParams,
 } from "./forge-cli-command.js";
 import {
+  ForgeRepositoryContextError,
   computeChecksStatus,
   compareTimelineItems,
   createUnavailableSearchResult,
@@ -36,6 +38,7 @@ import type {
   CurrentPullRequestStatus,
   DisablePullRequestAutoMergeOptions,
   EnablePullRequestAutoMergeOptions,
+  ForgeRepositoryContext,
   ForgeReadOptions,
   ForgeService,
   IssueSummary,
@@ -963,6 +966,7 @@ interface GitHubServiceDependencies {
 
 export interface GitHubCommandRunnerOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   envOverlay?: Record<string, string>;
 }
 
@@ -990,6 +994,7 @@ export interface GitHubRepositorySummary {
 
 export interface SearchGitHubRepositoriesOptions {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   query: string;
   limit?: number;
 }
@@ -1071,6 +1076,7 @@ interface InFlightCacheEntry {
 
 interface GitHubPollTarget {
   cwd: string;
+  repository?: ForgeRepositoryContext;
   headRef: string;
   headSha?: string;
   headRepositoryOwner?: string;
@@ -1181,6 +1187,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     readOptions?: ForgeReadOptions;
     load: () => Promise<T>;
   }): Promise<T> {
+    await requireForgeRepositoryContext({
+      cwd: params.cwd,
+      repository: params.readOptions?.repository,
+    });
     if (params.readOptions?.force && !params.readOptions.reason) {
       throw new Error("ForgeService forced read requires a reason");
     }
@@ -1188,7 +1198,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     const key = buildCacheKey({
       cwd: params.cwd,
       method: params.method,
-      args: params.args,
+      args: { request: params.args, repository: params.readOptions?.repository },
     });
     const cachedEntry = cache.get(key);
     const now = deps.now();
@@ -1231,8 +1241,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     if (cachedHost && (cachedHost.expiresAt === null || deps.now() < cachedHost.expiresAt)) {
       return cachedHost.promise;
     }
-    const pending = deps
-      .resolveRepoHost(cwd)
+    const pending = requireForgeRepositoryContext({ cwd })
+      .then(() => deps.resolveRepoHost(cwd))
       .then((host) => {
         const current = repoHostByCwd.get(cwd);
         if (current?.promise === pending) {
@@ -1282,8 +1292,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       expiresAt: number | null;
       resolved?: { value: string | null };
     } = {
-      promise: deps
-        .resolveRepoSlug(cwd)
+      promise: requireForgeRepositoryContext({ cwd })
+        .then(() => deps.resolveRepoSlug(cwd))
         .then((slug) => {
           if (repoSlugByCwd.get(cwd) === entry) {
             entry.resolved = { value: slug };
@@ -1327,10 +1337,19 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     // otherwise default to github.com regardless of the resolved repository,
     // which silently queries the wrong server on GitHub Enterprise. GH_HOST is
     // safe even for auto-routing subcommands because it matches the repo's host.
-    const host = await resolveRepoHostCached(runOptions.cwd);
-    const effectiveOptions: GitHubCommandRunnerOptions = host
-      ? { ...runOptions, envOverlay: { ...runOptions.envOverlay, GH_HOST: host } }
-      : runOptions;
+    const repository = await requireForgeRepositoryContext(runOptions);
+    const host = repository?.host ?? (await resolveRepoHostCached(runOptions.cwd));
+    if (repository && ["pr", "issue", "repo"].includes(args[0]) && !args.includes("--repo")) {
+      if (args[0] === "repo" && args[1] === "view")
+        args = [...args.slice(0, 2), `${host}/${repository.targetRepository}`, ...args.slice(2)];
+      else args = [...args, "--repo", `${host}/${repository.targetRepository}`];
+    }
+    const effectiveOptions: GitHubCommandRunnerOptions = {
+      cwd: runOptions.cwd,
+      ...(runOptions.envOverlay || host
+        ? { envOverlay: { ...runOptions.envOverlay, ...(host ? { GH_HOST: host } : {}) } }
+        : {}),
+    };
     try {
       const result = await deps.runner(args, effectiveOptions);
       return result.stdout.trim();
@@ -1361,6 +1380,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     headRef: string;
     headSha?: string;
     headRepositoryOwner?: string;
+    repository?: ForgeRepositoryContext;
   }): string {
     return buildCacheKey({
       cwd: target.cwd,
@@ -1369,6 +1389,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         headRef: target.headRef,
         headSha: target.headSha,
         headRepositoryOwner: target.headRepositoryOwner,
+        repository: target.repository,
       },
     });
   }
@@ -1378,6 +1399,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     headRef: string;
     headSha?: string;
     headRepositoryOwner?: string;
+    repository?: ForgeRepositoryContext;
     status: CurrentPullRequestStatus | null;
     notify: boolean;
   }): void {
@@ -1414,7 +1436,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     const now = deps.now();
     const baseline = target.pollCycleStartedAt ?? now;
     target.pollCycleStartedAt = null;
-    const pauseUntil = getPollPauseUntil(target.cwd);
+    const pauseUntil = getPollPauseUntil(target.cwd, target.repository);
     if (delayMs <= 0) {
       target.nextDueAt = Math.max(now, pauseUntil);
       armGitHubPollTimer();
@@ -1432,8 +1454,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     armGitHubPollTimer();
   }
 
-  function getPollPauseUntil(cwd: string): number {
-    const host = peekRepoHost(cwd);
+  function getPollPauseUntil(cwd: string, repository?: ForgeRepositoryContext): number {
+    const host = repository ? { settled: true, value: repository.host } : peekRepoHost(cwd);
     if (!host.settled) {
       return 0;
     }
@@ -1476,6 +1498,36 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     );
   }
 
+  async function validateGitHubPollTargets(due: GitHubPollTarget[]) {
+    const validations: Array<PromiseSettledResult<ForgeRepositoryContext | undefined> | undefined> =
+      [];
+    let validationDeadlinePassed = false;
+    const pendingValidations = due.map((target, index) =>
+      requireForgeRepositoryContext({ cwd: target.cwd, repository: target.repository })
+        .then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason: unknown) => ({ status: "rejected" as const, reason }),
+        )
+        .then((result) => {
+          validations[index] = result;
+          if (validationDeadlinePassed && target.retainCount > 0 && target.nextDueAt === null)
+            scheduleGitHubPollAfter(target, 1);
+          return undefined;
+        }),
+    );
+    // ponytail: wait at most 100 ms for one batch's filesystem checks; upgrade to per-target admission if this becomes a throughput limit.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(pendingValidations),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, 100);
+      }),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    validationDeadlinePassed = true;
+    return validations;
+  }
+
   async function flushDueGitHubPolls(): Promise<void> {
     const now = deps.now();
     const due: GitHubPollTarget[] = [];
@@ -1491,10 +1543,26 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       return;
     }
 
+    const validations = await validateGitHubPollTargets(due);
     const legacyTargets: GitHubPollTarget[] = [];
     const batchGroups = new Map<string, GitHubBatchPollEntry[]>();
-    for (const target of due) {
+    for (const [index, target] of due.entries()) {
       if (target.retainCount <= 0) {
+        continue;
+      }
+      const validation = validations[index];
+      if (!validation) {
+        target.pollCycleStartedAt = null;
+        continue;
+      }
+      if (validation.status === "rejected") {
+        updatePollTargetAfterError(target, validation.reason);
+        continue;
+      }
+      // Explicit contexts use the same retained scheduler, without cwd discovery
+      // or batch redirects into an inferred fork parent.
+      if (target.repository) {
+        legacyTargets.push(target);
         continue;
       }
       const host = peekRepoHost(target.cwd);
@@ -1574,7 +1642,9 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     const currentPause = pollPausedUntilByHost.get(host) ?? 0;
     pollPausedUntilByHost.set(host, Math.max(currentPause, pauseUntil));
     for (const target of pollTargets.values()) {
-      const targetHost = peekRepoHost(target.cwd);
+      const targetHost = target.repository
+        ? { settled: true, value: target.repository.host }
+        : peekRepoHost(target.cwd);
       if (!targetHost.settled || (targetHost.value ?? "") !== host) {
         continue;
       }
@@ -1959,9 +2029,11 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       cwd: entry.target.cwd,
       method: "getCurrentPullRequestStatus",
       args: {
-        headRef: entry.target.headRef,
-        headSha: entry.target.headSha,
-        headRepositoryOwner: entry.target.headRepositoryOwner,
+        request: {
+          headRef: entry.target.headRef,
+          headSha: entry.target.headSha,
+          headRepositoryOwner: entry.target.headRepositoryOwner,
+        },
       },
     });
     // A direct or forced read can finish between this batch becoming due and
@@ -1996,6 +2068,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     try {
       await api.getCurrentPullRequestStatus({
         cwd: target.cwd,
+        repository: target.repository,
         headRef: target.headRef,
         headSha: target.headSha,
         headRepositoryOwner: target.headRepositoryOwner,
@@ -2046,7 +2119,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "--limit",
               String(input.limit ?? 20),
             ],
-            { cwd: input.cwd },
+            input,
             z.array(GitHubPullRequestSummarySchema),
             "[]",
           );
@@ -2073,7 +2146,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "--limit",
               String(input.limit ?? 20),
             ],
-            { cwd: input.cwd },
+            input,
             z.array(GitHubIssueSummarySchema),
             "[]",
           );
@@ -2097,7 +2170,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "--json",
               "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
             ],
-            { cwd: input.cwd },
+            input,
             GitHubPullRequestSummarySchema,
             "{}",
           );
@@ -2122,13 +2195,15 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     supportsCrossRepoCheckoutWithoutRefs: true,
 
     getPullRequestCheckoutTarget(input) {
+      const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
+        run(args, { ...runnerOptions, repository: input.repository });
       return cached({
         cwd: input.cwd,
         method: "getPullRequestCheckoutTarget",
         args: { number: input.number },
         readOptions: input,
         load: async () => {
-          const repo = await getGitHubRepoView({ cwd: input.cwd, run });
+          const repo = await getGitHubRepoView({ cwd: input.cwd, run: readRun });
           const owner = repo?.owner?.login;
           const name = repo?.name;
           if (!owner || !name) {
@@ -2148,7 +2223,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "-F",
               `number=${input.number}`,
             ],
-            { cwd: input.cwd },
+            input,
             PullRequestCheckoutTargetSchema,
             "{}",
           );
@@ -2157,7 +2232,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       });
     },
 
-    getCurrentPullRequestStatus(input) {
+    async getCurrentPullRequestStatus(input) {
+      const repository = await requireForgeRepositoryContext(input);
+      const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
+        run(args, { ...runnerOptions, repository });
       return cached({
         cwd: input.cwd,
         method: "getCurrentPullRequestStatus",
@@ -2168,14 +2246,16 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         },
         readOptions: input,
         load: async () => {
-          const status = await resolveCurrentPullRequestView({
-            cwd: input.cwd,
-            headRef: input.headRef,
-            headSha: input.headSha,
-            headRepositoryOwner: input.headRepositoryOwner,
-            run,
-          });
-          return addCurrentPullRequestGithubFacts({ cwd: input.cwd, status, run });
+          const status = repository
+            ? await resolveExplicitPullRequestView({ cwd: input.cwd, repository, run: readRun })
+            : await resolveCurrentPullRequestView({
+                cwd: input.cwd,
+                headRef: input.headRef,
+                headSha: input.headSha,
+                headRepositoryOwner: input.headRepositoryOwner,
+                run,
+              });
+          return addCurrentPullRequestGithubFacts({ cwd: input.cwd, status, run: readRun });
         },
       }).then((status) => {
         updatePollTargetAfterSuccess({
@@ -2184,13 +2264,20 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           headSha: input.headSha,
           headRepositoryOwner: input.headRepositoryOwner,
           status,
+          repository,
           notify: input.reason === "self-heal-github",
         });
         return status;
       });
     },
 
-    getPullRequestTimeline(input) {
+    async getPullRequestTimeline(input) {
+      const repository = await requireForgeRepositoryContext(input);
+      if (repository && `${input.repoOwner}/${input.repoName}` !== repository.targetRepository) {
+        throw new ForgeRepositoryContextError(
+          "Timeline repository differs from the explicit target",
+        );
+      }
       return cached({
         cwd: input.cwd,
         method: "getPullRequestTimeline",
@@ -2211,7 +2298,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
                 "-F",
                 `number=${input.prNumber}`,
               ],
-              { cwd: input.cwd },
+              input,
               PullRequestTimelineGraphqlSchema,
               "{}",
             );
@@ -2234,8 +2321,14 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       });
     },
 
-    getCheckDetails(input) {
+    async getCheckDetails(input) {
+      const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
+        run(args, { ...runnerOptions, repository: input.repository });
       const { repoOwner, repoName, checkRunId } = input;
+      const repository = await requireForgeRepositoryContext(input);
+      if (repository && `${repoOwner}/${repoName}` !== repository.targetRepository) {
+        throw new ForgeRepositoryContextError("Checks repository differs from the explicit target");
+      }
       if (!repoOwner || !repoName) {
         throw new Error("GitHub getCheckDetails requires repoOwner and repoName");
       }
@@ -2257,7 +2350,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           const checkRun = toGitHubCheckRunDetails(
             await runGhJson(
               ["api", `${repoPath}/check-runs/${checkRunId}`],
-              { cwd: input.cwd },
+              input,
               GitHubCheckRunDetailsSchema,
               "{}",
             ),
@@ -2270,9 +2363,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
                 "-f",
                 `per_page=${CHECK_ANNOTATION_PAGE_MAX}`,
               ],
-              {
-                cwd: input.cwd,
-              },
+              input,
               GitHubCheckAnnotationsSchema,
               "[]",
             ),
@@ -2290,9 +2381,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
                   "-f",
                   `per_page=${ACTIONS_JOB_PAGE_MAX}`,
                 ],
-                {
-                  cwd: input.cwd,
-                },
+                input,
                 GitHubActionsJobsSchema,
                 "{}",
               ),
@@ -2304,8 +2393,9 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               const log = await getCachedCheckLogTail({
                 cwd: input.cwd,
                 repoPath,
+                repository: input.repository,
                 job,
-                run,
+                run: readRun,
                 cache: checkLogTailCache,
               });
               truncated ||= log.logTruncated;
@@ -2339,6 +2429,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     async searchRepositories(input) {
+      const readRun = (args: string[], runnerOptions: GitHubCommandRunnerOptions) =>
+        run(args, { ...runnerOptions, repository: input.repository });
       const limit = input.limit ?? 20;
       const query = input.query.trim();
       if (query.length === 0) {
@@ -2352,9 +2444,9 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "--limit",
               String(limit),
             ],
-            { cwd: input.cwd },
+            input,
           ),
-          resolveConfiguredCloneProtocol(input.cwd, run),
+          resolveConfiguredCloneProtocol(input.cwd, readRun),
         ]);
         return parseRepositoryList(stdout, cloneProtocol);
       }
@@ -2374,9 +2466,9 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
             "--limit",
             String(limit),
           ],
-          { cwd: input.cwd },
+          input,
         ),
-        resolveConfiguredCloneProtocol(input.cwd, run),
+        resolveConfiguredCloneProtocol(input.cwd, readRun),
       ]);
       return parseRepositorySearch(stdout, cloneProtocol);
     },
@@ -2392,7 +2484,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       const readOptions: ForgeReadOptions = input.force
         ? { force: true, reason: input.reason }
         : { force: false, reason: input.reason };
-      const enterpriseHost = await resolveRepoHostCached(input.cwd).catch(() => null);
+      readOptions.repository = await requireForgeRepositoryContext(input);
+      const enterpriseHost = readOptions.repository
+        ? readOptions.repository.host
+        : await resolveRepoHostCached(input.cwd).catch(() => null);
       const query = normalizeGitHubSearchQuery(input.query, enterpriseHost);
       const [issuesResult, prsResult] = await Promise.allSettled([
         shouldFetchIssues
@@ -2487,7 +2582,8 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       // transient `gh repo view` failure can't block PR creation on github.com.
       // `gh repo view` is the fallback: it auto-routes to the cwd remote's host
       // (covering GitHub Enterprise Server) and survives a renamed repo.
-      let slug = await resolveGitHubSlugFromOrigin(input.cwd);
+      const repository = await requireForgeRepositoryContext(input);
+      let slug = repository?.targetRepository ?? (await resolveGitHubSlugFromOrigin(input.cwd));
       if (!slug) {
         const repoView = await getGitHubRepoView({ cwd: input.cwd, run });
         slug =
@@ -2499,27 +2595,36 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         throw new Error("Unable to resolve GitHub repository for pull request creation");
       }
       const args = ["api", "-X", "POST", `repos/${slug}/pulls`, "-f", `title=${input.title}`];
-      args.push("-f", `head=${input.head}`);
+      const crossRepository =
+        repository && repository.sourceRepository !== repository.targetRepository;
+      const head = crossRepository
+        ? `${repository.sourceRepository.split("/")[0]}:${input.head}`
+        : input.head;
+      args.push("-f", `head=${head}`);
       args.push("-f", `base=${input.base}`);
+      if (crossRepository)
+        args.push("-f", `head_repo=${repository.sourceRepository.split("/")[1]}`);
       if (input.body) {
         args.push("-f", `body=${input.body}`);
       }
       const parsed = await runGhJson(
         args,
-        { cwd: input.cwd },
+        input,
         z.object({
           url: z.string(),
+          html_url: z.string().optional(),
           number: z.number(),
         }),
         "{}",
       );
-      return parsed;
+      const nativeWebUrl = repository ? parsed.html_url : undefined;
+      return { url: nativeWebUrl ?? parsed.url, number: parsed.number };
     },
 
     async mergePullRequest(input) {
       assertDirectPullRequestMergeReady(input);
       await run(["pr", "merge", String(input.prNumber), `--${input.mergeMethod}`], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
@@ -2528,7 +2633,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     async enablePullRequestAutoMerge(input) {
       assertPullRequestAutoMergeEnableReady(input);
       await run(["pr", "merge", String(input.prNumber), "--auto", `--${input.mergeMethod}`], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
@@ -2537,7 +2642,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     async disablePullRequestAutoMerge(input) {
       assertPullRequestAutoMergeDisableReady(input);
       await run(["pr", "merge", String(input.prNumber), "--disable-auto"], {
-        cwd: input.cwd,
+        ...input,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
       return { success: true };
@@ -2551,7 +2656,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         readOptions: input,
         load: async () => {
           try {
-            await run(["auth", "status"], { cwd: input.cwd });
+            await run(["auth", "status"], input);
             return true;
           } catch (error) {
             if (isGitHubAuthenticationError(error)) {
@@ -2575,6 +2680,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           headRef: input.headRef,
           headSha: input.headSha,
           headRepositoryOwner: input.headRepositoryOwner,
+          repository: input.repository,
           retainCount: 0,
           nextDueAt: null,
           pollCycleStartedAt: null,
@@ -2586,8 +2692,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         pollTargets.set(key, target);
         // Warm the host and slug caches so the first poll flush can already
         // batch this target instead of taking the legacy per-target path.
-        void resolveRepoHostCached(input.cwd).catch(() => {});
-        void resolveRepoSlugCached(input.cwd);
+        if (!input.repository) {
+          void resolveRepoHostCached(input.cwd).catch(() => {});
+          void resolveRepoSlugCached(input.cwd);
+        }
       }
 
       const isNewlyRetained = target.retainCount === 0;
@@ -2954,6 +3062,62 @@ function isGitHubRateLimitError(error: unknown): boolean {
       error.stderr,
     )
   );
+}
+
+async function resolveExplicitPullRequestView(options: {
+  cwd: string;
+  repository: ForgeRepositoryContext;
+  run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+}): Promise<CurrentPullRequestStatus | null> {
+  const { repository } = options;
+  if (!repository.headRef || !repository.headSha) return null;
+  const query = new URLSearchParams({
+    state: "all",
+    per_page: String(FORK_PR_PAGE_SIZE),
+    head: `${repository.sourceRepository.split("/")[0]}:${repository.headRef}`,
+  });
+  const args = ["api", `repos/${repository.targetRepository}/pulls?${query}`];
+  const refs = parseGitHubJsonOutput(
+    await options.run(args, { cwd: options.cwd }),
+    z.array(
+      z.object({
+        number: z.number(),
+        state: z.string(),
+        head: z.object({
+          ref: z.string(),
+          sha: z.string(),
+          repo: z.object({ full_name: z.string() }).nullable(),
+        }),
+        base: z.object({ repo: z.object({ full_name: z.string() }) }),
+      }),
+    ),
+    { args, cwd: options.cwd, emptyFallback: "[]" },
+  );
+  if (refs.length >= FORK_PR_PAGE_SIZE) return null;
+  const matches = refs.filter(
+    (ref) =>
+      ref.head.ref === repository.headRef &&
+      ref.head.repo?.full_name === repository.sourceRepository &&
+      ref.base.repo.full_name === repository.targetRepository &&
+      (ref.state === "open" || ref.head.sha === repository.headSha),
+  );
+  if (matches.length !== 1) return null;
+  const candidate = await tryCurrentPullRequestView({
+    ...options,
+    headRef: repository.headRef,
+    args: ["pr", "view", String(matches[0].number)],
+  });
+  if (
+    !candidate ||
+    candidate.status.headRefName !== repository.headRef ||
+    candidate.headRepositoryOwner !== repository.sourceRepository.split("/")[0] ||
+    `${candidate.status.repoOwner}/${candidate.status.repoName}` !== repository.targetRepository ||
+    (candidate.status.state !== "open" && candidate.headSha !== repository.headSha)
+  )
+    return null;
+  return candidate.status.state === "open" || candidate.headSha === repository.headSha
+    ? candidate.status
+    : null;
 }
 
 async function resolveCurrentPullRequestView(options: {
@@ -3830,11 +3994,21 @@ function isFailedActionsJob(job: CheckFailedJob): boolean {
 async function getCachedCheckLogTail(input: {
   cwd: string;
   repoPath: string;
+  repository?: ForgeRepositoryContext;
   job: CheckFailedJob & { completedAt?: string };
   run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
   cache: Map<string, { logTail: string; logTruncated: boolean }>;
 }): Promise<{ logTail: string; logTruncated: boolean }> {
-  const key = `${input.job.jobId}:${input.job.completedAt ?? ""}`;
+  const key = buildCacheKey({
+    cwd: input.cwd,
+    method: "checkLogTail",
+    args: {
+      repoPath: input.repoPath,
+      jobId: input.job.jobId,
+      completedAt: input.job.completedAt,
+      repository: input.repository,
+    },
+  });
   const cached = input.cache.get(key);
   if (cached) {
     input.cache.delete(key);
@@ -3843,9 +4017,7 @@ async function getCachedCheckLogTail(input: {
   }
 
   const capped = capCheckLogTail(
-    await input.run(["api", `${input.repoPath}/actions/jobs/${input.job.jobId}/logs`], {
-      cwd: input.cwd,
-    }),
+    await input.run(["api", `${input.repoPath}/actions/jobs/${input.job.jobId}/logs`], input),
   );
   input.cache.set(key, capped);
   while (input.cache.size > CHECK_LOG_TAIL_CACHE_MAX_ENTRIES) {

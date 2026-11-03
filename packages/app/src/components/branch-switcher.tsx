@@ -5,6 +5,7 @@ import { GitBranch } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import type { Theme } from "@/styles/theme";
+import { Button } from "@/components/ui/button";
 import { Combobox, ComboboxItem, type ComboboxProps } from "@/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
@@ -18,6 +19,10 @@ interface BranchSwitcherProps {
   workspaceId: string;
   workspaceDirectory: string | null;
   isGitCheckout: boolean;
+  /** Backend of the checkout; stash affordances are skipped on jj. */
+  vcs?: "git" | "jj" | null;
+  /** jj: change ID of the current working-copy change (switch precondition, not a cross-process lock). */
+  currentChangeId?: string | null;
   testID?: string;
 }
 
@@ -32,6 +37,8 @@ export function BranchSwitcher({
   workspaceId,
   workspaceDirectory,
   isGitCheckout,
+  vcs = null,
+  currentChangeId,
   testID = "workspace-header-branch-switcher",
 }: BranchSwitcherProps) {
   const { t } = useTranslation();
@@ -46,7 +53,12 @@ export function BranchSwitcher({
     isLoadingBranches,
     isFetchingBranches,
     branchError,
+    branchLoadMessage,
+    resumeLookupError,
+    isRetryingResumeLookup,
+    retryResumeLookup,
     isOpen,
+    isSwitching,
     setIsOpen,
     handleBranchSelect,
   } = useBranchSwitcher({
@@ -56,6 +68,8 @@ export function BranchSwitcher({
     workspaceDirectory,
     currentBranchName,
     isGitCheckout,
+    vcs,
+    currentChangeId,
     isConnected,
     toast,
     queryClient,
@@ -81,23 +95,44 @@ export function BranchSwitcher({
     [branchLeadingSlot],
   );
 
-  let emptyText = t("branchSwitcher.empty");
-  if (isLoadingBranches) emptyText = t("common.states.loading");
-  else if (branchError) emptyText = "";
+  const label = currentBranchName ?? t("branchSwitcher.title");
+  const resumeErrorFooter = useMemo(
+    () =>
+      resumeLookupError ? (
+        <View style={styles.resumeError} testID="jj-resume-lookup-error">
+          <Text style={styles.resumeErrorText}>{resumeLookupError}</Text>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isSwitching || isRetryingResumeLookup}
+            onPress={retryResumeLookup}
+          >
+            {t(isRetryingResumeLookup ? "common.loading" : "common.actions.retry")}
+          </Button>
+        </View>
+      ) : null,
+    [isRetryingResumeLookup, isSwitching, resumeLookupError, retryResumeLookup, t],
+  );
 
+  // jj already folds loading/error into branchLoadMessage; git keeps upstream's split states.
+  let emptyText = branchLoadMessage ?? t("branchSwitcher.empty");
+  if (!branchLoadMessage) {
+    if (isLoadingBranches) emptyText = t("common.states.loading");
+    else if (branchError) emptyText = "";
+  }
   const errorFooter = useMemo(
     () =>
-      branchError ? (
+      branchError && !resumeErrorFooter ? (
         <View style={styles.footer}>
           <Text accessibilityRole="alert" style={styles.error}>
             {isFetchingBranches ? t("common.states.loading") : t("branchSwitcher.failedToLoad")}
           </Text>
         </View>
       ) : undefined,
-    [branchError, isFetchingBranches, t],
+    [branchError, isFetchingBranches, resumeErrorFooter, t],
   );
 
-  if (!currentBranchName) {
+  if (!currentBranchName && vcs !== "jj") {
     return null;
   }
 
@@ -107,13 +142,13 @@ export function BranchSwitcher({
         <TooltipTrigger asChild>
           <ToolbarLabelSelectTrigger
             testID={testID}
-            label={currentBranchName}
+            label={isSwitching ? t("workspace.git.actions.jj.saving") : label}
+            disabled={isSwitching || !isConnected}
             open={isOpen}
-            disabled={!isConnected}
             onPress={handleOpen}
             accessibilityRole="button"
             accessibilityLabel={t("branchSwitcher.currentBranch", {
-              branchName: currentBranchName,
+              branchName: label,
             })}
           />
         </TooltipTrigger>
@@ -123,13 +158,12 @@ export function BranchSwitcher({
       </Tooltip>
       <Combobox
         options={branchOptions}
-        value={currentBranchName}
+        value={currentBranchName ?? ""}
         onSelect={handleBranchSelect}
         searchable
         placeholder={t("branchSwitcher.placeholder")}
         searchPlaceholder={t("branchSwitcher.searchPlaceholder")}
         emptyText={emptyText}
-        footer={errorFooter}
         title={t("branchSwitcher.title")}
         open={isOpen}
         onOpenChange={setIsOpen}
@@ -138,6 +172,7 @@ export function BranchSwitcher({
         desktopPreventInitialFlash
         desktopMinWidth={280}
         renderOption={renderBranchOption}
+        footer={resumeErrorFooter ?? errorFooter}
       />
     </View>
   );
@@ -152,6 +187,17 @@ const styles = StyleSheet.create((theme) => ({
   error: { color: theme.colors.destructive, fontSize: theme.fontSize.sm },
   tooltipText: {
     color: theme.colors.popoverForeground,
+    fontSize: theme.fontSize.sm,
+  },
+  resumeError: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border,
+    gap: 4,
+  },
+  resumeErrorText: {
+    color: theme.colors.destructive,
     fontSize: theme.fontSize.sm,
   },
 }));

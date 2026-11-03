@@ -334,7 +334,7 @@ export function useWorkspaceCommandCenterActions(): void {
   });
 }
 
-export function CommandCenterWorkspaceActions() {
+export function CommandCenterWorkspaceActions(): ReactElement | null {
   useWorkspaceCommandCenterActions();
   return null;
 }

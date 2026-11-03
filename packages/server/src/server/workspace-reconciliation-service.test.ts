@@ -1,5 +1,20 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createScratchJjRepo, isJjAvailable } from "../test-utils/jj.js";
+import { createJjWorktree } from "../utils/worktree-jj.js";
+import { dispatchGetCheckoutStatus } from "../utils/checkout-dispatch.js";
+import { checkoutLiteFromGitSnapshot } from "./workspace-registry-model.js";
+import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
+import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { validatePresentJjWorkspace } from "./workspace-jj-authority.js";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +29,8 @@ import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
 import { afterAll, beforeAll, afterEach, describe, expect, test } from "vitest";
 import {
+  FileBackedWorkspaceRegistry,
+  FileBackedProjectRegistry,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
 } from "./workspace-registry.js";
@@ -36,6 +53,9 @@ beforeAll(async () => {
     bundle: true,
     platform: "node",
     format: "esm",
+    banner: {
+      js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);',
+    },
   });
 });
 afterAll(() => rmSync(probeDirectory, { recursive: true, force: true }));
@@ -584,6 +604,73 @@ describe("WorkspaceReconciliationService", () => {
       clearImmediate(unrelated);
     }
   }, 30000);
+
+  test.each(["managed", "external"] as const)(
+    "queued reconciliation cannot clobber newly established %s jj provenance",
+    async (management) => {
+      const root = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-jj-authority-")));
+      tempDirs.push(root);
+      const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+      projects.set(
+        "p1",
+        createPersistedProjectRecord({
+          projectId: "p1",
+          rootPath: root,
+          kind: "git",
+          displayName: "project",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      workspaces.set(
+        "w1",
+        createPersistedWorkspaceRecord({
+          workspaceId: "w1",
+          projectId: "p1",
+          cwd: root,
+          worktreeRoot: root,
+          mainRepoRoot: root,
+          kind: "worktree",
+          displayName: "workspace",
+          branch: "before",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      const atCommit = deferred();
+      const commit = deferred();
+      const update = workspaceRegistry.update;
+      workspaceRegistry.update = async (id, updater) => {
+        atCommit.resolve();
+        await commit.promise;
+        return update(id, updater);
+      };
+      const changes: ReconciliationChange[] = [];
+      const service = new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        workspaceGitService: { getCheckout: async (cwd) => createCheckout(cwd, { isGit: false }) },
+        onChanges: (change) => {
+          changes.push(...change);
+        },
+      });
+      const reconciliation = service.reconcileGitMetadata();
+      await atCommit.promise;
+      const established: PersistedWorkspaceRecord = {
+        ...workspaces.get("w1")!,
+        jjWorkspaceManagement: management,
+        ...(management === "managed"
+          ? { jjWorkspaceId: "established", recoveryBookmark: "paseo/recovery/established" }
+          : {}),
+      };
+      workspaces.set("w1", established);
+      commit.resolve();
+      await reconciliation;
+      expect(workspaces.get("w1")).toEqual(established);
+      expect(changes.filter((change) => change.kind === "workspace_updated")).toEqual([]);
+    },
+  );
 
   test("preserves workspace archival that lands during boot reconciliation", async () => {
     const workspaceRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-archive-race-")));
@@ -1148,6 +1235,7 @@ describe("WorkspaceReconciliationService", () => {
       cwd: missingWorkspace,
       kind: "directory",
       displayName: "orphan",
+      recoveryBookmark: null,
       background: false,
       title: null,
       pinnedAt: null,
@@ -2032,4 +2120,186 @@ describe("WorkspaceReconciliationService", () => {
       mainRepoRoot: "/tmp/main-repo",
     });
   });
+  test.skipIf(!isJjAvailable()).each([
+    [false, "missing"],
+    [true, "missing"],
+    [false, "git"],
+    [true, "git"],
+  ] as const)(
+    "reconciliation preserves positive unknown legacy jj source evidence after backing %s (%s)",
+    async (subproject, replacement) => {
+      const fixture = createScratchJjRepo({
+        colocate: false,
+        files: { "sub/saved.txt": "old work\n" },
+      });
+      tempDirs.push(fixture.dir);
+      fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+      const worktreesRoot = path.join(fixture.dir, "worktrees");
+      const paseoHome = path.join(fixture.dir, "home");
+      const created = await createJjWorktree({
+        cwd: fixture.repoDir,
+        worktreesRoot,
+        worktreeSlug: "legacy",
+        source: { kind: "branch-off", baseBranch: "main", branchName: "feature" },
+      });
+      const root = created.worktreePath;
+      const cwd = subproject ? path.join(root, "sub") : root;
+      const logger = createTestLogger();
+      const workspaceRegistry = new FileBackedWorkspaceRegistry(
+        path.join(paseoHome, "workspaces.json"),
+        logger,
+      );
+      const projectRegistry = new FileBackedProjectRegistry(
+        path.join(paseoHome, "projects.json"),
+        logger,
+      );
+      await projectRegistry.upsert(
+        createPersistedProjectRecord({
+          projectId: "project",
+          rootPath: fixture.repoDir,
+          kind: "git",
+          displayName: "source",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      const legacy = createPersistedWorkspaceRecord({
+        workspaceId: "legacy",
+        projectId: "project",
+        cwd,
+        worktreeRoot: root,
+        mainRepoRoot: fixture.repoDir,
+        kind: "worktree",
+        isPaseoOwnedWorktree: false,
+        displayName: "legacy",
+        branch: "feature",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      await workspaceRegistry.upsert(legacy);
+      if (replacement === "missing") rmSync(root, { recursive: true });
+      else {
+        rmSync(path.join(root, ".jj"), { recursive: true });
+        execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
+        writeFileSync(path.join(root, "replacement.txt"), "unrelated user bytes\n");
+      }
+      const git = createNoopWorkspaceGitService({
+        getCheckout: async (targetPath) =>
+          checkoutLiteFromGitSnapshot(
+            targetPath,
+            await dispatchGetCheckoutStatus(targetPath, { paseoHome, worktreesRoot }),
+          ),
+      });
+      await expect(validatePresentJjWorkspace(legacy)).rejects.toThrow("incarnation");
+      const reconciliation = new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger,
+        workspaceGitService: git,
+      });
+      try {
+        const result = await reconciliation.reconcileGitMetadata();
+        expect(
+          result.changesApplied.filter((change) => change.kind === "workspace_updated"),
+        ).toEqual([]);
+        const reloaded = new FileBackedWorkspaceRegistry(
+          path.join(paseoHome, "workspaces.json"),
+          logger,
+        );
+        expect(await reloaded.get("legacy")).toEqual(legacy);
+        const provisioning = createWorkspaceProvisioningService({
+          workspaceRegistry: reloaded,
+          projectRegistry,
+          logger,
+          paseoHome,
+          worktreesRoot,
+          workspaceGitService: git,
+          isDirectory: async (targetPath) =>
+            existsSync(targetPath) && statSync(targetPath).isDirectory(),
+        });
+        await expect(provisioning.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "incarnation",
+        );
+        expect(await reloaded.get("legacy")).toEqual(legacy);
+        if (replacement === "git")
+          expect(existsSync(path.join(root, "replacement.txt"))).toBe(true);
+      } finally {
+        reconciliation.dispose();
+      }
+    },
+  );
 });
+
+test.skipIf(!isJjAvailable())(
+  "discovers .jj at the existing narrow project watch without changing identity",
+  async () => {
+    const fixture = createScratchJjRepo({ colocate: false, files: { "a.txt": "base\n" } });
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    projects.set(
+      "p-jj",
+      createPersistedProjectRecord({
+        projectId: "p-jj",
+        rootPath: fixture.repoDir,
+        kind: "non_git",
+        displayName: "project",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w-jj",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w-jj",
+        projectId: "p-jj",
+        cwd: fixture.repoDir,
+        kind: "directory",
+        displayName: "project",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    let emit: (event: string, filename: string | Buffer | null) => void = () => {};
+    let scheduled: () => void | Promise<void> = () => {};
+    let scheduledCount = 0;
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: createWorkspaceGitServiceStub({
+        [fixture.repoDir]: {
+          projectKind: "git",
+          projectDisplayName: "project",
+          workspaceDisplayName: "project",
+        },
+      }),
+      watchProjectRoot: (_root, _options, onChange) => {
+        emit = onChange;
+        return { close() {} };
+      },
+      clock: {
+        setTimeout: (callback) => {
+          scheduled = callback;
+          scheduledCount++;
+          return {};
+        },
+        clearTimeout() {},
+        setInterval: () => ({}),
+        clearInterval() {},
+      },
+    });
+    try {
+      await service.start();
+      emit("rename", "unrelated");
+      expect(scheduledCount).toBe(0);
+      emit("rename", ".jj");
+      expect(scheduledCount).toBe(1);
+      await scheduled();
+      expect(projects.get("p-jj")?.kind).toBe("git");
+      expect(workspaces.get("w-jj")?.projectId).toBe("p-jj");
+      expect(workspaces.get("w-jj")?.cwd).toBe(fixture.repoDir);
+    } finally {
+      service.dispose();
+      fixture.dispose();
+    }
+  },
+);

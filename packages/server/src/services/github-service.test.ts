@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { setImmediate as yieldIo } from "node:timers/promises";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -17,6 +18,8 @@ import {
   type GitHubPullRequestStatusFacts,
 } from "./github-service.js";
 import { isPlatform } from "../test-utils/platform.js";
+import type { ForgeRepositoryContext } from "./forge-service.js";
+import * as vcsBackend from "../utils/vcs-backend.js";
 import { CheckoutPrStatusResponseSchema } from "@getpaseo/protocol/messages";
 
 const EXPECTED_GITHUB_FAST_POLL_MS = 20_000;
@@ -83,7 +86,7 @@ function createScriptedRunner(steps: RunnerStep[]): TestRunner {
 
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 10; i++) {
-    await Promise.resolve();
+    await yieldIo();
   }
 }
 
@@ -524,11 +527,169 @@ function pullRequestTimelineJson(overrides: Record<string, unknown> = {}): strin
 }
 
 describe("ForgeService", () => {
+  it("routes explicit read identities across hosts, targets and same-name forks, with F/H-safe caches and polls", async () => {
+    vi.useFakeTimers();
+    const repository: ForgeRepositoryContext = {
+      host: "github.one.invalid",
+      targetRepository: "parent/repo",
+      sourceRepository: "fork/repo",
+      headRef: "feature/fork",
+      headSha: "1".repeat(40),
+      remoteHeadSha: "1".repeat(40),
+    };
+    let source = repository.sourceRepository;
+    let headSha = repository.headSha;
+    let state = "OPEN";
+    const calls: Array<{ args: string[]; options: GitHubCommandRunnerOptions }> = [];
+    const runner: GitHubCommandRunner = async (args, options) => {
+      calls.push({ args, options });
+      if (args[0] === "api" && args[1].startsWith("repos/"))
+        return {
+          stdout: JSON.stringify([
+            {
+              number: 42,
+              state: state.toLowerCase(),
+              head: { ref: repository.headRef, sha: headSha, repo: { full_name: source } },
+              base: {
+                repo: {
+                  full_name:
+                    options.envOverlay?.GH_HOST === repository.host ? "parent/repo" : "other/repo",
+                },
+              },
+            },
+          ]),
+          stderr: "",
+        };
+      if (args[0] === "pr" && args[1] === "view")
+        return {
+          stdout: currentPullRequestJson({
+            state,
+            headRefOid: headSha,
+            headRepositoryOwner: { login: "fork" },
+            url: `https://${options.envOverlay?.GH_HOST}/${options.envOverlay?.GH_HOST === repository.host ? "parent/repo" : "other/repo"}/pull/42`,
+          }),
+          stderr: "",
+        };
+      if (args[0] === "api" && args[1] === "graphql")
+        return { stdout: currentPullRequestGithubFactsJson(), stderr: "" };
+      return { stdout: "[]", stderr: "" };
+    };
+    const resolveRemoteUrl = vi.fn(async () => {
+      throw new Error("implicit repository discovery");
+    });
+    const service = createGitHubService({
+      runner,
+      resolveGhPath: () => "/fake/gh",
+      resolveRemoteUrl,
+    });
+    const input = {
+      cwd: "/native-jj",
+      repository,
+      headRef: repository.headRef ?? "",
+      headSha: repository.headSha ?? undefined,
+    };
+    const callback = vi.fn();
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      ...input,
+      onStatus: callback,
+    });
+    try {
+      expect((await service.getCurrentPullRequestStatus(input))?.number).toBe(42);
+      const count = calls.length;
+      await service.getCurrentPullRequestStatus(input);
+      expect(calls).toHaveLength(count);
+      const other = { ...repository, host: "github.two.invalid", targetRepository: "other/repo" };
+      expect(
+        (await service.getCurrentPullRequestStatus({ ...input, repository: other }))?.number,
+      ).toBe(42);
+      expect(
+        calls.slice(count).every(({ options }) => options.envOverlay?.GH_HOST === other.host),
+      ).toBe(true);
+      expect(calls.slice(count).find(({ args }) => args[0] === "pr")?.args).toContain(
+        "github.two.invalid/other/repo",
+      );
+      source = "same-name/repo";
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, sourceRepository: "another/repo" },
+        }),
+      ).toBeNull();
+      source = repository.sourceRepository;
+      headSha = "2".repeat(40);
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, remoteHeadSha: null },
+        }),
+      ).toMatchObject({ number: 42, state: "open" });
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
+          force: true,
+          reason: "terminal-head-proof",
+        }),
+      ).toMatchObject({ number: 42, state: "open" });
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
+        }),
+      ).toMatchObject({ headRefName: repository.headRef });
+      state = "MERGED";
+      expect(
+        await service.getCurrentPullRequestStatus({
+          ...input,
+          repository: { ...repository, headSha: "3".repeat(40), remoteHeadSha: null },
+          headSha: "3".repeat(40),
+          force: true,
+          reason: "terminal-head-proof",
+        }),
+      ).toBeNull();
+      expect(
+        (
+          await service.getCurrentPullRequestStatus({
+            ...input,
+            repository: { ...repository, headSha, remoteHeadSha: null },
+            headSha,
+          })
+        )?.state,
+      ).toBe("merged");
+      await expect(
+        service.getPullRequestTimeline?.({
+          cwd: input.cwd,
+          repository,
+          repoOwner: "wrong",
+          repoName: "repo",
+          prNumber: 42,
+        }),
+      ).rejects.toThrow("differs from the explicit target");
+      expect(resolveRemoteUrl).not.toHaveBeenCalled();
+      subscription?.unsubscribe();
+      callback.mockClear();
+      const afterDispose = calls.length;
+      await vi.advanceTimersByTimeAsync(400_000);
+      expect(callback).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(afterDispose);
+    } finally {
+      subscription?.unsubscribe();
+      service.dispose?.();
+      vi.useRealTimers();
+    }
+  });
   beforeEach(() => {
     vi.useFakeTimers();
+    const detect = vcsBackend.detectVcsBackend;
+    vi.spyOn(vcsBackend, "detectVcsBackend").mockImplementation((cwd) =>
+      cwd === "/repo" || cwd.startsWith("/ws-") ? Promise.resolve("git") : detect(cwd),
+    );
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -800,7 +961,7 @@ describe("ForgeService", () => {
       headRefKind: "branch",
     });
 
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(runner.calls[0]).toEqual({
       cwd: "/repo",
       args: ["repo", "view", "--json", "owner,name,parent"],
@@ -860,8 +1021,12 @@ describe("ForgeService", () => {
 
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
+    await flushMicrotasks();
+    now += GITHUB_POLL_ALIGNMENT_MS;
+    await vi.advanceTimersByTimeAsync(GITHUB_POLL_ALIGNMENT_MS);
+    await flushMicrotasks();
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2));
     expect(reads.map((read) => read.reason)).toEqual([undefined, "self-heal-github"]);
 
     subscription?.unsubscribe();
@@ -892,6 +1057,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
     expect(reads).toEqual([
       expect.objectContaining({
         cwd: "/repo",
@@ -901,7 +1067,7 @@ describe("ForgeService", () => {
       }),
     ]);
     await vi.advanceTimersByTimeAsync(0);
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
 
     subscription?.unsubscribe();
     service.dispose?.();
@@ -933,12 +1099,12 @@ describe("ForgeService", () => {
 
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
 
     now = EXPECTED_GITHUB_SLOW_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS - EXPECTED_GITHUB_FAST_POLL_MS);
     await vi.advanceTimersByTimeAsync(0);
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2));
     expect(reads.map((read) => read.reason)).toEqual([undefined, "self-heal-github"]);
 
     subscription?.unsubscribe();
@@ -979,14 +1145,17 @@ describe("ForgeService", () => {
 
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2));
     now += EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(3));
     now += EXPECTED_GITHUB_FAST_POLL_MS * 2;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS * 2);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(4));
     now += EXPECTED_GITHUB_SLOW_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS);
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(5);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(5));
     expect(reads.map((read) => read.reason)).toEqual([
       undefined,
       "self-heal-github",
@@ -1023,7 +1192,7 @@ describe("ForgeService", () => {
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
 
     service.dispose?.();
   });
@@ -1049,7 +1218,7 @@ describe("ForgeService", () => {
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
   });
 
   it("batches PR status polls across workspaces into one GraphQL request", async () => {
@@ -1128,7 +1297,7 @@ describe("ForgeService", () => {
     await flushMicrotasks();
 
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(0);
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(runner.calls[0]?.args.slice(0, 2)).toEqual(["api", "graphql"]);
     expect(runner.calls[0]?.args[3]).toContain('t0: repository(owner: "acme", name: "widgets")');
     expect(runner.calls[0]?.args[3]).toContain('t1: repository(owner: "acme", name: "gadgets")');
@@ -1155,8 +1324,8 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(3);
-    expect(statusesA).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(3));
+    await vi.waitFor(() => expect(statusesA).toHaveLength(2));
     expect(statusesA[1]).toEqual(expect.objectContaining({ number: 41, checksStatus: "success" }));
 
     subscriptionA?.unsubscribe();
@@ -1194,6 +1363,7 @@ describe("ForgeService", () => {
         t1: batchPollChecksAliasJson([]),
       }),
     ]);
+    const completedIdentities: string[] = [];
     const slugs: Record<string, string> = { "/ws-a": "acme/widgets", "/ws-b": "acme/gadgets" };
     const service = createGitHubService({
       ttlMs: 0,
@@ -1205,6 +1375,7 @@ describe("ForgeService", () => {
       },
       resolveRepoSlug: async (cwd) => {
         await repositoryIdentityReady;
+        completedIdentities.push(cwd);
         return slugs[cwd] ?? null;
       },
       now: () => now,
@@ -1226,13 +1397,14 @@ describe("ForgeService", () => {
     expect(runner.calls).toHaveLength(0);
 
     resolveRepositoryIdentity();
+    await vi.waitFor(() => expect(completedIdentities).toHaveLength(2));
     await flushMicrotasks();
     now = GITHUB_POLL_ALIGNMENT_MS;
     await vi.advanceTimersByTimeAsync(GITHUB_POLL_ALIGNMENT_MS);
     await flushMicrotasks();
 
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(0);
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(runner.calls[0]?.args.slice(0, 2)).toEqual(["api", "graphql"]);
     expect(runner.calls[0]?.args[3]).toContain('t0: repository(owner: "acme", name: "widgets")');
     expect(runner.calls[0]?.args[3]).toContain('t1: repository(owner: "acme", name: "gadgets")');
@@ -1240,6 +1412,61 @@ describe("ForgeService", () => {
     subscriptionA?.unsubscribe();
     subscriptionB?.unsubscribe();
     service.dispose?.();
+  });
+
+  it("does not let a stalled backend check block another retained poll", async () => {
+    let now = 0;
+    const blocked = Promise.withResolvers<vcsBackend.VcsBackend>();
+    const detector = vi
+      .spyOn(vcsBackend, "detectVcsBackend")
+      .mockImplementation((cwd) =>
+        cwd === "/ws-blocked" ? blocked.promise : Promise.resolve("git"),
+      );
+    const runner = createScriptedRunner([
+      batchPollStatusJson({
+        t0: batchPollRepositoryJson([
+          batchPollPrNodeJson({
+            number: 41,
+            url: "https://github.com/acme/widgets/pull/41",
+            headRefName: "feat-ready",
+            headRefOid: "oid-ready",
+          }),
+        ]),
+      }),
+      batchPollStatusJson({ t0: batchPollChecksAliasJson([]) }),
+    ]);
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      resolveRepoHost: async () => null,
+      resolveRepoSlug: async () => "acme/widgets",
+      now: () => now,
+    });
+    const statuses: Array<CurrentPullRequestStatus | null> = [];
+    const waiting = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-blocked",
+      headRef: "blocked",
+    });
+    const ready = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-ready",
+      headRef: "feat-ready",
+      headSha: "oid-ready",
+      onStatus: (status) => statuses.push(status),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      await flushMicrotasks();
+      now = GITHUB_POLL_ALIGNMENT_MS;
+      await vi.advanceTimersByTimeAsync(GITHUB_POLL_ALIGNMENT_MS);
+      await vi.waitFor(() => expect(statuses).toEqual([expect.objectContaining({ number: 41 })]));
+    } finally {
+      waiting?.unsubscribe();
+      ready?.unsubscribe();
+      blocked.resolve("git");
+      service.dispose?.();
+      detector.mockRestore();
+    }
   });
 
   it("does not let one unresolved repository identity block ready poll targets", async () => {
@@ -1287,7 +1514,7 @@ describe("ForgeService", () => {
     await flushMicrotasks();
 
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(0);
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(runner.calls[0]?.args[3]).toContain('t0: repository(owner: "acme", name: "widgets")');
     expect(readyStatuses).toEqual([expect.objectContaining({ number: 41 })]);
 
@@ -1333,7 +1560,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(statuses).toEqual([
       expect.objectContaining({ number: 7, state: "open", checksStatus: "pending" }),
     ]);
@@ -1342,8 +1569,8 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(4);
-    expect(statuses).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(4));
+    await vi.waitFor(() => expect(statuses).toHaveLength(2));
 
     subscription?.unsubscribe();
     service.dispose?.();
@@ -1376,9 +1603,9 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(0);
-    expect(errors).toHaveLength(2);
+    await vi.waitFor(() => expect(errors).toHaveLength(2));
 
     subscriptionA?.unsubscribe();
     subscriptionB?.unsubscribe();
@@ -1410,8 +1637,8 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
     expect(runner.calls[0]?.args.slice(0, 2)).toEqual(["api", "graphql"]);
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
     expect(statuses).toEqual([expect.objectContaining({ number: 42, state: "open" })]);
 
     subscription?.unsubscribe();
@@ -1458,6 +1685,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
+    await vi.waitFor(() => expect(statuses).toHaveLength(1));
     expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(0);
     expect(runner.calls[0]?.args[3]).toContain(
       't0: repository(owner: "forkowner", name: "widgets")',
@@ -1473,6 +1701,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS);
     await flushMicrotasks();
 
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(4));
     expect(runner.calls[3]?.args[3]).toContain(
       't0: repository(owner: "upstream", name: "widgets")',
     );
@@ -1509,7 +1738,7 @@ describe("ForgeService", () => {
     await flushMicrotasks();
 
     expect(statuses).toEqual([]);
-    expect(errors).toHaveLength(1);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(errors[0]).toBeInstanceOf(GitHubCommandError);
 
     subscription?.unsubscribe();
@@ -1545,7 +1774,7 @@ describe("ForgeService", () => {
     await flushMicrotasks();
 
     expect(statuses).toEqual([]);
-    expect(errors).toHaveLength(1);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(errors[0]).toBeInstanceOf(GitHubCommandError);
 
     subscription?.unsubscribe();
@@ -1582,19 +1811,19 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
     expect(runner.calls[0]?.args[3]).toContain("rateLimit");
-    expect(errors).toHaveLength(1);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
 
     now = EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
 
     now += 1_000;
     await vi.advanceTimersByTimeAsync(1_000);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
 
     subscription?.unsubscribe();
     service.dispose?.();
@@ -1627,6 +1856,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(runner.calls.map((call) => call.args.slice(0, 2))).toEqual([
       ["api", "graphql"],
       ["api", "rate_limit"],
@@ -1635,12 +1865,12 @@ describe("ForgeService", () => {
     now = EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
 
     now += 1_000;
     await vi.advanceTimersByTimeAsync(1_000);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(3);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(3));
 
     subscription?.unsubscribe();
     service.dispose?.();
@@ -1689,7 +1919,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(statuses).toEqual([expect.objectContaining({ number: 9, checksStatus: "pending" })]);
 
     // Pending checks are never frozen, so the next cycle re-runs the checks
@@ -1698,7 +1928,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(4);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(4));
     expect(statuses[1]).toEqual(expect.objectContaining({ number: 9, checksStatus: "success" }));
 
     subscription?.unsubscribe();
@@ -1742,7 +1972,7 @@ describe("ForgeService", () => {
 
     // Ten same-named fork PRs filled the page, so absence of a self-owned PR
     // is inconclusive and the target resolves through the legacy path.
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
     expect(statuses).toEqual([expect.objectContaining({ number: 42, state: "open" })]);
 
     subscription?.unsubscribe();
@@ -1783,7 +2013,7 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
     expect(statuses).toEqual([null]);
 
     subscription?.unsubscribe();
@@ -1843,11 +2073,11 @@ describe("ForgeService", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flushMicrotasks();
 
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     expect(statuses).toEqual([
       expect.objectContaining({ number: 41, state: "merged", checksStatus: "success" }),
     ]);
-    expect(errors).toHaveLength(1);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(errors[0]).toBeInstanceOf(GitHubCommandError);
 
     subscriptionA?.unsubscribe();
@@ -1870,7 +2100,7 @@ describe("ForgeService", () => {
       repoName: "parentRepo",
     });
 
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
     expect(runner.calls[0]).toMatchObject({
       cwd: "/repo",
       args: [
@@ -2640,7 +2870,7 @@ describe("ForgeService", () => {
     expect(first.items.at(-1)?.body).toBe("First cached result");
     expect(second.items.at(-1)?.body).toBe("First cached result");
     expect(refreshed.items.at(-1)?.body).toBe("Refreshed result");
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
   });
 
   it("does not cache a PR timeline result that resolves after cwd invalidation", async () => {
@@ -2661,7 +2891,7 @@ describe("ForgeService", () => {
 
     const staleRequest = service.getPullRequestTimeline(request);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
 
     service.invalidate({ cwd: "/repo" });
     runner.resolveNext(
@@ -2685,7 +2915,7 @@ describe("ForgeService", () => {
 
     const freshRequest = service.getPullRequestTimeline(request);
     await flushMicrotasks();
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
     runner.resolveNext(
       pullRequestTimelineJson({
         comments: {
@@ -2705,7 +2935,7 @@ describe("ForgeService", () => {
 
     const fresh = await freshRequest;
     expect(fresh.items.at(-1)?.body).toBe("Fresh post-invalidation result");
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
   });
 
   it("requests and surfaces current PR number, draft state, workflow names, and formatted check durations", async () => {
@@ -4156,7 +4386,7 @@ describe("ForgeService", () => {
 
     expect(first).toEqual(second);
     expect(first[0]?.title).toBe("First result");
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
   });
 
   it("refreshes cached results after the TTL expires", async () => {
@@ -4178,7 +4408,7 @@ describe("ForgeService", () => {
 
     expect(first[0]?.title).toBe("First result");
     expect(second[0]?.title).toBe("Second result");
-    expect(runner.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
   });
 
   it("coalesces concurrent identical calls into one runner invocation", async () => {
@@ -4194,6 +4424,7 @@ describe("ForgeService", () => {
     const first = service.listPullRequests({ cwd: "/repo", query: "bug", limit: 10 });
     const second = service.listPullRequests({ cwd: "/repo", query: "bug", limit: 10 });
     await flushMicrotasks();
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
     runner.resolveNext(pullRequestJson("Shared result"));
 
     await expect(Promise.all([first, second])).resolves.toEqual([
@@ -4224,7 +4455,7 @@ describe("ForgeService", () => {
         },
       ],
     ]);
-    expect(runner.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
   });
 
   it("invalidates only cache entries matching the requested cwd", async () => {
@@ -4248,7 +4479,7 @@ describe("ForgeService", () => {
 
     expect(refreshed[0]?.title).toBe("Repo one refreshed");
     expect(cached[0]?.title).toBe("Repo two");
-    expect(runner.calls).toHaveLength(3);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(3));
   });
 
   it("throws a typed missing-cli error when gh is unavailable", async () => {
@@ -4589,7 +4820,7 @@ describe("ForgeService", () => {
       service.getCurrentPullRequestStatus({ cwd: "/repo", headRef: "feature/fork" }),
     ).resolves.toMatchObject({ number: 42 });
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
   });
 
   it("bypasses the warm PR status cache for forced reads", async () => {
@@ -4617,7 +4848,7 @@ describe("ForgeService", () => {
       }),
     ).resolves.toMatchObject({ number: 42 });
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2));
   });
 
   it("coalesces concurrent PR status callers", async () => {
@@ -4633,12 +4864,9 @@ describe("ForgeService", () => {
     const second = service.getCurrentPullRequestStatus({ cwd: "/repo", headRef: "feature/fork" });
     await flushMicrotasks();
 
-    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
+    await vi.waitFor(() => expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1));
     runner.resolveNext(currentPullRequestJson());
-    for (let i = 0; i < 10 && runner.calls.length < 2; i += 1) {
-      await Promise.resolve();
-    }
-    expect(runner.calls[1]?.args[0]).toBe("api");
+    await vi.waitFor(() => expect(runner.calls[1]?.args[0]).toBe("api"));
     runner.resolveNext(currentPullRequestGithubFactsJson());
 
     await expect(Promise.all([first, second])).resolves.toEqual([
@@ -4955,3 +5183,143 @@ describe("ForgeService", () => {
     ).rejects.toThrow("Unable to resolve GitHub repository for pull request creation");
   });
 });
+
+it.each(["contributor/fork", "upstream/fork"])(
+  "creates a jj fork PR from %s against the explicit target without cwd discovery",
+  async (sourceRepository) => {
+    const runner = createRunner([
+      JSON.stringify({ url: "https://forge.example/api/pulls/7", number: 7 }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => {
+        throw new Error("must not discover the outer repository");
+      },
+    });
+    const repository: ForgeRepositoryContext = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      sourceRepository,
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "a".repeat(40),
+    };
+    expect(
+      await service.createPullRequest({
+        cwd: "/native",
+        repository,
+        title: "Native feature",
+        body: "Kept body",
+        head: "feature",
+        base: "main",
+      }),
+    ).toEqual({ url: "https://forge.example/api/pulls/7", number: 7 });
+    expect(runner.calls).toEqual([
+      {
+        cwd: "/native",
+        envOverlay: { GH_HOST: "forge.example" },
+        args: [
+          "api",
+          "-X",
+          "POST",
+          "repos/upstream/project/pulls",
+          "-f",
+          "title=Native feature",
+          "-f",
+          `head=${sourceRepository.split("/")[0]}:feature`,
+          "-f",
+          "base=main",
+          "-f",
+          "head_repo=fork",
+          "-f",
+          "body=Kept body",
+        ],
+      },
+    ]);
+  },
+);
+
+it("merges a native published PR on its explicit target host without Git discovery", async () => {
+  const runner = createRunner([""]);
+  const service = createGitHubService({
+    runner: runner.runner,
+    resolveRepoHost: async () => {
+      throw new Error("must not discover outer Git");
+    },
+  });
+  const repository: ForgeRepositoryContext = {
+    host: "forge.example",
+    targetRepository: "upstream/project",
+    sourceRepository: "contributor/fork",
+    headRef: "feature",
+    headSha: "a".repeat(40),
+    remoteHeadSha: "b".repeat(40),
+  };
+  await expect(
+    service.mergePullRequest({
+      cwd: "/native",
+      repository,
+      prNumber: 42,
+      mergeMethod: "squash",
+      status: createCurrentPullRequestStatus({ forgeSpecific: githubStatusFacts() }),
+    }),
+  ).resolves.toEqual({ success: true });
+  expect(runner.calls).toEqual([
+    {
+      cwd: "/native",
+      envOverlay: { GH_HOST: "forge.example", GH_PROMPT_DISABLED: "1" },
+      args: ["pr", "merge", "42", "--squash", "--repo", "forge.example/upstream/project"],
+    },
+  ]);
+});
+
+it.each([true, false])(
+  "routes native auto-merge enabled=%s to the exact target",
+  async (enabled) => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => {
+        throw new Error("must not infer Git");
+      },
+    });
+    const repository: ForgeRepositoryContext = {
+      host: "forge.example",
+      targetRepository: "upstream/project",
+      sourceRepository: "contributor/fork",
+      headRef: "feature",
+      headSha: "a".repeat(40),
+      remoteHeadSha: "b".repeat(40),
+    };
+    const status = createCurrentPullRequestStatus({
+      forgeSpecific: githubStatusFacts(
+        enabled
+          ? { mergeStateStatus: "BLOCKED", viewerCanEnableAutoMerge: true }
+          : {
+              autoMergeRequest: { enabledAt: null, mergeMethod: "SQUASH", enabledBy: null },
+              viewerCanDisableAutoMerge: true,
+            },
+      ),
+    });
+    const input = { cwd: "/native", repository, prNumber: 42, status };
+    await expect(
+      enabled
+        ? service.enablePullRequestAutoMerge({ ...input, mergeMethod: "squash" })
+        : service.disablePullRequestAutoMerge(input),
+    ).resolves.toEqual({ success: true });
+    expect(runner.calls).toEqual([
+      {
+        cwd: "/native",
+        envOverlay: { GH_PROMPT_DISABLED: "1", GH_HOST: "forge.example" },
+        args: [
+          "pr",
+          "merge",
+          "42",
+          ...(enabled ? ["--auto", "--squash"] : ["--disable-auto"]),
+          "--repo",
+          "forge.example/upstream/project",
+        ],
+      },
+    ]);
+  },
+);

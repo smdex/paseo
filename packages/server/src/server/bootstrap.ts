@@ -7,6 +7,7 @@ import {
   createJsonFinishSubscriptionStore,
 } from "./agent/finish-subscriptions/index.js";
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { createWorkspaceArchiveAuthorityPorts } from "./workspace-archive-service.js";
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
@@ -99,6 +100,8 @@ export function formatListenTarget(listenTarget: ListenTarget | null): string | 
   }
   return listenTarget.path;
 }
+
+import { resolveJjRuntime } from "../utils/vcs-backend.js";
 
 export async function fanOutReconciledWorkspaceUpdates(input: {
   sessions: Iterable<{
@@ -977,6 +980,8 @@ export async function createPaseoDaemon(
     }
   });
   const workspaceProvisioning = createWorkspaceProvisioningService({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
     lifecycle: pluginRuntime,
     serverId,
     projectRegistry,
@@ -1148,6 +1153,9 @@ export async function createPaseoDaemon(
         worktreeRoot: workspace.worktreeRoot,
         isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
         mainRepoRoot: workspace.mainRepoRoot,
+        jjWorkspaceManagement: workspace.jjWorkspaceManagement,
+        jjWorkspaceId: workspace.jjWorkspaceId,
+        recoveryBookmark: workspace.recoveryBookmark,
       }));
   };
   const markWorkspaceArchivingExternal = (workspaceIds: Iterable<string>, archivingAt: string) => {
@@ -1187,6 +1195,8 @@ export async function createPaseoDaemon(
     wsServer?.broadcast(wrapSessionMessage(message));
   };
   const workspaceAutoName = new WorkspaceAutoName({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
     agentManager,
     workspaceRegistry,
     workspaceGitService,
@@ -1214,6 +1224,7 @@ export async function createPaseoDaemon(
     terminalManager,
     logger,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
     listActiveWorkspaces: listActiveWorkspacesExternal,
     getAutoArchivedChangeRequestUrl: async (workspaceId) =>
       (await workspaceRegistry.get(workspaceId))?.autoArchivedChangeRequestUrl ?? null,
@@ -1234,6 +1245,7 @@ export async function createPaseoDaemon(
         createPaseoWorktree: async (workflowInput, workflowOptions) => {
           return createRegisteredPaseoWorktree(workflowInput, {
             lifecycle: pluginRuntime,
+            logger,
             github,
             ...(workflowOptions?.resolveDefaultBranch
               ? {
@@ -1299,6 +1311,7 @@ export async function createPaseoDaemon(
         agentManager,
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
         listActiveWorkspaces: listActiveWorkspacesExternal,
         getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
@@ -1325,6 +1338,7 @@ export async function createPaseoDaemon(
     archiveAgentForClose: (agentId) =>
       archiveAgentCommand({ agentManager, agentStorage, logger }, agentId),
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
     listActiveWorkspaces: listActiveWorkspacesExternal,
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
     emit: emitExternalSessionMessage,
@@ -1420,6 +1434,7 @@ export async function createPaseoDaemon(
         agentManager,
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
         listActiveWorkspaces: listActiveWorkspacesExternal,
         getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
@@ -1543,6 +1558,7 @@ export async function createPaseoDaemon(
     github,
     workspaceGitService,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
     listActiveWorkspaces: listActiveWorkspacesExternal,
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
@@ -1815,6 +1831,10 @@ export async function createPaseoDaemon(
               logger.info("Daemon password authentication enabled");
             }
 
+            // Settle the jj runtime probe BEFORE the server constructs and
+            // could answer server_info, so checkoutJj is advertised from a
+            // known-good probe rather than a cold mirror (review should-fix 1).
+            await resolveJjRuntime();
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,
