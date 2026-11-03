@@ -33,6 +33,7 @@ export type ImportSessionAgentManager = AgentLoaderManager &
     | "closeAgent"
     | "getTimeline"
     | "importProviderSession"
+    | "resolveImportSessionHandle"
     | "notifyAgentState"
     | "unarchiveSnapshot"
   >;
@@ -153,7 +154,12 @@ export async function listImportableProviderSessions(
       continue;
     }
     if (
-      importedHandles.has(toProviderSessionHandleKey(session.provider, session.providerHandleId))
+      importedHandles.has(
+        toProviderSessionHandleKey(
+          session.provider,
+          session.canonicalProviderHandleId ?? session.providerHandleId,
+        ),
+      )
     ) {
       filteredAlreadyImportedCount += 1;
       continue;
@@ -189,6 +195,16 @@ export async function importProviderSession(
   if (!cwd) {
     throw new Error("Import requires cwd from the selected provider session");
   }
+  input = {
+    ...input,
+    request: {
+      ...input.request,
+      providerHandleId: await input.agentManager.resolveImportSessionHandle({
+        ...input.request,
+        cwd,
+      }),
+    },
+  };
   const key = await resolveProviderSessionImportMutationKey(input);
   return serializeProviderSessionImport(input.agentManager, key, async () => {
     const placement = await input.workspaceProvisioning.runInImportWorkspace(
