@@ -1,4 +1,7 @@
-const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/;
+// Prerelease metadata beyond `-beta.N` (e.g. fork suffixes like `-smdex`) is
+// ignored, matching the documented "prerelease metadata is ignored" rule.
+const versionPattern =
+  /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const stableIosBuildSlot = 999;
 const FDROID_ABI_VERSION_CODE_SUFFIXES = {
   "armeabi-v7a": 1,
