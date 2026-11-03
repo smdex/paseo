@@ -1,6 +1,34 @@
+import { execFileSync } from "node:child_process";
+import { createWorkspaceRecoveryService } from "../workspace-recovery/workspace-recovery-service.js";
+import {
+  archiveByScope,
+  createWorkspaceArchiveAuthorityPorts,
+  type ArchiveDependencies,
+} from "../../workspace-archive-service.js";
+import { withWorkspaceLifecycle } from "../../../utils/workspace-lifecycle.js";
+import { resolveJjRepoIdentity } from "../../../utils/vcs-backend.js";
+import {
+  readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
+  updatePaseoWorktreeJjBookmark,
+  writeJjWorkspaceIncarnation,
+  writePaseoWorktreeMetadata,
+} from "../../../utils/worktree-metadata.js";
+import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
+import { createJjWorktree } from "../../../utils/worktree-jj.js";
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+} from "node:fs";
 
 import { afterEach, beforeEach, expect, test } from "vitest";
 
@@ -10,6 +38,7 @@ import {
   writePaseoWorktreeMetadata,
 } from "../../../utils/worktree-metadata.js";
 import { createWorkspaceBaseBranchService } from "../workspace-base-branch/service.js";
+import { dispatchGetCheckoutStatus } from "../../../utils/checkout-dispatch.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import {
   createNoGitWorkspaceRuntimeSnapshot,
@@ -21,6 +50,7 @@ import {
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   createPersistedWorkspaceRecord,
+  clearWorkspaceRecoveryReference,
   type WorkspaceRegistry,
 } from "../../workspace-registry.js";
 import { checkoutLiteFromGitSnapshot } from "../../workspace-registry-model.js";
@@ -514,6 +544,7 @@ test("uses one workspace snapshot when reopening an archived workspace", async (
     listAll: async () => (reads++ === 0 ? archived : []),
     listActive: () => workspaceRegistry.listActive(),
     get: (workspaceId) => workspaceRegistry.get(workspaceId),
+    update: (workspaceId, updater) => workspaceRegistry.update(workspaceId, updater),
     upsert: (workspace) => workspaceRegistry.upsert(workspace),
     archive: (workspaceId, archivedAt) => workspaceRegistry.archive(workspaceId, archivedAt),
     remove: (workspaceId) => workspaceRegistry.remove(workspaceId),
@@ -555,6 +586,143 @@ test("reopening an archived workspace refreshes placement without renaming it", 
   expect(reopened.updatedAt).toEqual(expect.any(String));
   expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
 });
+
+function realGitProvisioning(): WorkspaceProvisioningService {
+  return createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    isDirectory,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd) => {
+        const status = await getCheckoutStatus(cwd, { logger, paseoHome: tmpDir });
+        return checkoutLiteFromGitSnapshot(
+          cwd,
+          status.isGit
+            ? status
+            : {
+                isGit: false,
+                currentBranch: null,
+                remoteUrl: null,
+                repoRoot: null,
+                isPaseoOwnedWorktree: false,
+                mainRepoRoot: null,
+              },
+        );
+      },
+    }),
+  });
+}
+
+test.each(["active", "archived"] as const)(
+  "reopening an %s ordinary Git subproject reconciles Git-to-directory conversion",
+  async (state) => {
+    const repo = path.join(tmpDir, "repo");
+    const cwd = path.join(repo, "sub");
+    mkdirSync(cwd, { recursive: true });
+    execFileSync("git", ["init", "--initial-branch=main", repo], { stdio: "pipe" });
+    const file = path.join(cwd, "saved.txt");
+    writeFileSync(file, "preserved subproject work\n");
+    const service = realGitProvisioning();
+    const created = await service.findOrCreateWorkspaceForDirectory(cwd);
+    expect(created).toMatchObject({
+      cwd,
+      kind: "local_checkout",
+      worktreeRoot: repo,
+      isPaseoOwnedWorktree: false,
+    });
+    await workspaceRegistry.update(created.workspaceId, (current) => ({
+      ...current,
+      title: "Pinned subproject",
+      baseBranch: "main",
+    }));
+    if (state === "archived") await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
+    renameSync(path.join(repo, ".git"), path.join(tmpDir, "retained-git"));
+
+    const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+
+    expect(reopened).toMatchObject({
+      workspaceId: created.workspaceId,
+      projectId: created.projectId,
+      cwd,
+      kind: "directory",
+      branch: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+      displayName: created.displayName,
+      title: "Pinned subproject",
+      baseBranch: "main",
+      archivedAt: null,
+    });
+    expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
+    expect((await projectRegistry.get(created.projectId))?.kind).toBe("non_git");
+    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(readFileSync(file, "utf8")).toBe("preserved subproject work\n");
+    expect(existsSync(path.join(tmpDir, "retained-git", "HEAD"))).toBe(true);
+    expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+      created.workspaceId,
+    );
+  },
+);
+
+test.each(["active", "archived"] as const)(
+  "reopening an %s ordinary Git subproject reconciles a nearer repository boundary",
+  async (state) => {
+    const repo = path.join(tmpDir, "repo");
+    const nestedRepo = path.join(repo, "nested");
+    const cwd = path.join(nestedRepo, "sub");
+    mkdirSync(cwd, { recursive: true });
+    execFileSync("git", ["init", "--initial-branch=main", repo], { stdio: "pipe" });
+    const file = path.join(cwd, "saved.txt");
+    writeFileSync(file, "preserved nested work\n");
+    const service = realGitProvisioning();
+    const created = await service.findOrCreateWorkspaceForDirectory(cwd);
+    expect(created.worktreeRoot).toBe(repo);
+    if (state === "archived") await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
+    execFileSync("git", ["init", "--initial-branch=nested-main", nestedRepo], { stdio: "pipe" });
+    execFileSync("git", ["-C", nestedRepo, "add", "sub/saved.txt"], { stdio: "pipe" });
+    execFileSync(
+      "git",
+      [
+        "-C",
+        nestedRepo,
+        "-c",
+        "user.name=Provisioning Test",
+        "-c",
+        "user.email=provisioning@example.test",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "Initial nested checkout",
+      ],
+      { stdio: "pipe" },
+    );
+
+    const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+
+    expect(reopened).toMatchObject({
+      workspaceId: created.workspaceId,
+      projectId: created.projectId,
+      cwd,
+      kind: "local_checkout",
+      branch: "nested-main",
+      worktreeRoot: nestedRepo,
+      mainRepoRoot: null,
+      isPaseoOwnedWorktree: false,
+      displayName: created.displayName,
+      archivedAt: null,
+    });
+    expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
+    expect((await projectRegistry.get(created.projectId))?.rootPath).toBe(cwd);
+    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(readFileSync(file, "utf8")).toBe("preserved nested work\n");
+    expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+      created.workspaceId,
+    );
+  },
+);
 
 test("opening a subpath of an archived git workspace mints a fresh workspace at the exact subpath", async () => {
   const repo = path.join(tmpDir, "repo");
@@ -1168,3 +1336,906 @@ test("a failed workspace unarchive write keeps agents archived and permits retry
   expect((await registry.get(workspace.workspaceId))?.archivedAt).toBeNull();
   expect(agentArchived).toBe(false);
 });
+function realJjProvisioning(worktreesRoot: string): WorkspaceProvisioningService {
+  return createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    isDirectory,
+    paseoHome: tmpDir,
+    worktreesRoot,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd) => {
+        const status = await dispatchGetCheckoutStatus(cwd, { paseoHome: tmpDir, worktreesRoot });
+        if (!status.isGit) throw new Error(`Missing jj checkout: ${cwd}`);
+        return checkoutLiteFromGitSnapshot(cwd, status);
+      },
+    }),
+  });
+}
+
+for (const savedAuthority of [true, false]) {
+  test.skipIf(!isJjAvailable()).each([
+    ["root", "missing"],
+    ["root", "owned"],
+    ["subproject", "missing"],
+    ["subproject", "owned"],
+  ] as const)(
+    `directory provisioning refuses archived and active jj %s records with %s ownership at a replacement incarnation (saved authority=${savedAuthority})`,
+    async (placement, ownership) => {
+      const fixture = createScratchJjRepo({
+        files: { "base.txt": "base\n", "sub/file.txt": "replacement subproject\n" },
+      });
+      try {
+        fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+        const created = await createJjWorktree({
+          cwd: fixture.repoDir,
+          worktreeSlug: "reused",
+          worktreesRoot: path.join(tmpDir, "worktrees"),
+          source: { kind: "branch-off", baseBranch: "main", branchName: "new-feature" },
+        });
+        const project = await projectRegistry.getOrCreateActiveByRoot({
+          rootPath: fixture.repoDir,
+          kind: "git",
+          displayName: "project",
+          timestamp: ARCHIVED_AT,
+        });
+        const cwd =
+          placement === "subproject"
+            ? path.join(created.worktreePath, "sub")
+            : created.worktreePath;
+        const service = realJjProvisioning(path.join(tmpDir, "worktrees"));
+        const saved = createPersistedWorkspaceRecord({
+          workspaceId: "old",
+          projectId: project.projectId,
+          cwd,
+          kind: "worktree",
+          worktreeRoot: created.worktreePath,
+          ...(savedAuthority
+            ? { jjWorkspaceId: "old-incarnation", recoveryBookmark: "paseo/recovery/old" }
+            : {}),
+          displayName: "old",
+          ...(ownership === "owned" ? { isPaseoOwnedWorktree: true } : {}),
+          mainRepoRoot: fixture.repoDir,
+          createdAt: ARCHIVED_AT,
+          updatedAt: ARCHIVED_AT,
+          archivedAt: ARCHIVED_AT,
+        });
+        await workspaceRegistry.upsert(saved);
+        expect(saved.isPaseoOwnedWorktree).toBe(ownership === "owned");
+        fixture.jj(["bookmark", "create", "paseo/recovery/old", "-r", "main"]);
+        const head = fixture.jj(
+          ["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+          created.worktreePath,
+        ).stdout;
+        const incarnation = await readJjWorkspaceIncarnation(created.worktreePath);
+        const recoveryHead = fixture.jj([
+          "log",
+          "--no-graph",
+          "-r",
+          "paseo/recovery/old",
+          "-T",
+          "commit_id",
+        ]).stdout;
+        const recovery = createWorkspaceRecoveryService({
+          paseoHome: tmpDir,
+          worktreesRoot: path.join(tmpDir, "worktrees"),
+          getWorkspace: (id) => workspaceRegistry.get(id),
+          getProject: (id) => projectRegistry.get(id),
+          isDirectory,
+          unarchiveWorkspace: async (workspace) => {
+            await service.ensureWorkspaceRecordUnarchived(workspace);
+          },
+        });
+        expect(await recovery.inspect(saved.workspaceId)).toMatchObject({
+          kind: "unavailable",
+          message: expect.stringContaining("different incarnation"),
+        });
+        await expect(recovery.restore(saved.workspaceId)).rejects.toThrow("different incarnation");
+        await expect(service.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "different incarnation",
+        );
+        await expect(service.ensureWorkspaceRecordUnarchived(saved)).rejects.toThrow(
+          "different incarnation",
+        );
+        expect(await workspaceRegistry.get("old")).toEqual(saved);
+        expect(await projectRegistry.get(project.projectId)).toEqual(project);
+        expect(await workspaceRegistry.list()).toEqual([saved]);
+        expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
+          "replacement subproject\n",
+        );
+        expect(await readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
+            .stdout,
+        ).toBe(head);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "paseo/recovery/old", "-T", "commit_id"]).stdout,
+        ).toBe(recoveryHead);
+
+        const active = { ...saved, archivedAt: null };
+        await workspaceRegistry.upsert(active);
+        await expect(service.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+          "different incarnation",
+        );
+        await expect(service.ensureWorkspaceRecordUnarchived(active)).rejects.toThrow(
+          "different incarnation",
+        );
+        expect(await workspaceRegistry.get(saved.workspaceId)).toEqual(active);
+        expect(await projectRegistry.get(project.projectId)).toEqual(project);
+        expect(await readJjWorkspaceIncarnation(created.worktreePath)).toBe(incarnation);
+        expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
+          "replacement subproject\n",
+        );
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "@", "-T", "commit_id"], created.worktreePath)
+            .stdout,
+        ).toBe(head);
+        expect(
+          fixture.jj(["log", "--no-graph", "-r", "paseo/recovery/old", "-T", "commit_id"]).stdout,
+        ).toBe(recoveryHead);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+}
+
+test.skipIf(!isJjAvailable()).each([
+  ["primary", "root"],
+  ["primary", "subproject"],
+  ["secondary", "root"],
+  ["secondary", "subproject"],
+] as const)(
+  "external jj %s %s open, reload, refresh, archive and recovery preserve external provenance",
+  async (topology, placement) => {
+    const fixture = createScratchJjRepo({
+      colocate: false,
+      files: { "sub/file.txt": "ordinary jj work\n" },
+    });
+    try {
+      const root = topology === "primary" ? fixture.repoDir : path.join(fixture.dir, "external");
+      if (topology === "secondary")
+        expect(
+          fixture.jj(["workspace", "add", root, "--name", "external", "--revision", "@-"]).status,
+        ).toBe(0);
+      const cwd = placement === "subproject" ? path.join(root, "sub") : root;
+      let service = realJjProvisioning(path.join(tmpDir, "worktrees"));
+      const opened = await service.findOrCreateWorkspaceForDirectory(cwd);
+      expect(opened).toMatchObject({
+        cwd,
+        kind: topology === "primary" ? "local_checkout" : "worktree",
+        worktreeRoot: root,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: topology === "primary" ? null : fixture.repoDir,
+        jjWorkspaceManagement: "external",
+        recoveryBookmark: null,
+      });
+      expect(opened.jjWorkspaceId).toBeUndefined();
+      expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+        opened.workspaceId,
+      );
+      workspaceRegistry = new FileBackedWorkspaceRegistry(
+        path.join(tmpDir, "projects", "workspaces.json"),
+        logger,
+      );
+      await workspaceRegistry.initialize();
+      service = realJjProvisioning(path.join(tmpDir, "worktrees"));
+      await workspaceRegistry.archive(opened.workspaceId, ARCHIVED_AT);
+      const reopened = await service.findOrCreateWorkspaceForDirectory(cwd);
+      expect(reopened).toMatchObject({
+        workspaceId: opened.workspaceId,
+        projectId: opened.projectId,
+        cwd,
+        kind: topology === "primary" ? "local_checkout" : "worktree",
+        archivedAt: null,
+        isPaseoOwnedWorktree: false,
+        jjWorkspaceManagement: "external",
+        recoveryBookmark: null,
+      });
+      expect(reopened.jjWorkspaceId).toBeUndefined();
+      expect(await workspaceRegistry.list()).toEqual([reopened]);
+      expect(await readJjWorkspaceIncarnation(fixture.repoDir)).toBeNull();
+      expect(readFileSync(path.join(fixture.repoDir, "sub/file.txt"), "utf8")).toBe(
+        "ordinary jj work\n",
+      );
+      const recovery = createWorkspaceRecoveryService({
+        paseoHome: tmpDir,
+        worktreesRoot: path.join(tmpDir, "worktrees"),
+        getWorkspace: (id) => workspaceRegistry.get(id),
+        getProject: (id) => projectRegistry.get(id),
+        isDirectory,
+        unarchiveWorkspace: async (record) => {
+          await service.ensureWorkspaceRecordUnarchived(record);
+        },
+        clearRecoveryPin: (id, pin) => clearWorkspaceRecoveryReference(workspaceRegistry, id, pin),
+      });
+      const archiveDeps: ArchiveDependencies = {
+        ...createWorkspaceArchiveAuthorityPorts(workspaceRegistry),
+        paseoHome: tmpDir,
+        paseoWorktreesBaseRoot: path.join(tmpDir, "worktrees"),
+        github: { invalidate: () => {} },
+        workspaceGitService: createNoopWorkspaceGitService(),
+        agentManager: {
+          listAgents: () => [],
+          getAgent: () => null,
+          archiveAgent: async () => null,
+          archiveSnapshot: async () => ({}),
+        },
+        agentStorage: { listByWorkspace: async () => [] },
+        findWorkspaceIdForCwd: async () => reopened.workspaceId,
+        listActiveWorkspaces: async () =>
+          (await workspaceRegistry.list()).filter((record) => !record.archivedAt),
+        archiveWorkspaceRecord: async (id) => {
+          await workspaceRegistry.archive(id, ARCHIVED_AT);
+        },
+        emitWorkspaceUpdatesForWorkspaceIds: async () => {},
+        markWorkspaceArchiving: () => {},
+        clearWorkspaceArchiving: () => {},
+        killTerminalsForWorkspace: async () => {},
+      };
+      expect(
+        (
+          await archiveByScope(archiveDeps, {
+            scope: { kind: "workspace", workspaceId: reopened.workspaceId },
+            requestId: "external",
+          })
+        ).removedDirectory,
+      ).toBe(false);
+      await expect(recovery.restore(reopened.workspaceId)).resolves.toEqual({
+        workspaceId: reopened.workspaceId,
+        action: "unarchive",
+      });
+      await workspaceRegistry.archive(reopened.workspaceId, ARCHIVED_AT);
+      const saved = await workspaceRegistry.get(reopened.workspaceId);
+      const backup = `${root}.away`;
+      renameSync(root, backup);
+      await expect(recovery.inspect(reopened.workspaceId)).resolves.toMatchObject({
+        kind: "unavailable",
+        reason: "workspace_directory_missing",
+      });
+      await expect(recovery.restore(reopened.workspaceId)).rejects.toThrow("cannot be recreated");
+      await expect(service.findOrCreateWorkspaceForDirectory(cwd)).rejects.toThrow(
+        "cannot be recreated",
+      );
+      expect(await workspaceRegistry.get(reopened.workspaceId)).toEqual(saved);
+      expect(existsSync(root)).toBe(false);
+      renameSync(backup, root);
+      expect(await readJjWorkspaceIncarnation(root)).toBeNull();
+      expect(readFileSync(path.join(root, "sub/file.txt"), "utf8")).toBe("ordinary jj work\n");
+    } finally {
+      fixture.dispose();
+    }
+  },
+);
+
+interface JjOpenRaceFixture {
+  fixture: ReturnType<typeof createScratchJjRepo>;
+  old: Awaited<ReturnType<typeof createJjWorktree>>;
+  a: PersistedWorkspaceRecord;
+  b: PersistedWorkspaceRecord;
+  provisioning: WorkspaceProvisioningService;
+  archiveDeps: ArchiveDependencies;
+  git: ReturnType<typeof createNoopWorkspaceGitService>;
+  createReplacement: (slug?: string) => Promise<Awaited<ReturnType<typeof createJjWorktree>>>;
+}
+
+async function jjOpenRaceFixture(subproject: boolean, legacy = false): Promise<JjOpenRaceFixture> {
+  const fixture = createScratchJjRepo({
+    files: { "base.txt": "base\n", "sub/file.txt": "sub base\n" },
+  });
+  fixture.jj(["bookmark", "create", "main", "-r", "@-"]);
+  const worktreesRoot = path.join(tmpDir, "jj-worktrees");
+  let old: JjOpenRaceFixture["old"];
+  if (legacy) {
+    // Before sibling placement, managed workspaces lived under <base>/<project>/<slug>.
+    const worktreePath = path.join(worktreesRoot, "legacy-project", "reused");
+    mkdirSync(path.dirname(worktreePath), { recursive: true });
+    const base = fixture.jj(["log", "--no-graph", "-r", "main", "-T", "commit_id"]).stdout.trim();
+    expect(
+      fixture.jj(["workspace", "add", worktreePath, "--name", "reused", "--revision", "main"])
+        .status,
+    ).toBe(0);
+    expect(fixture.jj(["bookmark", "create", "old-feature"], worktreePath).status).toBe(0);
+    await writeJjWorkspaceIncarnation(worktreePath, "legacy-fixture");
+    await writePaseoWorktreeMetadata(worktreePath, {
+      baseRefName: "main",
+      baseRef: base,
+      jjBookmark: "old-feature",
+    });
+    old = { worktreePath, branchName: "old-feature", comparisonBaseRef: base };
+  } else {
+    old = await createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: "reused",
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "old-feature" },
+    });
+  }
+  writeFileSync(path.join(old.worktreePath, "old-work.txt"), "saved old work\n");
+  const git = createNoopWorkspaceGitService({
+    getCheckout: async (cwd) => {
+      const identity = await resolveJjRepoIdentity(cwd);
+      if (!identity) throw new Error(`Missing jj checkout: ${cwd}`);
+      const metadata = await readPaseoWorktreeMetadata(identity.workspaceRoot);
+      return {
+        cwd,
+        isGit: true,
+        currentBranch: metadata?.version === 2 ? (metadata.jjBookmark ?? null) : null,
+        remoteUrl: null,
+        worktreeRoot: identity.workspaceRoot,
+        mainRepoRoot: identity.workspaceRoot === fixture.repoDir ? null : fixture.repoDir,
+        isPaseoOwnedWorktree: identity.workspaceRoot !== fixture.repoDir,
+      };
+    },
+    getSnapshot: async (cwd) => createNoGitWorkspaceRuntimeSnapshot(cwd),
+  });
+  const service = createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: git,
+    isDirectory,
+    logger,
+  });
+  const project = await projectRegistry.getOrCreateActiveByRoot({
+    rootPath: fixture.repoDir,
+    kind: "git",
+    displayName: "jj",
+    timestamp: ARCHIVED_AT,
+  });
+  const common = {
+    sourceCwd: fixture.repoDir,
+    projectId: project.projectId,
+    repoRoot: fixture.repoDir,
+    worktreeRoot: old.worktreePath,
+    branch: "old-feature",
+    baseBranch: "main",
+    title: null,
+  };
+  const a = await service.createWorkspaceForWorktree({
+    ...common,
+    workspaceId: "a",
+    cwd: subproject ? path.join(old.worktreePath, "sub") : old.worktreePath,
+  });
+  const b = await service.createWorkspaceForWorktree({
+    ...common,
+    workspaceId: "b",
+    cwd: subproject ? old.worktreePath : path.join(old.worktreePath, "sub"),
+  });
+  await workspaceRegistry.archive(a.workspaceId, ARCHIVED_AT);
+  const archiveDeps: ArchiveDependencies = {
+    paseoHome: tmpDir,
+    paseoWorktreesBaseRoot: worktreesRoot,
+    github: { invalidate: () => {} },
+    workspaceGitService: git,
+    agentManager: {
+      listAgents: () => [],
+      getAgent: () => null,
+      archiveAgent: async () => null,
+      archiveSnapshot: async () => ({}),
+    },
+    agentStorage: { listByWorkspace: async () => [] },
+    getWorkspace: (id) => workspaceRegistry.get(id),
+    findWorkspaceIdForCwd: async (cwd) =>
+      (await workspaceRegistry.list()).find((r) => r.cwd === cwd && !r.archivedAt)?.workspaceId ??
+      null,
+    findWorkspaceIdsForBackingPath: async (root) =>
+      (await workspaceRegistry.list())
+        .filter((r) => r.worktreeRoot === root)
+        .map((r) => r.workspaceId),
+    listActiveWorkspaces: async () => (await workspaceRegistry.list()).filter((r) => !r.archivedAt),
+    archiveWorkspaceRecord: async (id) => {
+      await workspaceRegistry.archive(id, ARCHIVED_AT);
+    },
+    setWorkspaceRecoveryPin: async (id, pin) => {
+      await workspaceRegistry.update(id, (r) => ({ ...r, recoveryBookmark: pin }));
+    },
+    emitWorkspaceUpdatesForWorkspaceIds: async () => {},
+    markWorkspaceArchiving: () => {},
+    clearWorkspaceArchiving: () => {},
+    killTerminalsForWorkspace: async () => {},
+  };
+  const createReplacement = (slug = "reused") =>
+    createJjWorktree({
+      cwd: fixture.repoDir,
+      worktreeSlug: slug,
+      worktreesRoot,
+      source: { kind: "branch-off", baseBranch: "main", branchName: "new-feature" },
+      onCreated: async (wt) => {
+        await service.createWorkspaceForWorktree({
+          ...common,
+          workspaceId: "new",
+          cwd: wt.worktreePath,
+          worktreeRoot: wt.worktreePath,
+          branch: wt.branchName,
+          baseBranch: wt.comparisonBaseRef,
+        });
+      },
+    });
+  return { fixture, old, a, b, provisioning: service, archiveDeps, git, createReplacement };
+}
+
+for (const subproject of [false, true]) {
+  test.skipIf(!isJjAvailable())(
+    `jj directory open owns the backing root until durable unarchive (subproject=${subproject})`,
+    async () => {
+      const h = await jjOpenRaceFixture(subproject);
+      const observed = Promise.withResolvers<void>();
+      const finishOpen = Promise.withResolvers<void>();
+      h.git.getSnapshot = async (cwd, options) => {
+        if (options?.reason === "workspace-restore-auto-archive-latch") {
+          observed.resolve();
+          await finishOpen.promise;
+        }
+        return createNoGitWorkspaceRuntimeSnapshot(cwd);
+      };
+      const opening = h.provisioning.findOrCreateWorkspaceForDirectory(h.a.cwd);
+      await observed.promise;
+      let archiveEntered = false;
+      const archiving = withWorkspaceLifecycle(h.old.worktreePath, async () => {
+        archiveEntered = true;
+        return archiveByScope(h.archiveDeps, {
+          scope: { kind: "workspace", workspaceId: "b" },
+          requestId: "race",
+        });
+      });
+      try {
+        expect((await workspaceRegistry.get("a"))?.archivedAt).toBe(ARCHIVED_AT);
+        expect(archiveEntered).toBe(false);
+        await workspaceRegistry.update("a", (record) => ({
+          ...record,
+          title: "Edited while opening",
+        }));
+        finishOpen.resolve();
+        const reopened = await opening;
+        expect(reopened.workspaceId).toBe("a");
+        expect(reopened.archivedAt).toBeNull();
+        expect(reopened.title).toBe("Edited while opening");
+        expect((await archiving).removedDirectory).toBe(false);
+        await expect(h.createReplacement()).rejects.toThrow("Workspace path already exists");
+        expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+          "saved old work\n",
+        );
+        expect((await workspaceRegistry.get("a"))?.jjWorkspaceId).toBe(
+          await readJjWorkspaceIncarnation(h.old.worktreePath),
+        );
+      } finally {
+        finishOpen.resolve();
+        await Promise.allSettled([opening, archiving]);
+        h.fixture.dispose();
+      }
+    },
+  );
+
+  test.skipIf(!isJjAvailable())(
+    `jj directory open rereads archive authority when replacement wins ownership (subproject=${subproject})`,
+    async () => {
+      const h = await jjOpenRaceFixture(subproject);
+      const stale = (await workspaceRegistry.get("a"))!;
+      const startWinner = Promise.withResolvers<void>();
+      const releaseWinner = Promise.withResolvers<void>();
+      const winner = withWorkspaceLifecycle(h.old.worktreePath, async () => {
+        await startWinner.promise;
+        expect(
+          (
+            await archiveByScope(h.archiveDeps, {
+              scope: { kind: "workspace", workspaceId: "b" },
+              requestId: "winner",
+            })
+          ).removedDirectory,
+        ).toBe(true);
+        const fresh = await h.createReplacement();
+        expect(fresh.worktreePath).toBe(h.old.worktreePath);
+        releaseWinner.resolve();
+      });
+      const opening = h.provisioning.ensureWorkspaceRecordUnarchived(stale);
+      const result = opening.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      startWinner.resolve();
+      try {
+        await winner;
+        await releaseWinner.promise;
+        const saved = (await workspaceRegistry.get("a"))!;
+        expect(saved.recoveryBookmark).toMatch(/^paseo\/recovery\//);
+        expect(String(await result)).toContain("incarnation");
+        expect(await workspaceRegistry.get("a")).toEqual(saved);
+        expect(
+          h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+        ).toBe("saved old work\n");
+        expect(existsSync(path.join(h.old.worktreePath, "old-work.txt"))).toBe(false);
+      } finally {
+        await Promise.allSettled([winner, opening]);
+        h.fixture.dispose();
+      }
+    },
+  );
+}
+
+test.skipIf(!isJjAvailable())(
+  "jj explicit recovery reenters provisioning ownership for root/subproject siblings",
+  async () => {
+    const h = await jjOpenRaceFixture(true);
+    try {
+      expect(
+        (
+          await archiveByScope(h.archiveDeps, {
+            scope: { kind: "workspace", workspaceId: "b" },
+            requestId: "archive",
+          })
+        ).removedDirectory,
+      ).toBe(true);
+      const recovery = createWorkspaceRecoveryService({
+        paseoHome: tmpDir,
+        worktreesRoot: path.join(tmpDir, "jj-worktrees"),
+        getWorkspace: (id) => workspaceRegistry.get(id),
+        getProject: (id) => projectRegistry.get(id),
+        isDirectory,
+        unarchiveWorkspace: async (record) => {
+          await h.provisioning.ensureWorkspaceRecordUnarchived(record);
+        },
+        clearRecoveryPin: (id, pin) => clearWorkspaceRecoveryReference(workspaceRegistry, id, pin),
+      });
+      await expect(recovery.restore("a")).resolves.toEqual({ workspaceId: "a", action: "restore" });
+      await expect(recovery.restore("b")).resolves.toEqual({
+        workspaceId: "b",
+        action: "unarchive",
+      });
+      expect((await workspaceRegistry.get("a"))?.recoveryBookmark).toBeNull();
+      expect((await workspaceRegistry.get("b"))?.recoveryBookmark).toBeNull();
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);
+
+for (const replacementBackend of ["jj", "git"]) {
+  test.skipIf(!isJjAvailable())(
+    `jj directory creation rejects a replacement during pre-acquisition observation (${replacementBackend})`,
+    async () => {
+      const h = await jjOpenRaceFixture(true);
+      const atObservation = Promise.withResolvers<void>();
+      const finishObservation = Promise.withResolvers<void>();
+      const readCheckout = h.git.getCheckout;
+      let gate = true;
+      h.git.getCheckout = async (cwd) => {
+        const observed = await readCheckout(cwd);
+        if (cwd === h.a.cwd && gate) {
+          gate = false;
+          atObservation.resolve();
+          await finishObservation.promise;
+        }
+        return observed;
+      };
+      const creating = h.provisioning.createWorkspaceForDirectory(h.a.cwd);
+      const result = creating.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      try {
+        await atObservation.promise;
+        expect(
+          (
+            await archiveByScope(h.archiveDeps, {
+              scope: { kind: "workspace", workspaceId: "b" },
+              requestId: "winner",
+            })
+          ).removedDirectory,
+        ).toBe(true);
+        const saved = (await workspaceRegistry.get("a"))!;
+        if (replacementBackend === "jj") await h.createReplacement();
+        else {
+          mkdirSync(h.a.cwd, { recursive: true });
+          execFileSync("git", ["init", h.old.worktreePath], { stdio: "pipe" });
+        }
+        finishObservation.resolve();
+        expect(String(await result)).toContain("backend or incarnation changed");
+        expect(await workspaceRegistry.get("a")).toEqual(saved);
+        expect(
+          h.fixture.jj(["file", "show", "-r", saved.recoveryBookmark!, "old-work.txt"]).stdout,
+        ).toBe("saved old work\n");
+      } finally {
+        finishObservation.resolve();
+        await Promise.allSettled([creating]);
+        h.fixture.dispose();
+      }
+    },
+  );
+}
+
+test.skipIf(!isJjAvailable())(
+  "jj worktree provisioning rejects stale materialization after queued replacement",
+  async () => {
+    const h = await jjOpenRaceFixture(true);
+    const startWinner = Promise.withResolvers<void>();
+    const winner = withWorkspaceLifecycle(h.old.worktreePath, async () => {
+      await startWinner.promise;
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: "b" },
+        requestId: "winner",
+      });
+      await h.createReplacement();
+    });
+    const creating = h.provisioning.createWorkspaceForWorktree({
+      sourceCwd: h.fixture.repoDir,
+      projectId: h.a.projectId,
+      workspaceId: "misbound",
+      repoRoot: h.fixture.repoDir,
+      cwd: h.a.cwd,
+      worktreeRoot: h.old.worktreePath,
+      branch: "old-feature",
+      baseBranch: "main",
+      title: null,
+    });
+    const result = creating.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    startWinner.resolve();
+    try {
+      await winner;
+      const saved = (await workspaceRegistry.get("a"))!;
+      expect(String(await result)).toContain("backend or incarnation changed");
+      expect(await workspaceRegistry.get("misbound")).toBeNull();
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+    } finally {
+      await Promise.allSettled([winner, creating]);
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "directory creation cannot replace an existing archived recovery record with the same id",
+  async () => {
+    const h = await jjOpenRaceFixture(false);
+    try {
+      await archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: "b" },
+        requestId: "winner",
+      });
+      await h.createReplacement();
+      const saved = (await workspaceRegistry.get("a"))!;
+      await expect(
+        h.provisioning.createWorkspaceForDirectory(h.a.cwd, null, h.a.projectId, {
+          workspaceId: "a",
+        }),
+      ).rejects.toThrow("Record already exists: a");
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+      expect(saved.recoveryBookmark).toMatch(/^paseo\/recovery\//);
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "active jj directory refresh holds ownership and updates only observed fields",
+  async () => {
+    const h = await jjOpenRaceFixture(true);
+    const reached = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    await workspaceRegistry.update("a", (record) => ({ ...record, archivedAt: null }));
+    h.fixture.jj(["bookmark", "rename", "old-feature", "refreshed-feature"], h.old.worktreePath);
+    await updatePaseoWorktreeJjBookmark(h.old.worktreePath, {
+      from: "old-feature",
+      to: "refreshed-feature",
+    });
+    const readCheckout = h.git.getCheckout;
+    let gate = true;
+    h.git.getCheckout = async (cwd) => {
+      const observed = await readCheckout(cwd);
+      if (cwd === h.a.cwd && gate) {
+        gate = false;
+        reached.resolve();
+        await finish.promise;
+      }
+      return observed;
+    };
+    const opening = h.provisioning.findOrCreateWorkspaceForDirectory(h.a.cwd);
+    await reached.promise;
+    let archiveEntered = false;
+    const archiving = withWorkspaceLifecycle(h.old.worktreePath, async () => {
+      archiveEntered = true;
+      return archiveByScope(h.archiveDeps, {
+        scope: { kind: "workspace", workspaceId: "b" },
+        requestId: "refresh",
+      });
+    });
+    try {
+      await workspaceRegistry.update("a", (record) => ({ ...record, title: "Latest title" }));
+      expect(archiveEntered).toBe(false);
+      finish.resolve();
+      const refreshed = await opening;
+      expect(refreshed.title).toBe("Latest title");
+      expect(refreshed.branch).toBe("refreshed-feature");
+      expect(refreshed.archivedAt).toBeNull();
+      expect((await archiving).removedDirectory).toBe(false);
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      finish.resolve();
+      await Promise.allSettled([opening, archiving]);
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "directory unarchive refuses changed durable placement from a stale caller snapshot",
+  async () => {
+    const h = await jjOpenRaceFixture(true);
+    const stale = (await workspaceRegistry.get("a"))!;
+    const continueWinner = Promise.withResolvers<void>();
+    const winner = withWorkspaceLifecycle(h.old.worktreePath, async () => {
+      await continueWinner.promise;
+      const fresh = await h.createReplacement("replacement");
+      const incarnation = (await readJjWorkspaceIncarnation(fresh.worktreePath))!;
+      await workspaceRegistry.update("a", (record) => ({
+        ...record,
+        cwd: path.join(fresh.worktreePath, "sub"),
+        worktreeRoot: fresh.worktreePath,
+        jjWorkspaceId: incarnation,
+      }));
+    });
+    const opening = h.provisioning.ensureWorkspaceRecordUnarchived(stale);
+    const result = opening.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    continueWinner.resolve();
+    try {
+      await winner;
+      const saved = (await workspaceRegistry.get("a"))!;
+      expect(String(await result)).toContain("placement or incarnation changed");
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+      expect(existsSync(path.join(h.old.worktreePath, "old-work.txt"))).toBe(true);
+    } finally {
+      await Promise.allSettled([winner, opening]);
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "directory unarchive requires matching live jj registration as well as incarnation",
+  async () => {
+    const h = await jjOpenRaceFixture(true);
+    try {
+      const saved = (await workspaceRegistry.get("a"))!;
+      expect(h.fixture.jj(["workspace", "forget", path.basename(h.old.worktreePath)]).status).toBe(
+        0,
+      );
+      await expect(h.provisioning.findOrCreateWorkspaceForDirectory(h.a.cwd)).rejects.toThrow(
+        "no longer registered",
+      );
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "legacy exact-subproject recovery uses the shared backing root for provisioning reentry",
+  async () => {
+    const h = await jjOpenRaceFixture(true, true);
+    try {
+      // Model an archive made before incarnation IDs and checkpoints were persisted.
+      const legacyPin = "paseo/recovery/reused-legacy";
+      expect(h.fixture.jj(["bookmark", "create", legacyPin], h.old.worktreePath).status).toBe(0);
+      expect(h.fixture.jj(["workspace", "forget", "reused"]).status).toBe(0);
+      rmSync(h.old.worktreePath, { recursive: true });
+      await workspaceRegistry.archive("b", ARCHIVED_AT);
+      for (const id of ["a", "b"])
+        await workspaceRegistry.update(id, (record) => ({
+          ...record,
+          worktreeRoot: null,
+          jjWorkspaceId: undefined,
+          recoveryBookmark: legacyPin,
+        }));
+      const recovery = createWorkspaceRecoveryService({
+        paseoHome: tmpDir,
+        worktreesRoot: path.join(tmpDir, "jj-worktrees"),
+        getWorkspace: (id) => workspaceRegistry.get(id),
+        getProject: (id) => projectRegistry.get(id),
+        isDirectory,
+        unarchiveWorkspace: async (record) => {
+          await h.provisioning.ensureWorkspaceRecordUnarchived(record);
+        },
+        clearRecoveryPin: (id, pin) => clearWorkspaceRecoveryReference(workspaceRegistry, id, pin),
+      });
+      await expect(recovery.restore("a")).resolves.toEqual({ workspaceId: "a", action: "restore" });
+      await expect(recovery.restore("b")).resolves.toEqual({
+        workspaceId: "b",
+        action: "unarchive",
+      });
+      expect((await workspaceRegistry.get("a"))?.worktreeRoot).toBe(h.old.worktreePath);
+      expect((await workspaceRegistry.get("a"))?.jjWorkspaceId).toBe(
+        await readJjWorkspaceIncarnation(h.old.worktreePath),
+      );
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable())(
+  "active jj refresh refuses a contradictory checkout observation without demoting authority",
+  async () => {
+    const h = await jjOpenRaceFixture(false);
+    try {
+      await workspaceRegistry.update("a", (record) => ({ ...record, archivedAt: null }));
+      const saved = (await workspaceRegistry.get("a"))!;
+      const readCheckout = h.git.getCheckout;
+      h.git.getCheckout = async (cwd) =>
+        cwd === h.a.cwd
+          ? {
+              cwd,
+              isGit: false,
+              currentBranch: null,
+              remoteUrl: null,
+              worktreeRoot: null,
+              mainRepoRoot: null,
+              isPaseoOwnedWorktree: false,
+            }
+          : readCheckout(cwd);
+      await expect(h.provisioning.findOrCreateWorkspaceForDirectory(h.a.cwd)).rejects.toThrow(
+        "ownership changed",
+      );
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);
+
+test.skipIf(!isJjAvailable()).each([
+  [false, "backing"],
+  [true, "backing"],
+  [false, "source"],
+  [true, "source"],
+] as const)(
+  "known managed jj directory refuses %s subproject=%s metadata loss without durable downgrade",
+  async (subproject, missing) => {
+    const h = await jjOpenRaceFixture(subproject);
+    try {
+      await workspaceRegistry.update("a", (record) => ({
+        ...record,
+        kind: "directory",
+        isPaseoOwnedWorktree: false,
+      }));
+      const saved = (await workspaceRegistry.get("a"))!;
+      rmSync(path.join(missing === "backing" ? h.old.worktreePath : h.fixture.repoDir, ".jj"), {
+        recursive: true,
+        force: true,
+      });
+      await expect(h.provisioning.findOrCreateWorkspaceForDirectory(saved.cwd)).rejects.toThrow(
+        /incarnation|source repository changed/,
+      );
+      await expect(h.provisioning.ensureWorkspaceRecordUnarchived(saved)).rejects.toThrow(
+        /incarnation|source repository changed/,
+      );
+      expect(await workspaceRegistry.get("a")).toEqual(saved);
+      expect(readFileSync(path.join(h.old.worktreePath, "old-work.txt"), "utf8")).toBe(
+        "saved old work\n",
+      );
+    } finally {
+      h.fixture.dispose();
+    }
+  },
+);

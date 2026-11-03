@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { setImmediate } from "node:timers/promises";
 import { TTLCache } from "@isaacs/ttlcache";
 import type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
+// Re-exported for jj-side modules that build the same wire shapes.
+export type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
 import { parseGitHubRemoteIdentity, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import { maxSecuredPlaintextByteLength } from "@getpaseo/relay";
 import type { Logger } from "pino";
@@ -79,6 +81,8 @@ export type GitMutationRefreshReason =
   | "stash-push"
   | "stash-pop"
   | "discard-changes"
+  | "new-change"
+  | "describe-change"
   | "create-worktree";
 
 const DISCARD_CHANGES_TIMEOUT_MS = 120_000;
@@ -95,7 +99,7 @@ let shortstatCacheTtlMs = DEFAULT_SHORTSTAT_CACHE_TTL_MS;
 let shortstatCache = createShortstatCache(shortstatCacheTtlMs);
 const shortstatInFlight = new Map<string, Promise<CheckoutShortstat | null>>();
 
-interface CheckoutReadCacheOptions {
+export interface CheckoutReadCacheOptions {
   force?: boolean;
   reason?: string;
 }
@@ -262,6 +266,13 @@ export interface BranchSuggestion {
   hasRemote: boolean;
   localAhead?: number;
   localBehind?: number;
+  localRef?: string;
+  remoteRef?: string;
+  remoteName?: string;
+  /** jj: saved WIP change on this bookmark's line (same-ID Resume affordance). */
+  wipChangeId?: string;
+  /** jj: lookup failed while checking whether this bookmark can Resume saved work. */
+  resumeLookupError?: string;
 }
 
 async function listGitRefs(cwd: string, refPrefix: string): Promise<GitRef[]> {
@@ -500,6 +511,10 @@ export type BranchCheckoutSource = "local" | "remote";
 
 export interface CheckoutExistingBranchResult {
   source: BranchCheckoutSource;
+  /** jj switch outcome (omitted on git): native mode and resulting change. */
+  mode?: "new-on" | "resume";
+  changeId?: string;
+  commitId?: string;
 }
 
 export interface CheckoutResolvedBranchInput {
@@ -906,6 +921,13 @@ export interface CheckoutStatusGitNonPaseo {
   hasRemote: boolean;
   remoteUrl: string | null;
   isPaseoOwnedWorktree: false;
+  /** Backend discriminator carried to the wire (optional; git leaves it unset). */
+  vcs?: "git" | "jj";
+  /** jj change id of the working-copy commit (jj only). */
+  changeId?: string | null;
+  jjDescription?: string;
+  jjSnapshotRefusedPaths?: string[];
+  defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
 export interface CheckoutStatusGitPaseo {
@@ -924,6 +946,13 @@ export interface CheckoutStatusGitPaseo {
   hasRemote: boolean;
   remoteUrl: string | null;
   isPaseoOwnedWorktree: true;
+  /** Backend discriminator carried to the wire (optional; git leaves it unset). */
+  vcs?: "git" | "jj";
+  /** jj change id of the working-copy commit (jj only). */
+  changeId?: string | null;
+  jjDescription?: string;
+  jjSnapshotRefusedPaths?: string[];
+  defaultWorkspaceBase?: { refName: string; displayName: string };
 }
 
 export type CheckoutStatusGit = CheckoutStatusGitNonPaseo | CheckoutStatusGitPaseo;

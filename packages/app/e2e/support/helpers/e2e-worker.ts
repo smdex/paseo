@@ -72,6 +72,9 @@ const origin = spawnSync("git", ["config", "--get", "remote.origin.url"], {
   stdio: ["ignore", "pipe", "ignore"]
 }).stdout?.trim();
 
+const handlePrMutations = require(${JSON.stringify(path.resolve(__dirname, "github-pr-mutations-cli.cjs"))});
+if (handlePrMutations(args, origin)) process.exit(process.exitCode ?? 0);
+
 if (origin === fixtureRemote) {
   const command = args.slice(0, 2).join(" ");
   if (command === "auth status") process.exit(0);

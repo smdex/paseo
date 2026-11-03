@@ -30,6 +30,7 @@ import {
   isQualifiedRef,
   type PaseoWorktreeChangeRequestHint,
   readPaseoWorktreeMetadata,
+  readJjWorkspaceIncarnation,
   readPaseoWorktreeRuntimePort,
   writePaseoWorktreeMetadata,
   writePaseoWorktreeRuntimeMetadata,
@@ -46,9 +47,11 @@ import {
   getRelativePathInsideRoot,
   isPathInsideRoot,
 } from "./path.js";
+import { resolveJjRepoIdentity } from "./vcs-backend.js";
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
+export { writePaseoWorktreeMetadata } from "./worktree-metadata.js";
 
 const execFileAsync = promisify(execFile);
 const READ_ONLY_GIT_ENV = {
@@ -62,6 +65,8 @@ export interface WorktreeConfig {
 
 export interface CreatedWorktree extends WorktreeConfig {
   comparisonBaseRef: string | null;
+  /** Creation-time authority for jj provisioning rollback, never inferred later. */
+  jjCreatedBookmark?: { name: string; target: string };
 }
 
 export interface WorktreeRuntimeEnv {
@@ -816,7 +821,7 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
 
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
-function deriveShortAlphanumericHash(value: string): string {
+export function deriveShortAlphanumericHash(value: string): string {
   const digest = createHash("sha256").update(value).digest();
   let hashValue = 0n;
   for (let index = 0; index < 8; index += 1) {
@@ -907,7 +912,7 @@ const resolveOwnershipPath = promisify(realpath);
 const resolveNativeOwnershipPath = promisify(realpath.native);
 const ownershipIdentityIo = pLimit(2);
 
-async function normalizePathForOwnership(input: string): Promise<string> {
+export async function normalizePathForOwnership(input: string): Promise<string> {
   try {
     return await ownershipIdentityIo(() => resolveOwnershipPath(input));
   } catch {
@@ -951,6 +956,22 @@ export async function isPaseoOwnedWorktreeCwd(
   options?: PaseoWorktreeOwnershipOptions,
 ): Promise<PaseoWorktreeOwnership> {
   const resolvedCwd = await normalizePathForOwnership(cwd);
+  const jjIdentity = await resolveJjRepoIdentity(resolvedCwd);
+  if (
+    jjIdentity &&
+    (await normalizePathForOwnership(jjIdentity.workspaceRoot)) !==
+      (await normalizePathForOwnership(jjIdentity.primaryRoot)) &&
+    (await readJjWorkspaceIncarnation(jjIdentity.workspaceRoot)) &&
+    (await readPaseoWorktreeMetadata(jjIdentity.workspaceRoot))?.version === 2
+  ) {
+    // Sibling jj workspaces carry creation authority; their location alone proves nothing.
+    return {
+      allowed: true,
+      repoRoot: jjIdentity.primaryRoot,
+      worktreeRoot: dirname(jjIdentity.workspaceRoot),
+      worktreePath: jjIdentity.workspaceRoot,
+    };
+  }
 
   // repoRoot is best-effort: git may be unreachable from the worktree (e.g. a
   // previous archive attempt removed the admin dir before the working tree
@@ -1076,7 +1097,7 @@ function parseWorktreeList(output: string): ParsedPaseoWorktreeInfo[] {
   return entries;
 }
 
-async function resolveWorktreeCreatedAtIso(worktreePath: string): Promise<string> {
+export async function resolveWorktreeCreatedAtIso(worktreePath: string): Promise<string> {
   try {
     const stats = await stat(worktreePath);
     const birthtimeMs = stats.birthtimeMs;
@@ -1268,7 +1289,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeDirectoryWithRetries(path: string): Promise<void> {
+export async function removeDirectoryWithRetries(path: string): Promise<void> {
   if (!(await pathExists(path))) {
     return;
   }
