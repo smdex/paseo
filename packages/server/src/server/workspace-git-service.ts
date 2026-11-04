@@ -4071,9 +4071,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       runGitCommand: runRefreshGitCommand,
     });
     if (
-      target.closed ||
-      target.forgePrStatusPollGeneration !== generation ||
-      this.getForgePrStatusPollKey(target) !== pollKey
+      !target.closed &&
+      (target.forgePrStatusPollGeneration !== generation ||
+        this.getForgePrStatusPollKey(target) !== pollKey)
     )
       return;
     // Carry the resolved forge (probe-aware) so the wire projection labels

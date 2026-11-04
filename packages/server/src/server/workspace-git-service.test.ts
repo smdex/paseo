@@ -619,8 +619,7 @@ describe("WorkspaceGitServiceImpl", () => {
 
       retiredRead.resolve(createPullRequestStatusResult());
       const retired = await oldRefresh;
-      // The fork also discards the retired read itself, not only its store publication.
-      expect(retired.forge.pullRequest).toBeNull();
+      expect(retired.forge.pullRequest).toMatchObject({ state: "open", isMerged: false });
       expect(store.get(REPO_CWD)).toBe(latest);
       expect(published).toEqual([latest]);
     } finally {
