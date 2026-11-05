@@ -28,6 +28,8 @@ class TemporaryRepo(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         self.repo = self.dir.name
         git(self.repo, "init", "-q", "--initial-branch=main")
+        git(self.repo, "config", "user.name", "test")
+        git(self.repo, "config", "user.email", "test@invalid")
         commit(self.repo, "base", "shared.txt", "base\n")
         self.base = sync_upstream.output(self.repo, "rev-parse", "HEAD")
 
