@@ -15,6 +15,7 @@ stages: [maintenance]
 sync-upstream:
   stage: maintenance
   image: alpine:3.22
+  tags: [usa-docker-nix]
   resource_group: fork-upstream-sync
   interruptible: false
   timeout: 15m
