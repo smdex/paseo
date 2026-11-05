@@ -47,14 +47,16 @@ def rebase(repo, onto):
 
 
 def require_mirror_behind(repo, original):
-    """Refuse to overwrite a GitLab main that holds commits missing from GitHub."""
+    """Reject GitLab-only work; return the checked OID for the later push lease."""
     git(repo, "fetch", "--no-tags", "mirror", f"+refs/heads/{BRANCH}:refs/mirror-main")
     ahead = git(repo, "rev-list", "--count", f"{original}..refs/mirror-main")
     if ahead.stdout.strip() != "0":
         raise RuntimeError(
             f"GitLab {BRANCH} is {ahead.stdout.strip()} commit(s) ahead of the "
-            f"cloned GitHub {BRANCH}; push those to GitHub first, then rerun."
+            f"cloned GitHub {BRANCH}; reconcile both histories before rerunning "
+            "(see docs/development.md, Upstream sync recovery)."
         )
+    return output(repo, "rev-parse", "refs/mirror-main")
 
 
 def sync(repo, mirror_url, run_id):
@@ -72,7 +74,7 @@ def sync(repo, mirror_url, run_id):
         f"+refs/heads/{BRANCH}:refs/remotes/upstream/{BRANCH}",
     )
     original = output(repo, "rev-parse", "HEAD")
-    require_mirror_behind(repo, original)
+    mirror_original = require_mirror_behind(repo, original)
     rebase(repo, f"upstream/{BRANCH}")
     head = output(repo, "rev-parse", "HEAD")
     if head != original:
@@ -86,13 +88,11 @@ def sync(repo, mirror_url, run_id):
         "origin",
         f"HEAD:refs/heads/{BRANCH}",
     )
-    remote = output(repo, "ls-remote", "mirror", f"refs/heads/{BRANCH}")
-    expected = remote.split()[0] if remote else ""
     git(
         repo,
         "push",
         "--atomic",
-        f"--force-with-lease=refs/heads/{BRANCH}:{expected}",
+        f"--force-with-lease=refs/heads/{BRANCH}:{mirror_original}",
         "mirror",
         f"HEAD:refs/heads/{BRANCH}",
     )

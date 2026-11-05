@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sync_upstream
 
@@ -86,6 +87,90 @@ class RequireMirrorBehindTest(TemporaryRepo):
         git(self.repo, "clone", "-q", "--bare", self.repo, bare)
         git(self.repo, "remote", "add", "mirror", bare)
         sync_upstream.require_mirror_behind(self.repo, "main")  # Must not raise.
+
+
+class SyncPublicationTest(TemporaryRepo):
+    def setUp(self):
+        super().setUp()
+        self.fork = str(Path(self.repo, "fork.git"))
+        self.mirror = str(Path(self.repo, "mirror.git"))
+        self.upstream = str(Path(self.repo, "upstream.git"))
+        git(self.repo, "clone", "--bare", ".", self.upstream)
+        commit(self.repo, "fork change", "fork.txt", "fork\n")
+        self.original = sync_upstream.output(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "clone", "--bare", ".", self.fork)
+        git(self.repo, "clone", "--bare", ".", self.mirror)
+        git(self.repo, "checkout", "--detach", self.base)
+        commit(self.repo, "upstream change", "upstream.txt", "upstream\n")
+        git(self.repo, "push", self.upstream, "HEAD:refs/heads/main")
+        self.addCleanup(patch.stopall)
+        patch.object(sync_upstream, "FORK_URL", self.fork).start()
+        patch.object(sync_upstream, "UPSTREAM_URL", self.upstream).start()
+        patch.dict(os.environ, {
+            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@invalid",
+        }).start()
+
+    def sync(self, run_id):
+        checkout = Path(self.repo, f"checkout-{run_id}")
+        checkout.mkdir()
+        sync_upstream.sync(str(checkout), self.mirror, run_id)
+
+    def tip(self, repo, ref="main"):
+        return sync_upstream.output(repo, "rev-parse", ref)
+
+    def test_sync_publishes_and_preserves_pre_rebase_backup(self):
+        self.sync("success")
+        self.assertNotEqual(self.tip(self.fork), self.original)
+        self.assertEqual(self.tip(self.fork), self.tip(self.mirror))
+        self.assertEqual(
+            self.tip(self.fork, "sync-backup/gitlab-success"), self.original
+        )
+
+    def test_sync_rejects_mirror_commit_arriving_during_rebase(self):
+        real_rebase = sync_upstream.rebase
+        human_tip = None
+
+        def advance_mirror_then_rebase(repo, onto):
+            nonlocal human_tip
+            git(self.repo, "checkout", "--detach", self.original)
+            commit(self.repo, "human change", "human.txt", "keep me\n")
+            human_tip = self.tip(self.repo, "HEAD")
+            git(self.repo, "push", self.mirror, "HEAD:refs/heads/main")
+            real_rebase(repo, onto)
+
+        with patch.object(sync_upstream, "rebase", advance_mirror_then_rebase):
+            with self.assertRaisesRegex(RuntimeError, "stale info"):
+                self.sync("race")
+        self.assertEqual(self.tip(self.mirror), human_tip)
+        self.assertNotEqual(self.tip(self.fork), self.original)
+        self.assertEqual(self.tip(self.fork, "sync-backup/gitlab-race"), self.original)
+        # A retry must not erase the human commit, even after GitHub published.
+        with self.assertRaisesRegex(RuntimeError, "ahead of the cloned"):
+            self.sync("retry-race")
+        self.assertEqual(self.tip(self.mirror), human_tip)
+
+    def test_sync_partial_publication_requires_explicit_recovery(self):
+        hook = Path(self.mirror, "hooks", "pre-receive")
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, "pre-receive hook declined"):
+            self.sync("partial")
+        published = self.tip(self.fork)
+        self.assertNotEqual(published, self.original)
+        self.assertEqual(self.tip(self.mirror), self.original)
+        backup = self.tip(self.fork, "sync-backup/gitlab-partial")
+        self.assertEqual(backup, self.original)
+        hook.unlink()
+        # Removing the failure is insufficient: the old history is not ancestry.
+        with self.assertRaisesRegex(RuntimeError, "ahead of the cloned"):
+            self.sync("retry-partial")
+        self.assertEqual(self.tip(self.fork), published)
+        self.assertEqual(self.tip(self.mirror), backup)
+        # Documented recovery is safe only when GitLab still equals the backup.
+        git(self.fork, "push", f"--force-with-lease=refs/heads/main:{backup}",
+            self.mirror, "main:refs/heads/main")
+        self.sync("recovered")
+        self.assertEqual(self.tip(self.mirror), published)
 
 
 class AskpassTest(unittest.TestCase):
