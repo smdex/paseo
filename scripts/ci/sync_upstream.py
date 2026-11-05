@@ -40,10 +40,9 @@ def rebase(repo, onto):
         return
     paths = conflicted(repo)
     git(repo, "rebase", "--abort", check=False)
+    detail = f"Conflicts in: {', '.join(paths)}" if paths else "no unmerged paths"
     raise RuntimeError(
-        "Rebase aborted; remotes unchanged. Conflicts in: "
-        + (", ".join(paths) if paths else "unknown")
-        + f"\n{result.stderr}"
+        f"Rebase aborted; remotes unchanged. {detail}\n{result.stderr}"
     )
 
 
