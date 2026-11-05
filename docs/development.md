@@ -53,6 +53,56 @@ lint, and format before pushing. Use an explicit `--force-with-lease` against th
 captured origin head so another push cannot be overwritten. Do not publish npm
 packages or restart installed daemons as part of a source update.
 
+### Upstream sync recovery
+
+The scheduled sync publishes GitHub before GitLab. These pushes cannot be atomic
+across remotes. If GitLab rejects the second push, GitHub may already contain the
+rebased history; a retry can reject GitLab's old history as missing from GitHub.
+Do not bypass that guard or roll GitHub back automatically.
+
+Pause schedule 7 and coordinate with other writers before recovery. In a fresh
+clone, retain both tips on GitHub before changing either main. Set `pipeline` to
+the failed publishing pipeline ID (not a later retry):
+
+```bash
+glab api --hostname git.fila.lab --method PUT projects/319/pipeline_schedules/7 -f active=false
+pipeline=REPLACE_WITH_FAILED_PIPELINE_ID
+git clone git@github.com:smdex/paseo.git paseo-sync-recovery
+cd paseo-sync-recovery
+git remote add gitlab git@git.fila.lab:smaximov/paseo.git
+git fetch --no-tags gitlab +refs/heads/main:refs/remotes/gitlab/main
+github_tip=$(git rev-parse refs/remotes/origin/main)
+gitlab_tip=$(git rev-parse refs/remotes/gitlab/main)
+git branch "recovery/github-$pipeline" "$github_tip"
+git branch "recovery/gitlab-$pipeline" "$gitlab_tip"
+git push origin "recovery/github-$pipeline" "recovery/gitlab-$pipeline"
+```
+
+Only when the GitLab tip **equals** the failed run's pre-rebase GitHub backup
+is it safe to mirror without integrating any work. Run this block only after the
+backup push above succeeds:
+
+```bash
+if [ "$gitlab_tip" = "$(git rev-parse "refs/remotes/origin/sync-backup/gitlab-$pipeline")" ]; then
+  git push --atomic --force-with-lease="refs/heads/main:$gitlab_tip" gitlab "$github_tip:refs/heads/main"
+else
+  echo "STOP: GitLab differs from the backup; reconcile its history manually." >&2
+fi
+```
+
+If the comparison or push fails, leave the schedule paused. Inspect the saved
+histories and integrate GitLab-only work onto current GitHub main, resolving and
+verifying it manually before publishing both tips with explicit leases. Do not
+push the old GitLab history wholesale to GitHub or discard it by force-mirroring.
+If no pre-rebase backup exists, also stop for manual reconciliation.
+
+After both remote tips match and verification passes, restore the daily 04:33 UTC
+schedule:
+
+```bash
+glab api --hostname git.fila.lab --method PUT projects/319/pipeline_schedules/7 -f active=true
+```
+
 ## Nix desktop package
 
 The flake exposes `packages.<system>.desktop` on Linux and macOS:
