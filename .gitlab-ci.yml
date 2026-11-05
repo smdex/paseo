@@ -1,0 +1,37 @@
+# Fork maintenance pipeline: rebase fork main on upstream main, then mirror
+# the rebased main to GitLab and the GitHub fork. Runs only for schedules and
+# manual pipelines on the protected default branch; plain pushes never
+# trigger it (prevents loops from the sync's own force-push).
+workflow:
+  rules:
+    - if: >-
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH &&
+        $CI_COMMIT_REF_PROTECTED == "true" &&
+        $CI_PIPELINE_SOURCE =~ /^(schedule|web|api)$/
+    - when: never
+
+stages: [maintenance]
+
+sync-upstream:
+  stage: maintenance
+  image: alpine:3.22
+  resource_group: fork-upstream-sync
+  interruptible: false
+  timeout: 15m
+  environment:
+    name: fork-maintenance
+  variables:
+    GIT_DEPTH: "1"
+    GIT_AUTHOR_NAME: "Sergii Maksymov"
+    GIT_AUTHOR_EMAIL: "s.maximov@proton.me"
+  before_script:
+    - apk add --no-cache python3 git ca-certificates
+    - |
+      if [ -n "${CI_SERVER_TLS_CA_FILE:-}" ]; then
+        cp "$CI_SERVER_TLS_CA_FILE" /usr/local/share/ca-certificates/gitlab.crt
+        update-ca-certificates
+      fi
+    - chmod +x scripts/ci/git_askpass.sh
+  script:
+    - python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+    - python3 scripts/ci/sync_upstream.py
