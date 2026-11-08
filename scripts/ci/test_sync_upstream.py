@@ -173,6 +173,87 @@ class SyncPublicationTest(TemporaryRepo):
         self.assertEqual(self.tip(self.mirror), published)
 
 
+class LinearForkHistoryTest(TemporaryRepo):
+    def test_fork_only_merge_blocks_sync(self):
+        git(self.repo, "checkout", "-q", "-b", "fork")
+        commit(self.repo, "fork change", "fork.txt", "fork\n")
+        git(self.repo, "checkout", "-q", "-b", "side", self.base)
+        commit(self.repo, "side change", "side.txt", "side\n")
+        git(self.repo, "checkout", "-q", "fork")
+        git(self.repo, "merge", "--no-ff", "--no-gpg-sign", "-m", "merge side", "side")
+        tip = sync_upstream.output(self.repo, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(RuntimeError, "merge commit"):
+            sync_upstream.require_linear_fork_history(self.repo, tip, "main")
+
+    def test_linear_fork_history_passes(self):
+        git(self.repo, "checkout", "-q", "-b", "fork")
+        commit(self.repo, "fork change", "fork.txt", "fork\n")
+        tip = sync_upstream.output(self.repo, "rev-parse", "HEAD")
+        sync_upstream.require_linear_fork_history(self.repo, tip, "main")  # Must not raise.
+
+
+class ReleaseTagTest(SyncPublicationTest):
+    def tag_upstream(self, name, ref):
+        git(self.repo, "tag", name, ref)
+        git(self.repo, "push", self.upstream, f"refs/tags/{name}")
+
+    def remote_tag_names(self, repo):
+        return set(
+            sync_upstream.output(
+                repo, "for-each-ref", "--format=%(refname:short)", "refs/tags"
+            ).splitlines()
+        )
+
+    def test_releases_newest_unmapped_stable_only(self):
+        self.tag_upstream("v0.15.2", self.base)
+        self.tag_upstream("v0.15.3", self.tip(self.upstream, "main"))
+        self.tag_upstream("v0.15.3-beta.1", self.tip(self.upstream, "main"))
+        self.sync("release")
+        expected = "v0.15.3-smdex.1"
+        for remote in (self.fork, self.mirror):
+            names = self.remote_tag_names(remote)
+            self.assertIn(expected, names)
+            self.assertEqual(
+                sync_upstream.output(remote, "rev-parse", f"refs/tags/{expected}^{{}}"),
+                self.tip(remote, "main"),
+            )
+            # Plain upstream tags and the older unmapped release stay unmirrored.
+            self.assertNotIn("v0.15.3", names)
+            self.assertNotIn("v0.15.3-beta.1", names)
+            self.assertNotIn("v0.15.2-smdex.1", names)
+
+    def test_release_tag_is_idempotent(self):
+        self.tag_upstream("v0.15.3", self.tip(self.upstream, "main"))
+        self.sync("first")
+        published = self.tip(self.fork, "main")
+        self.sync("second")
+        self.assertEqual(self.tip(self.fork, "main"), published)
+        self.assertEqual(self.tip(self.mirror, "main"), published)
+        self.assertEqual(self.remote_tag_names(self.fork), {"v0.15.3-smdex.1"})
+        self.assertEqual(self.remote_tag_names(self.mirror), {"v0.15.3-smdex.1"})
+
+    def test_replicates_origin_only_tag_without_retagging(self):
+        self.tag_upstream("v0.15.3", self.tip(self.upstream, "main"))
+        # A previous partial run left the release tag on GitHub only, at the
+        # pre-sync tip.
+        git(self.repo, "tag", "v0.15.3-smdex.1", self.original)
+        git(self.repo, "push", self.fork, "refs/tags/v0.15.3-smdex.1")
+        self.sync("repair")
+        self.assertIn("v0.15.3-smdex.1", self.remote_tag_names(self.mirror))
+        self.assertEqual(
+            sync_upstream.output(self.mirror, "rev-parse", "refs/tags/v0.15.3-smdex.1^{}"),
+            self.original,
+        )
+        self.assertNotEqual(self.tip(self.fork, "main"), self.original)
+
+    def test_mirror_only_release_tag_blocks_sync(self):
+        self.tag_upstream("v0.15.3", self.tip(self.upstream, "main"))
+        git(self.repo, "tag", "v0.15.3-smdex.1", self.original)
+        git(self.repo, "push", self.mirror, "refs/tags/v0.15.3-smdex.1")
+        with self.assertRaisesRegex(RuntimeError, "reconcile"):
+            self.sync("mirror-only")
+
+
 class AskpassTest(unittest.TestCase):
     def setUp(self):
         self.script = str(Path(__file__).with_name("git_askpass.sh"))

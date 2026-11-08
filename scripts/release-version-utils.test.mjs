@@ -48,6 +48,36 @@ test("emits beta release info from tags", () => {
   });
 });
 
-test("rejects non-beta prerelease versions", () => {
-  assert.throws(() => parseReleaseVersion("0.1.60-canary.1"), /Expected beta prerelease versions/);
+test("rejects unknown prerelease versions", () => {
+  assert.throws(() => parseReleaseVersion("0.1.60-canary.1"), /Expected prerelease versions/);
+});
+
+test("parses smdex fork release metadata", () => {
+  assert.deepEqual(parseReleaseVersion("0.15.3-smdex.1"), {
+    version: "0.15.3-smdex.1",
+    major: 0,
+    minor: 15,
+    patch: 3,
+    prerelease: "smdex.1",
+    baseVersion: "0.15.3",
+    isPrerelease: true,
+    isBeta: false,
+    betaNumber: null,
+  });
+});
+
+test("emits smdex fork release info from tags", () => {
+  assert.deepEqual(getReleaseInfoFromSourceTag("v0.15.3-smdex.1"), {
+    sourceTag: "v0.15.3-smdex.1",
+    releaseTag: "v0.15.3-smdex.1",
+    version: "0.15.3-smdex.1",
+    baseVersion: "0.15.3",
+    prerelease: "smdex.1",
+    isPrerelease: true,
+    isBeta: false,
+    betaNumber: null,
+    releaseType: "prerelease",
+    releaseChannel: "latest",
+    isSmokeTag: false,
+  });
 });

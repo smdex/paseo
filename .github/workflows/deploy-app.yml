@@ -5,6 +5,8 @@ on:
     tags:
       - "v*"
       - "!v*-beta.*"
+      # Fork releases never deploy getpaseo's Cloudflare Pages site.
+      - "!v*-smdex.*"
       - "app-v*"
       - "!app-v*-beta.*"
   workflow_dispatch:
