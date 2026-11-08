@@ -53,6 +53,24 @@ lint, and format before pushing. Use an explicit `--force-with-lease` against th
 captured origin head so another push cannot be overwritten. Do not publish npm
 packages or restart installed daemons as part of a source update.
 
+### Scheduled fork releases
+
+After a clean sync, the pipeline checks upstream's newest stable `vX.Y.Z` tag.
+If no `vX.Y.Z-smdex.*` tag exists on the GitHub fork yet, it creates an
+annotated `vX.Y.Z-smdex.1` at the synced HEAD and pushes it to GitHub (which
+starts the release workflows) and GitLab. Backfill is deliberate: only the
+newest unmapped stable release is ever tagged; older gaps stay unreleased
+unless you tag them by hand with a higher `-smdex.N`. Plain upstream tags are
+never mirrored — an upstream-numbered tag push would build releases of
+non-fork code.
+
+The tag push reuses the upstream release workflows: desktop packages, the
+Android APK (EAS `production-apk`), the GHCR image, and changelog-driven
+release notes (fork tags have no changelog section, so notes stay empty).
+Fork tags are excluded from `deploy-app.yml`: the Cloudflare Pages deployment
+belongs to upstream. Releases only happen after a clean rebase; while rebase
+conflicts stand, no tag is created.
+
 ### Upstream sync recovery
 
 The scheduled sync publishes GitHub before GitLab. These pushes cannot be atomic
