@@ -13,6 +13,7 @@ import {
   updatePaseoWorktreeJjBookmark,
   writeJjWorkspaceIncarnation,
   writePaseoWorktreeMetadata,
+  setPaseoWorktreeBaseRef,
 } from "../../../utils/worktree-metadata.js";
 import { createScratchJjRepo, isJjAvailable } from "../../../test-utils/jj.js";
 import { createJjWorktree } from "../../../utils/worktree-jj.js";
@@ -33,10 +34,6 @@ import {
 import { afterEach, beforeEach, expect, test } from "vitest";
 
 import { getCheckoutStatus } from "../../../utils/checkout-git.js";
-import {
-  setPaseoWorktreeBaseRef,
-  writePaseoWorktreeMetadata,
-} from "../../../utils/worktree-metadata.js";
 import { createWorkspaceBaseBranchService } from "../workspace-base-branch/service.js";
 import { dispatchGetCheckoutStatus } from "../../../utils/checkout-dispatch.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";

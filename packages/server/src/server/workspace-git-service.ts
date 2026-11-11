@@ -1569,6 +1569,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     for (const cwd of previous?.workspaceKeys ?? []) {
       if (cwd === target.cwd) continue;
       this.scheduleWorkspaceRefresh(cwd, {
+        origin: "observation",
         force: true,
         scope: "structure",
         reason: "repo-binding-change",
@@ -4044,6 +4045,29 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target.latestGitLoadedAtMs = loadedAtMs;
   }
 
+  private async resolveJjForgeContext(
+    cwd: string,
+    checkoutStatus: Awaited<ReturnType<WorkspaceGitServiceDependencies["getCheckoutStatus"]>>,
+  ): Promise<{ resolution: ForgeResolution | null; error: Error | undefined }> {
+    if (!checkoutStatus.isGit || checkoutStatus.vcs !== "jj") {
+      return { resolution: null, error: undefined };
+    }
+    try {
+      const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
+        paseoHome: this.paseoHome,
+      });
+      const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
+      if (resolution) {
+        const resolvedRepository = { ...repository, host: resolution.host };
+        await requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
+        return { resolution: { ...resolution, repository: resolvedRepository }, error: undefined };
+      }
+    } catch (error) {
+      return { resolution: null, error: error instanceof Error ? error : new Error(String(error)) };
+    }
+    return { resolution: null, error: undefined };
+  }
+
   private async refreshGitSnapshot(
     target: WorkspaceGitTarget,
     request: WorkspaceGitRefreshRequest,
@@ -4081,23 +4105,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     await this.bindWorkspaceRepoTarget(target, facts);
     const context: CheckoutContext = { ...baseContext, facts };
     const checkoutStatus = await this.deps.getCheckoutStatus(cwd, context);
-    let jjForgeResolution: ForgeResolution | null = null;
-    let jjForgeError: Error | undefined;
-    if (checkoutStatus.isGit && checkoutStatus.vcs === "jj") {
-      try {
-        const { remoteUrl, ...repository } = await getJjForgeRepositoryContext(cwd, {
-          paseoHome: this.paseoHome,
-        });
-        const resolution = await this.forgeResolver.resolveFromRemoteUrlAsync(remoteUrl);
-        if (resolution) {
-          const resolvedRepository = { ...repository, host: resolution.host };
-          await requireForgeRepositoryContext({ cwd, repository: resolvedRepository });
-          jjForgeResolution = { ...resolution, repository: resolvedRepository };
-        }
-      } catch (error) {
-        jjForgeError = error instanceof Error ? error : new Error(String(error));
-      }
-    }
+    const { resolution: jjForgeResolution, error: jjForgeError } = await this.resolveJjForgeContext(
+      cwd,
+      checkoutStatus,
+    );
     if (!checkoutStatus.isGit) {
       target.jjForgeResolution = jjForgeResolution;
       target.jjForgeError = jjForgeError;

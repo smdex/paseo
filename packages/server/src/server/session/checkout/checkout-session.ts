@@ -58,7 +58,6 @@ import {
   dispatchFetchAndRebase,
   dispatchIntegrateIntoBase,
   dispatchEditChange,
-  dispatchGetCommitFileDiff,
   dispatchDiscardChanges,
   dispatchMergeFromBase,
   dispatchMergeToBase,
