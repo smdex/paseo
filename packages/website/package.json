@@ -1,6 +1,6 @@
 {
   "name": "@getpaseo/website",
-  "version": "0.16.0-smdex.1",
+  "version": "0.16.0-smdex.2",
   "private": true,
   "type": "module",
   "scripts": {
