@@ -396,6 +396,12 @@ function canFinishChange(input: BuildGitActionsInput): boolean {
   return input.hasUncommittedChanges || Boolean(input.isJj && input.hasDescribedJjChange);
 }
 
+function canMergeBranch(input: BuildGitActionsInput): boolean {
+  return (
+    (input.isJj || !input.isOnBaseBranch) && Boolean(input.canMergeLocally) && input.aheadCount > 0
+  );
+}
+
 function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shouldPromoteArchive) {
     return "archive-workspace";
@@ -419,7 +425,7 @@ function getPrimaryActionId(input: BuildGitActionsInput): GitActionId | null {
   if (input.shipDefault === "pr" && canUsePullRequestActionAsShipDefault(input)) {
     return "pr";
   }
-  if ((input.isJj || !input.isOnBaseBranch) && input.canMergeLocally && input.aheadCount > 0) {
+  if (canMergeBranch(input)) {
     return "merge-branch";
   }
   if (!input.isJj && !input.isOnBaseBranch && canMergeFromBase(input)) {

@@ -21,8 +21,6 @@ import {
   SessionInboundMessageSchema,
   WSHelloMessageSchema,
   WorkspaceSetupProgressMessageSchema,
-  AgentTimelineEntryPayloadSchema,
-  CheckoutStatusResponseSchema,
   BranchSuggestionsRequestSchema,
   WorkspaceBaseBranchSetRequestSchema,
   WorkspaceBaseBranchSetResponseSchema,

@@ -6310,7 +6310,7 @@ export class Session {
    * each of them, so earlier-archived sibling records stay restorable.
    */
   private async findWorkspaceIdsForBackingPath(backingPath: string): Promise<string[]> {
-    const workspaces = await this.workspaceRegistry.list();
+    const workspaces = await this.workspaceRegistry.listAll();
     const matchesBacking = createRealpathAwarePathMatcher(backingPath);
     return workspaces
       .filter(

@@ -92,7 +92,7 @@ export type WorkspaceArchiveAuthorityPorts = Pick<
 >;
 
 export function createWorkspaceArchiveAuthorityPorts(
-  registry: Pick<WorkspaceRegistry, "get" | "list" | "update">,
+  registry: Pick<WorkspaceRegistry, "get" | "listAll" | "update">,
 ): WorkspaceArchiveAuthorityPorts {
   return {
     getWorkspace: (workspaceId) => registry.get(workspaceId),
@@ -100,7 +100,7 @@ export function createWorkspaceArchiveAuthorityPorts(
       setWorkspaceRecoveryReference(registry, workspaceId, pin, expected),
     findWorkspaceIdsForBackingPath: async (backingPath) => {
       const matches = createRealpathAwarePathMatcher(backingPath);
-      return (await registry.list())
+      return (await registry.listAll())
         .filter((record) => matches(record.worktreeRoot ?? record.cwd))
         .map((record) => record.workspaceId);
     },
@@ -220,7 +220,13 @@ export async function archiveByScope(
         ))
       : null;
   const path = scope.kind === "worktree" ? scope.targetPath : (record?.worktreeRoot ?? record?.cwd);
-  if (!path) return { archivedAgentIds: [], archivedWorkspaceIds: [], removedDirectory: false };
+  if (!path)
+    return {
+      archivedAgentIds: [],
+      newlyArchivedAgentIds: [],
+      archivedWorkspaceIds: [],
+      removedDirectory: false,
+    };
   const ownership = await isPaseoOwnedWorktreeCwd(path, {
     paseoHome: dependencies.paseoHome,
     worktreesRoot: dependencies.paseoWorktreesBaseRoot,
