@@ -2014,7 +2014,6 @@ export function ChangesSurface({
       pullRequestStatus,
       selectedDiffStat,
       serverId,
-      status,
       vcs,
       toolbarMode,
       workspaceId,
