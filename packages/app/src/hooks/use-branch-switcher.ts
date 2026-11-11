@@ -336,6 +336,7 @@ export function useBranchSwitcher({
     branchError: branchSuggestionsQuery.error,
     branchLoadMessage,
     resumeLookupError,
+    isRetryingResumeLookup: branchSuggestionsQuery.isFetching,
     retryResumeLookup,
     isOpen,
     isSwitching,
