@@ -213,7 +213,6 @@ export async function archiveByScope(
   if (!path)
     return {
       archivedAgentIds: [],
-      newlyArchivedAgentIds: [],
       archivedWorkspaceIds: [],
       removedDirectory: false,
     };

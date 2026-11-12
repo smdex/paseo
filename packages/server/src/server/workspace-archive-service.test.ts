@@ -1432,13 +1432,13 @@ describeIfJj("jj durable archive and recovery", () => {
     });
     deps.getWorkspace = (id) => registry.get(id);
     deps.listActiveWorkspaces = async () =>
-      (await registry.list()).filter((record) => !record.archivedAt);
+      (await registry.listAll()).filter((record) => !record.archivedAt);
     deps.archiveWorkspaceRecord = async (id) => {
       await registry.archive(id, now);
     };
     deps.findWorkspaceIdForCwd = async () => "ws-root";
     deps.findWorkspaceIdsForBackingPath = async (backingPath) =>
-      (await registry.list())
+      (await registry.listAll())
         .filter((record) => record.worktreeRoot === backingPath)
         .map((record) => record.workspaceId);
     deps.setWorkspaceRecoveryPin = async (id, pin) => {
@@ -1677,7 +1677,7 @@ describeIfJj("jj shared archive/recovery lifecycle", () => {
     );
     deps.getWorkspace = (id) => registry.get(id);
     deps.listActiveWorkspaces = async () =>
-      (await registry.list()).filter((record) => !record.archivedAt);
+      (await registry.listAll()).filter((record) => !record.archivedAt);
     deps.archiveWorkspaceRecord = async (id) => {
       await registry.archive(id, now);
     };
