@@ -415,50 +415,56 @@ export function createWorkspaceProvisioningService(deps: {
     const plannedCheckout = await workspaceGitService.getCheckout(normalizedCwd);
     const backingRoot = plannedJjRoot ?? plannedCheckout.worktreeRoot ?? normalizedCwd;
     const backingKey = await workspaceLifecycleKey(backingRoot);
-    return withWorkspaceLifecycle(backingRoot, async () => {
-      if (context?.workspaceId && (await workspaceRegistry.get(context.workspaceId)))
-        throw new Error(`Record already exists: ${context.workspaceId}`);
-      if (
-        (await detectVcsBackend(normalizedCwd)) !== plannedBackend ||
-        (await readJjWorkspaceIncarnation(backingRoot)) !== plannedIncarnation
-      )
-        throw new Error("Directory backend or incarnation changed during provisioning; retry");
-      const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-      await assertCheckoutRoot({ backingKey, cwd: normalizedCwd, checkout });
-      const project = projectId
-        ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
-        : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
-          await findOrCreateProjectForDirectory(normalizedCwd);
-      const baseMetadata =
-        checkout.isGit && checkout.isPaseoOwnedWorktree
-          ? await readPaseoWorktreeMetadata(checkout.worktreeRoot ?? normalizedCwd)
-          : null;
-      const timestamp = new Date().toISOString();
-      const initialWorkspace = createPersistedWorkspaceRecord({
-        workspaceId: context?.workspaceId ?? generateWorkspaceId(),
-        projectId: project.projectId,
-        ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
-        baseBranch: baseMetadata?.baseRef ?? baseMetadata?.baseRefName ?? null,
-        title: title?.trim() || null,
-        metadata: context?.metadata,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        ...(await resolveCreationMetadata(context)),
-      });
-      const workspace = await establishFreshJjAuthority({
-        workspace: initialWorkspace,
-        // Import rollback must distinguish restored records from newly allocated workspaces.
-        siblings: await workspaceRegistry.listAll(),
-        paseoHome: deps.paseoHome,
-        worktreesRoot: deps.worktreesRoot,
-        createdWorktree: false,
-      });
-      await workspaceRegistry.upsert(workspace, {
-        expectsInitialAgent: context?.expectsInitialAgent,
-        requireAbsent: true,
-      });
-      emitWorkspaceCreated(workspace);
-      return workspace;
+    return withWorkspaceLifecycle(backingRoot, () => {
+      // eslint-disable-next-line complexity
+      const create = async () => {
+        if (context?.workspaceId && context.workspaceId === context.callerWorkspaceId)
+          throw new Error("A workspace cannot be its own parent");
+        if (context?.workspaceId && (await workspaceRegistry.get(context.workspaceId)))
+          throw new Error(`Record already exists: ${context.workspaceId}`);
+        if (
+          (await detectVcsBackend(normalizedCwd)) !== plannedBackend ||
+          (await readJjWorkspaceIncarnation(backingRoot)) !== plannedIncarnation
+        )
+          throw new Error("Directory backend or incarnation changed during provisioning; retry");
+        const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+        await assertCheckoutRoot({ backingKey, cwd: normalizedCwd, checkout });
+        const project = projectId
+          ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
+          : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
+            await findOrCreateProjectForDirectory(normalizedCwd);
+        const baseMetadata =
+          checkout.isGit && checkout.isPaseoOwnedWorktree
+            ? await readPaseoWorktreeMetadata(checkout.worktreeRoot ?? normalizedCwd)
+            : null;
+        const timestamp = new Date().toISOString();
+        const initialWorkspace = createPersistedWorkspaceRecord({
+          workspaceId: context?.workspaceId ?? generateWorkspaceId(),
+          projectId: project.projectId,
+          ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
+          baseBranch: baseMetadata?.baseRef ?? baseMetadata?.baseRefName ?? null,
+          title: title?.trim() || null,
+          metadata: context?.metadata,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          ...(await resolveCreationMetadata(context)),
+        });
+        const workspace = await establishFreshJjAuthority({
+          workspace: initialWorkspace,
+          // Import rollback must distinguish restored records from newly allocated workspaces.
+          siblings: await workspaceRegistry.listAll(),
+          paseoHome: deps.paseoHome,
+          worktreesRoot: deps.worktreesRoot,
+          createdWorktree: false,
+        });
+        await workspaceRegistry.upsert(workspace, {
+          expectsInitialAgent: context?.expectsInitialAgent,
+          requireAbsent: true,
+        });
+        emitWorkspaceCreated(workspace);
+        return workspace;
+      };
+      return deps.withCheckoutLock ? deps.withCheckoutLock(backingRoot, create) : create();
     });
   }
 

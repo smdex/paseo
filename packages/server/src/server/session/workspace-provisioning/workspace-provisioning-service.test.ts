@@ -586,6 +586,7 @@ test("reopening an archived workspace refreshes placement without renaming it", 
 
 function realGitProvisioning(): WorkspaceProvisioningService {
   return createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
     logger,
@@ -654,7 +655,7 @@ test.each(["active", "archived"] as const)(
     });
     expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
     expect((await projectRegistry.get(created.projectId))?.kind).toBe("non_git");
-    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(await workspaceRegistry.listAll()).toHaveLength(1);
     expect(readFileSync(file, "utf8")).toBe("preserved subproject work\n");
     expect(existsSync(path.join(tmpDir, "retained-git", "HEAD"))).toBe(true);
     expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
@@ -713,7 +714,7 @@ test.each(["active", "archived"] as const)(
     });
     expect(await workspaceRegistry.get(created.workspaceId)).toEqual(reopened);
     expect((await projectRegistry.get(created.projectId))?.rootPath).toBe(cwd);
-    expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect(await workspaceRegistry.listAll()).toHaveLength(1);
     expect(readFileSync(file, "utf8")).toBe("preserved nested work\n");
     expect((await service.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
       created.workspaceId,
@@ -1301,9 +1302,14 @@ test("a failed workspace unarchive write keeps agents archived and permits retry
 
   class FailingWorkspaceRegistry extends FileBackedWorkspaceRegistry {
     failWrites = true;
-    override async upsert(record: PersistedWorkspaceRecord): Promise<void> {
-      if (this.failWrites && !record.archivedAt) throw new Error("Workspace write failed");
-      await super.upsert(record);
+    override async update(
+      id: string,
+      updater: (
+        record: PersistedWorkspaceRecord,
+      ) => PersistedWorkspaceRecord | Promise<PersistedWorkspaceRecord>,
+    ): Promise<PersistedWorkspaceRecord | null> {
+      if (this.failWrites) throw new Error("Workspace write failed");
+      return super.update(id, updater);
     }
   }
   const registry = new FailingWorkspaceRegistry(
@@ -1335,6 +1341,7 @@ test("a failed workspace unarchive write keeps agents archived and permits retry
 });
 function realJjProvisioning(worktreesRoot: string): WorkspaceProvisioningService {
   return createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
     logger,
@@ -1437,7 +1444,7 @@ for (const savedAuthority of [true, false]) {
         );
         expect(await workspaceRegistry.get("old")).toEqual(saved);
         expect(await projectRegistry.get(project.projectId)).toEqual(project);
-        expect(await workspaceRegistry.list()).toEqual([saved]);
+        expect(await workspaceRegistry.listAll()).toEqual([saved]);
         expect(readFileSync(path.join(created.worktreePath, "sub/file.txt"), "utf8")).toBe(
           "replacement subproject\n",
         );
@@ -1531,7 +1538,7 @@ test.skipIf(!isJjAvailable()).each([
         recoveryBookmark: null,
       });
       expect(reopened.jjWorkspaceId).toBeUndefined();
-      expect(await workspaceRegistry.list()).toEqual([reopened]);
+      expect(await workspaceRegistry.listAll()).toEqual([reopened]);
       expect(await readJjWorkspaceIncarnation(fixture.repoDir)).toBeNull();
       expect(readFileSync(path.join(fixture.repoDir, "sub/file.txt"), "utf8")).toBe(
         "ordinary jj work\n",
@@ -1562,7 +1569,7 @@ test.skipIf(!isJjAvailable()).each([
         agentStorage: { listByWorkspace: async () => [] },
         findWorkspaceIdForCwd: async () => reopened.workspaceId,
         listActiveWorkspaces: async () =>
-          (await workspaceRegistry.list()).filter((record) => !record.archivedAt),
+          (await workspaceRegistry.listAll()).filter((record) => !record.archivedAt),
         archiveWorkspaceRecord: async (id) => {
           await workspaceRegistry.archive(id, ARCHIVED_AT);
         },
@@ -1668,6 +1675,7 @@ async function jjOpenRaceFixture(subproject: boolean, legacy = false): Promise<J
     getSnapshot: async (cwd) => createNoGitWorkspaceRuntimeSnapshot(cwd),
   });
   const service = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
     workspaceGitService: git,
@@ -1714,13 +1722,14 @@ async function jjOpenRaceFixture(subproject: boolean, legacy = false): Promise<J
     agentStorage: { listByWorkspace: async () => [] },
     getWorkspace: (id) => workspaceRegistry.get(id),
     findWorkspaceIdForCwd: async (cwd) =>
-      (await workspaceRegistry.list()).find((r) => r.cwd === cwd && !r.archivedAt)?.workspaceId ??
-      null,
+      (await workspaceRegistry.listAll()).find((r) => r.cwd === cwd && !r.archivedAt)
+        ?.workspaceId ?? null,
     findWorkspaceIdsForBackingPath: async (root) =>
-      (await workspaceRegistry.list())
+      (await workspaceRegistry.listAll())
         .filter((r) => r.worktreeRoot === root)
         .map((r) => r.workspaceId),
-    listActiveWorkspaces: async () => (await workspaceRegistry.list()).filter((r) => !r.archivedAt),
+    listActiveWorkspaces: async () =>
+      (await workspaceRegistry.listAll()).filter((r) => !r.archivedAt),
     archiveWorkspaceRecord: async (id) => {
       await workspaceRegistry.archive(id, ARCHIVED_AT);
     },
